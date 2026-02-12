@@ -1,0 +1,37 @@
+services:
+  mass:
+    build:
+      context: .
+      args:
+        GPU: off
+    image: chineseroomsolutions/mass:cpu
+    ports:
+      - "3455:3455"
+    volumes:
+      - mass-data:/root/.config/mass
+    restart: unless-stopped
+
+  mass-gpu:
+    build:
+      context: .
+      args:
+        GPU: on
+        CUDA_ARCHITECTURES: ${CUDA_ARCHITECTURES:-86-89-90-120}
+    image: chineseroomsolutions/mass:gpu
+    ports:
+      - "3455:3455"
+    volumes:
+      - mass-data:/root/.config/mass
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - gpu
+
+volumes:
+  mass-data:

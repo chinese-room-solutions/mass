@@ -1,0 +1,195 @@
+@import "../../mass-module/uikit/theme.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Warm off-white text overrides (MASS-specific) ───────────────────────── */
+html.sl-theme-dark .text-white,
+html:not(.sl-theme-light) .text-white { color: #faf8f6 !important; }
+.sl-theme-dark sl-button[variant="primary"]::part(base) {
+  color: #faf8f6;
+}
+
+/* ── Structural elements ─────────────────────────────────────────────────── */
+header                    { background: var(--mass-bg-panel) !important; border-color: var(--mass-border) !important; }
+#mass-left-panel           { background: var(--mass-bg-panel) !important; border-color: var(--mass-border) !important; }
+#module-content-wrapper   { background: var(--mass-bg-base)  !important; }
+
+/* borders inside the left panel */
+#mass-left-panel .border-b,
+#mass-left-panel .border-t { border-color: var(--mass-border) !important; }
+
+/* ── Badges ──────────────────────────────────────────────────────────────── */
+.mass-badge     { background: var(--mass-badge-bg)     !important; color: var(--mass-badge-text)     !important; }
+.mass-badge-alt { background: var(--mass-badge-alt-bg) !important; color: var(--mass-badge-alt-text) !important; }
+
+/* Type-specific badge colors */
+html.sl-theme-light .mass-badge-chat      { background: #dbeafe !important; color: #1e40af !important; }
+html.sl-theme-light .mass-badge-embedding { background: #ede9fe !important; color: #6d28d9 !important; }
+html.sl-theme-light .mass-badge-mmproj    { background: #fef3c7 !important; color: #92400e !important; }
+
+html.sl-theme-dark .mass-badge-chat,
+html:not(.sl-theme-light) .mass-badge-chat      { background: #1e3a5f !important; color: #93c5fd !important; }
+html.sl-theme-dark .mass-badge-embedding,
+html:not(.sl-theme-light) .mass-badge-embedding { background: #2e1065 !important; color: #b0a2f0 !important; }
+html.sl-theme-dark .mass-badge-mmproj,
+html:not(.sl-theme-light) .mass-badge-mmproj    { background: #3b2f1e !important; color: #e2c088 !important; }
+
+/* ── Agent cards (sl-details) ────────────────────────────────────────────── */
+sl-details.agent-card::part(base)    { background: var(--mass-bg-panel); border-color: var(--mass-border); }
+sl-details.agent-card::part(header)  { background: var(--mass-bg-panel); color: var(--mass-text); }
+sl-details.agent-card::part(content) { background: var(--mass-bg-base); }
+
+/* ── Module rows ─────────────────────────────────────────────────────────── */
+.mass-row-hover:hover { background: var(--mass-bg-hover)  !important; }
+.mass-row-active      { background: var(--mass-bg-active) !important; }
+.mass-row-active:hover{ background: var(--mass-bg-active) !important; }
+
+/* ── Sidebar action icons ────────────────────────────────────────────────── */
+.mass-sidebar-icon    { font-size: 0.85rem; opacity: 0.5; }
+.mass-sidebar-icon:hover { opacity: 0.8; }
+/* Secondary sidebar icons: hidden until row hover */
+.mass-sidebar-secondary { display: none; }
+.module-row:hover .mass-sidebar-secondary { display: contents; }
+
+/* ── Tailwind neutral → theme variable mapping (light mode) ──────────────── */
+html.sl-theme-light .bg-neutral-950  { background-color: var(--mass-bg-base)  !important; }
+html.sl-theme-light .bg-neutral-900  { background-color: var(--mass-bg-panel) !important; }
+html.sl-theme-light .bg-neutral-800  { background-color: var(--mass-bg-hover) !important; }
+html.sl-theme-light .bg-neutral-800\/60 { background-color: var(--mass-bg-panel) !important; }
+html.sl-theme-light .bg-neutral-700  { background-color: var(--mass-avatar-bg) !important; color: #fff !important; }
+html.sl-theme-light .bg-neutral-700\/60 { background-color: var(--mass-bg-active) !important; }
+html.sl-theme-light .border-neutral-800,
+html.sl-theme-light .border-neutral-700,
+html.sl-theme-light .border-neutral-700\/50 { border-color: var(--mass-border) !important; }
+html.sl-theme-light .text-white,
+html.sl-theme-light .text-neutral-200,
+html.sl-theme-light .text-neutral-300 { color: var(--mass-text) !important; }
+html.sl-theme-light .text-neutral-400 { color: var(--mass-text-muted) !important; }
+html.sl-theme-light .text-neutral-500 { color: var(--mass-text-faint) !important; }
+
+/* Small selects: shrink dropdown options to match trigger height */
+sl-select[size="small"] sl-option::part(base) { padding: 0.35rem 0.5rem; font-size: var(--sl-font-size-small); }
+sl-select[size="small"] sl-option::part(checked-icon) { display: none; }
+
+
+/* Shoelace inputs/selects: match creamy white in light mode */
+html.sl-theme-light sl-input::part(base),
+html.sl-theme-light sl-select::part(combobox) { background-color: var(--sl-color-neutral-0) !important; }
+
+/* Shoelace form labels: match heading color in light mode */
+html.sl-theme-light sl-input::part(form-control-label),
+html.sl-theme-light sl-select::part(form-control-label) { color: var(--mass-text) !important; }
+
+html.sl-theme-light .hover\:bg-neutral-700\/40:hover { background-color: var(--mass-bg-hover) !important; }
+
+/* Tab nav: inactive tabs need to be visibly muted in light mode */
+html.sl-theme-light [data-tab-name].text-neutral-400 { color: #6b7280 !important; }
+html.sl-theme-light [data-tab-name].text-neutral-400:hover { color: var(--mass-text) !important; }
+
+/* Colored badges: pastel bg + saturated text for light mode */
+html.sl-theme-light .bg-blue-900\/40,
+html.sl-theme-light .bg-blue-900\/60   { background-color: #dbeafe !important; }
+html.sl-theme-light .text-blue-300     { color: #1d4ed8 !important; }
+html.sl-theme-light .bg-purple-900\/60 { background-color: #ede9fe !important; }
+html.sl-theme-light .text-purple-300   { color: #8b4fd0 !important; }
+html.sl-theme-light .bg-teal-900\/60   { background-color: #ccfbf1 !important; }
+html.sl-theme-light .text-teal-300     { color: #0f766e !important; }
+html.sl-theme-light .bg-orange-900\/60 { background-color: #ffedd5 !important; }
+html.sl-theme-light .text-orange-300   { color: #c2410c !important; }
+html.sl-theme-light .bg-green-900\/60  { background-color: #dcfce7 !important; }
+html.sl-theme-light .text-green-300    { color: #15803d !important; }
+html.sl-theme-light .bg-yellow-900\/60 { background-color: #fef9c3 !important; }
+html.sl-theme-light .text-yellow-300   { color: #a16207 !important; }
+
+/* Re-pin dark-forced dialogs (slotted content inherits page overrides) */
+sl-dialog.sl-theme-dark .bg-neutral-900  { background-color: var(--mass-bg-panel) !important; }
+sl-dialog.sl-theme-dark .bg-neutral-800  { background-color: var(--mass-bg-hover) !important; }
+sl-dialog.sl-theme-dark .text-neutral-300 { color: #d4d4d4 !important; }
+sl-dialog.sl-theme-dark .text-neutral-400 { color: #a3a3a3 !important; }
+sl-dialog.sl-theme-dark .text-neutral-500 { color: #737373 !important; }
+sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
+
+/* status dot border adapts to panel background */
+html.sl-theme-light [id^="sidebar-dot-"] { border-color: var(--mass-bg-panel) !important; }
+
+/* ── Brand color overrides for Tailwind utilities ──────────────────────── */
+/* Active tab underline */
+.border-blue-500 { border-color: var(--mass-blue) !important; }
+/* Status dots: running = green, on-demand idle = blue */
+.bg-green-400 { background-color: var(--mass-green) !important; }
+.bg-blue-400  { background-color: var(--mass-blue) !important; }
+.bg-red-400   { background-color: var(--mass-red) !important; }
+
+
+/* Center Modules-tab dialogs relative to the right content panel (not full viewport).
+   --mass-sidebar-w is set by JS from the sidebar's current width. */
+#mass-add-module-dialog::part(panel),
+#mass-confirm-uninstall-dialog::part(panel),
+#mass-file-browser::part(panel),
+#mass-hf-dialog::part(panel),
+#mass-model-select-dialog::part(panel) {
+  margin-left: var(--mass-sidebar-w, 0px);
+}
+
+/* File browser dialogs: disable outer body scroll, let inner entries div scroll */
+#mass-file-browser::part(body),
+#settings-file-browser::part(body) { overflow: hidden; padding-bottom: 0; }
+
+/* File browser dialogs: compact, centered footer */
+#mass-file-browser::part(footer),
+#settings-file-browser::part(footer) {
+  padding: 0.6rem var(--sl-spacing-large) 0.6rem 0;
+}
+
+/* File browser: selected file highlight */
+.mass-fb-selected { background: var(--mass-fb-selected) !important; }
+
+/* ── Resize handles ─────────────────────────────────────────────────────── */
+.mass-resize-handle {
+  width: 8px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+}
+.mass-resize-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--mass-border);
+  transition: background 0.15s;
+}
+.mass-resize-handle:hover .mass-resize-bar {
+  background: var(--mass-blue);
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--mass-border) transparent;
+}
+*:hover {
+  scrollbar-color: var(--mass-text-muted) transparent;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--mass-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--mass-text-muted);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

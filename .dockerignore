@@ -1,0 +1,14 @@
+# llama-go is cloned inside Docker — not part of the build context.
+
+# Exclude local dev artifacts
+bin/
+models/
+.claude/
+.git/
+
+# Exclude env files with secrets
+local.env
+.env
+
+# Exclude dev config (prod.yml is copied explicitly)
+config/dev.yml

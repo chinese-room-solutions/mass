@@ -1,0 +1,27 @@
+package templates
+
+templ LoginPage(errMsg string) {
+	<div class="flex items-center justify-center min-h-screen">
+		<div class="w-full max-w-sm p-6 bg-neutral-900 rounded-lg border border-neutral-800">
+			<h1 class="text-xl font-bold mb-4">MASS - Login</h1>
+			if errMsg != "" {
+				<sl-alert variant="danger" open class="mb-4">
+					{ errMsg }
+				</sl-alert>
+			}
+			<form method="POST" action="/login">
+				<sl-input
+					name="token"
+					type="password"
+					label="Auth Token"
+					placeholder="Enter your auth token"
+					class="mb-4"
+					autofocus
+				></sl-input>
+				<sl-button type="submit" variant="primary" class="w-full">
+					Login
+				</sl-button>
+			</form>
+		</div>
+	</div>
+}

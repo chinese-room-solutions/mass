@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package mass.v1.agent;
+
+option go_package = "github.com/chinese-room-solutions/mass/rpc/agent";
+
+import "rpc/service.proto";
+
+// AgentHub is hosted by MASS. Agents connect as clients via a bidirectional
+// stream. MASS pushes jobs, agents push results back. No open ports needed
+// on the agent side.
+service AgentHub {
+    // Connect establishes a persistent bidirectional stream between an agent
+    // and MASS. The agent must send a Register message first, then listens
+    // for jobs and sends results.
+    rpc Connect(stream AgentMessage) returns (stream HubMessage) {}
+}
+
+// --- Agent → MASS ---
+
+message AgentMessage {
+    oneof msg {
+        AgentRegister register = 1;
+        AgentJobResult job_result = 2;
+        AgentHeartbeat heartbeat = 3;
+    }
+}
+
+message AgentRegister {
+    string id = 1;
+    string name = 2;
+    repeated AgentDevice devices = 3;
+}
+
+message AgentHeartbeat {
+    repeated AgentDeviceStats device_stats = 1;
+}
+
+message AgentDeviceStats {
+    string device_id = 1;
+    int32 used_memory_mb = 2;
+    int32 total_memory_mb = 3;
+    double utilization_pct = 4;  // 0-100, compute utilization
+}
+
+message AgentJobResult {
+    string job_id = 1;
+    oneof result {
+        AgentLoadModelResult load_model = 2;
+        AgentUnloadResult unload_model = 3;
+        mass.v1.ChatCompletionResponse chat_completion = 4;
+        mass.v1.EmbeddingResponse embedding = 5;
+        mass.v1.BatchEmbeddingResponse batch_embedding = 6;
+        mass.v1.TokenizeResponse tokenize = 7;
+        AgentBenchmarkResponse benchmark = 8;
+        AgentJobError error = 9;
+    }
+}
+
+message AgentLoadModelResult {
+    string fingerprint = 1;
+}
+
+message AgentUnloadResult {}
+
+message AgentJobError {
+    string message = 1;
+}
+
+// --- MASS → Agent ---
+
+message HubMessage {
+    string job_id = 1;
+    oneof msg {
+        HubLoadChatModel load_chat_model = 2;
+        HubLoadEmbeddingModel load_embedding_model = 3;
+        HubUnloadModel unload_model = 4;
+        HubChatCompletion chat_completion = 5;
+        HubEmbedding embedding = 6;
+        HubBatchEmbedding batch_embedding = 7;
+        HubTokenize tokenize = 8;
+        HubBenchmark benchmark = 9;
+    }
+}
+
+message HubLoadChatModel {
+    mass.v1.LlamaChatConfig config = 1;
+    string mass_url = 2;       // base URL for fetching model files from MASS
+}
+
+message HubLoadEmbeddingModel {
+    mass.v1.LlamaEmbeddingConfig config = 1;
+    string mass_url = 2;
+}
+
+message HubUnloadModel {
+    string fingerprint = 1;
+}
+
+message HubChatCompletion {
+    string fingerprint = 1;
+    mass.v1.ChatCompletionRequest request = 2;
+}
+
+message HubEmbedding {
+    string fingerprint = 1;
+    mass.v1.EmbeddingRequest request = 2;
+}
+
+message HubBatchEmbedding {
+    string fingerprint = 1;
+    mass.v1.BatchEmbeddingRequest request = 2;
+}
+
+message HubTokenize {
+    string fingerprint = 1;
+    mass.v1.TokenizeRequest request = 2;
+}
+
+message HubBenchmark {
+    string device_id = 1;      // empty = benchmark all devices
+}
+
+// --- Shared ---
+
+message AgentDevice {
+    string id = 1;             // canonical ID, e.g. "cpu:0", "gpu:0"
+    string name = 2;           // human-readable, e.g. "NVIDIA RTX 4090"
+    string type = 3;           // "CPU" or "GPU"
+    int32 total_memory_mb = 4; // total RAM/VRAM in MB
+}
+
+message AgentBenchmarkResponse {
+    repeated AgentBenchmarkResult results = 1;
+}
+
+message AgentBenchmarkResult {
+    string device_id = 1;
+    string device_name = 2;
+    double memory_gbs = 3;
+    double compute_gflops = 5;
+}

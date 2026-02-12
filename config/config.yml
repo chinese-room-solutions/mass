@@ -1,0 +1,5 @@
+listen_addr: ""
+theme: dark
+logger:
+  level: info
+  console_writer: true

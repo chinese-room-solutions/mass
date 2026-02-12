@@ -1,0 +1,115 @@
+version: "2"
+
+formatters:
+  # Enable specific formatter.
+  enable:
+    # - gci # Interesting
+    # - gofumpt # Interesting
+    - gofmt
+    - goimports
+
+linters:
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    # - bodyclose # Interesting
+    - canonicalheader
+    # - containedctx # Interesting
+    # - contextcheck # Interesting
+    - copyloopvar
+    # - cyclop
+    - decorder
+    # - depguard
+    # - dogsled
+    # - dupl
+    # - dupword
+    - durationcheck
+    # - err113 # Interesting
+    - errcheck
+    - errchkjson
+    # - errname # Interesting
+    # - errorlint # Interesting
+    # - execinquery  # Deprecated
+    # - exhaustive # Interesting
+    # - exhaustruct
+    # - exportloopref # Deprecated
+    # - fatcontext # Interesting
+    # - forbidigo
+    # - forcetypeassert
+    # - funlen
+    - ginkgolinter
+    - gocheckcompilerdirectives
+    # - gochecknoglobals
+    # - gochecknoinits
+    - gochecksumtype
+    # - gocognit
+    # - goconst # Interesting
+    # - gocritic
+    # - gocyclo
+    # - godot
+    # - godox
+    - goheader
+    # - gomoddirectives # Interesting
+    - gomodguard
+    - goprintffuncname
+    # - gosec # Interesting
+    - gosmopolitan
+    - govet
+    - grouper
+    - iface
+    - importas
+    # - inamedparam # Interesting
+    - ineffassign
+    # - interfacebloat
+    # - intrange # Interesting
+    # - ireturn
+    # - lll # Interesting
+    - loggercheck
+    # - maintidx
+    # - makezero
+    - mirror
+    - misspell # Interesting
+    # - mnd # Interesting
+    # - musttag # Interesting
+    # - nakedret # Interesting
+    # - nestif
+    # - nilerr # Interesting
+    # - nilnil # Interesting
+    # - nlreturn
+    # - noctx
+    - nolintlint
+    # - nonamedreturns
+    - nosprintfhostport
+    # - paralleltest # Interesting
+    # - perfsprint # Interesting
+    # - prealloc # Interesting
+    # - predeclared # Interesting
+    # - promlinter # Interesting
+    # - protogetter # Interesting
+    - reassign
+    # - recvcheck # Interesting
+    # - revive # Interesting
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    # - stylecheck # Interesting
+    # - tagalign # Interesting
+    # - tagliatelle
+    - testableexamples
+    # - testifylint # Interesting
+    # - testpackage # Interesting
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    # - varnamelen
+    - wastedassign
+    - whitespace
+    # - wrapcheck # Interesting
+    # - wsl
+    - zerologlint

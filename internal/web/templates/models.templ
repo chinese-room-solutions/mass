@@ -1,0 +1,442 @@
+package templates
+
+import "fmt"
+import "net/url"
+import "html"
+
+// modelsTab renders the Models tab content area.
+// Layout: filter bar on top, grouped model list in middle, "Install New Model" anchored at bottom.
+// When a variant is selected, the list slides left and a properties panel appears on the right.
+templ modelsTab() {
+	<div id="models-tab" style="height:100%; display:flex; justify-content:center">
+		<!-- Left column: filter + list + install button -->
+		<div
+			id="models-left-col"
+			style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0"
+		>
+			<!-- Header -->
+			<div style="padding:0.75rem 1.5rem 0">
+				<div class="flex items-center justify-center gap-2 text-sm font-semibold text-white">
+					<sl-icon name="box-seam"></sl-icon>
+					<span>Models</span>
+				</div>
+				<div class="mt-2">
+				<sl-input
+					id="models-filter-input"
+					size="small"
+					clearable
+	
+					placeholder="Filter models..."
+					data-bind="modelsFilter"
+					data-on:sl-clear="$modelsFilter=''; @get('/api/models')"
+				>
+					<sl-icon slot="prefix" name="search"></sl-icon>
+				</sl-input>
+				<button
+					id="models-filter-trigger"
+					style="display:none"
+					data-on:click="@get('/api/models?filter='+encodeURIComponent($modelsFilter))"
+				></button>
+				<button
+					id="models-deselect-trigger"
+					style="display:none"
+					data-on:click="$selectedModelPath=''"
+				></button>
+				</div>
+			</div>
+
+			<!-- Model list (scrollable) -->
+			<div id="models-list-scroll" style="flex:1; overflow-y:auto; padding:0.75rem 1.5rem">
+				<div id="models-content" data-init="@get('/api/models')">
+					<div class="text-center py-8">
+						<sl-spinner style="font-size:1.5rem;--track-width:3px"></sl-spinner>
+					</div>
+				</div>
+			</div>
+
+			<!-- Anchored bottom bar -->
+			<div style="padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; display:flex; justify-content:center; gap:0.5rem">
+				<sl-button
+					variant="default"
+					size="small"
+					style="min-width:12rem"
+					data-on:click="$modelsInstallOpen=true; var d=document.getElementById('models-install-dialog'); if(d)d.show()"
+				>
+					<sl-icon slot="prefix" name="plus-lg"></sl-icon>
+					Install New Model
+				</sl-button>
+				<sl-button
+					variant="default"
+					size="small"
+					style="min-width:10rem"
+					onclick="window.__massImportLocalModel()"
+				>
+					<sl-icon slot="prefix" name="folder2-open"></sl-icon>
+					Browse Local
+				</sl-button>
+			</div>
+		</div>
+
+		<!-- Right column: properties panel -->
+		<div
+			id="models-props-panel"
+			style="overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0"
+			data-attr:style="$selectedModelPath !== '' ? 'overflow-y:auto;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0'"
+		>
+			<div id="models-props-spacer"></div>
+			<div id="models-props-content"></div>
+		</div>
+
+		<!-- Install dialog (HF search) -->
+		<sl-dialog
+			label="Install New Model"
+			id="models-install-dialog"
+			style="--width:48rem"
+			data-on:sl-after-hide="$modelsInstallOpen=false"
+		>
+			<div class="flex gap-2 mb-4">
+				<sl-input
+					class="flex-1"
+					size="small"
+					clearable
+	
+					placeholder="Search Hugging Face models..."
+					data-bind="modelsHfQuery"
+					data-on:keydown="if(event.key==='Enter'){window.__massHfLoading();@post('/api/models/search')}"
+					data-on:sl-clear="$modelsHfQuery='';document.getElementById('models-hf-results').innerHTML=''"
+				></sl-input>
+				<sl-button
+					variant="primary"
+					size="small"
+					data-on:click="window.__massHfLoading();@post('/api/models/search')"
+				>
+					<sl-icon slot="prefix" name="search"></sl-icon>
+					Search
+				</sl-button>
+			</div>
+			<div id="models-hf-results" style="max-height:35rem;overflow-y:auto"></div>
+		</sl-dialog>
+
+		<!-- Confirm Delete Model Dialog -->
+		<sl-dialog
+			label="Delete Model"
+			data-attr:open="$confirmDeleteModelPath !== ''"
+			data-on:sl-hide="$confirmDeleteModelPath = ''; $confirmDeleteModelName = ''"
+		>
+			<p class="text-sm text-neutral-300">
+				Are you sure you want to delete <strong data-text="$confirmDeleteModelName"></strong>? This cannot be undone.
+			</p>
+			<div slot="footer" class="flex gap-2 justify-end">
+				<sl-button size="small" data-on:click="$confirmDeleteModelPath = ''; $confirmDeleteModelName = ''">Cancel</sl-button>
+				<sl-button
+					variant="danger"
+					size="small"
+					data-on:click="$selectedModelPath=''; @delete('/api/models?path='+encodeURIComponent($confirmDeleteModelPath)); $confirmDeleteModelPath=''; $confirmDeleteModelName=''"
+				>Delete</sl-button>
+			</div>
+		</sl-dialog>
+
+		@templ.Raw(modelsTabStyles)
+		@templ.Raw(modelsTabScript)
+	</div>
+}
+
+// ModelsLocalList renders the local models section (SSE-patched into #models-content).
+templ ModelsLocalList(groups []ModelGroupView) {
+	<div id="models-content">
+		if len(groups) == 0 {
+			<p class="text-neutral-500 text-sm py-4">No models found. Click "Install New Model" to download from Hugging Face.</p>
+		} else {
+			<div class="space-y-1">
+				for _, g := range groups {
+					@modelGroupRow(g)
+				}
+			</div>
+		}
+	</div>
+}
+
+// modelGroupRow renders a single expandable model group.
+templ modelGroupRow(g ModelGroupView) {
+	<details class="model-group bg-neutral-800/60 rounded-lg border border-neutral-700/50 overflow-hidden">
+		<summary class="flex items-center gap-3 w-full px-4 py-3 cursor-pointer select-none hover:bg-neutral-700/40 list-none [&::-webkit-details-marker]:hidden">
+			<sl-icon name="chevron-right" class="text-neutral-400" style="font-size:0.75rem;transition:transform 0.2s"></sl-icon>
+			<span class="text-sm font-medium text-white">{ g.BaseName }</span>
+			<span class={ badgeClass(g.ModelType) + " font-mono text-xs font-bold rounded px-1.5 py-0.5" }>
+				{ g.ModelType }
+			</span>
+			if g.HasVision {
+				<sl-tooltip content="Vision capable">
+					<sl-icon name="eye" style="font-size:0.85rem;color:var(--sl-color-primary-400)"></sl-icon>
+				</sl-tooltip>
+			}
+			if g.HasThinking {
+				<sl-tooltip content="Thinking capable">
+					<sl-icon name="lightbulb" style="font-size:0.85rem;color:var(--sl-color-warning-400)"></sl-icon>
+				</sl-tooltip>
+			}
+			<span class="text-xs text-neutral-400 ml-auto">
+				{ fmt.Sprintf("%d variant%s", len(g.Variants), pluralS(len(g.Variants))) }
+			</span>
+		</summary>
+		<div class="space-y-px border-t border-neutral-700/50 px-2 py-1 overflow-y-auto" style="max-height:50vh">
+			for _, v := range g.Variants {
+				@modelVariantRow(v)
+			}
+		</div>
+	</details>
+}
+
+// modelVariantRow renders a single model file within a group.
+// Clicking the row (except the delete button) selects it and opens the properties panel.
+templ modelVariantRow(v ModelVariantView) {
+	<div
+		class="flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer"
+		data-model-path={ v.Path }
+		data-on:click={ fmt.Sprintf("$selectedModelPath='%s'; @get('/api/models/info?path=%s')",
+			jsEscape(v.Path), url.QueryEscape(v.Path)) }
+		data-attr:class={ fmt.Sprintf("$selectedModelPath==='%s' ? 'flex items-center gap-2 px-3 py-2 bg-blue-900/40 rounded cursor-pointer border border-blue-500/30' : 'flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer'",
+			jsEscape(v.Path)) }
+	>
+		if v.IsMmproj {
+			<span
+				class="mass-badge font-mono text-xs rounded px-1.5 py-0.5"
+				style="min-width:4.5rem;text-align:center"
+			>
+				Mmproj
+			</span>
+		} else if v.Quantization != "" {
+			<span
+				class="mass-badge-alt font-mono text-xs font-bold rounded px-1.5 py-0.5"
+				style="min-width:4.5rem;text-align:center"
+			>
+				{ v.Quantization }
+			</span>
+		} else {
+			<span style="min-width:4.5rem;flex-shrink:0"></span>
+		}
+		<span class="text-xs text-neutral-200 truncate flex-1" title={ v.DisplayName }>
+			{ v.DisplayName }
+		</span>
+		<span class="text-xs text-neutral-400 flex-shrink-0" style="width:5rem;text-align:right">
+			{ v.SizeFormatted }
+		</span>
+		<div onclick="event.stopPropagation()">
+			<sl-tooltip content="Delete model">
+				<sl-icon-button
+					name="trash3"
+					style="font-size:0.85rem;color:var(--sl-color-danger-400)"
+					data-on:click={ fmt.Sprintf("$confirmDeleteModelPath='%s'; $confirmDeleteModelName='%s'",
+						jsEscape(v.Path), jsEscape(v.Filename)) }
+				></sl-icon-button>
+			</sl-tooltip>
+		</div>
+	</div>
+}
+
+// ModelPropsPanel renders the GGUF model properties panel (SSE-patched into #models-props-content).
+templ ModelPropsPanel(info ModelPropsView) {
+	<div id="models-props-content" class="bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5" style="display:flex;flex-direction:column">
+		<!-- Header -->
+		<div class="flex items-start justify-between mb-4">
+			<div>
+				if info.RepoID != "" {
+					<h3 class="text-sm font-semibold text-white">{ info.RepoID }</h3>
+				} else {
+					<h3 class="text-sm font-semibold text-white">{ info.Name }</h3>
+				}
+				<p class="text-xs text-neutral-400 mt-0.5">
+					{ info.Filename }
+					if info.HasVision {
+						<sl-tooltip content="Vision capable — mmproj detected">
+							<sl-icon name="eye" style="font-size:0.8rem;color:var(--sl-color-primary-400);margin-left:0.35rem;vertical-align:middle"></sl-icon>
+						</sl-tooltip>
+					}
+					if info.HasThinking {
+						<sl-tooltip content="Thinking capable">
+							<sl-icon name="lightbulb" style="font-size:0.8rem;color:var(--sl-color-warning-400);margin-left:0.35rem;vertical-align:middle"></sl-icon>
+						</sl-tooltip>
+					}
+				</p>
+			</div>
+			<sl-icon-button
+				name="x-lg"
+				style="font-size:0.85rem"
+				data-on:click="$selectedModelPath=''"
+			></sl-icon-button>
+		</div>
+
+		<!-- Properties grid -->
+		<div class="space-y-2.5">
+			if info.Architecture != "" {
+				@propRow("Architecture", info.Architecture)
+			}
+			if info.QuantType != "" {
+				@propRow("Quantization", info.QuantType)
+			}
+			if info.ContextLength != "" {
+				@propRow("Context Length", info.ContextLength)
+			}
+			if info.EmbeddingLength != "" {
+				@propRow("Embedding Dim", info.EmbeddingLength)
+			}
+			if info.BlockCount != "" {
+				@propRow("Layers", info.BlockCount)
+			}
+			if info.HeadCount != "" {
+				@propRow("Attention Heads", info.HeadCount)
+			}
+			if info.HeadCountKV != "" {
+				@propRow("KV Heads", info.HeadCountKV)
+			}
+			if info.VocabSize != "" {
+				@propRow("Vocab Size", info.VocabSize)
+			}
+			if info.TokenizerModel != "" {
+				@propRow("Tokenizer", info.TokenizerModel)
+			}
+			if info.ChatTemplate != "" {
+				@propRow("Chat Template", info.ChatTemplate)
+			}
+			if info.FileSize != "" {
+				@propRow("File Size", info.FileSize)
+			}
+		</div>
+
+		<!-- File Path (copyable) -->
+		if info.Path != "" {
+			<div class="pt-3 mt-3 border-t border-neutral-700/50">
+				<div class="flex items-center gap-1 mb-1">
+					<span class="text-xs text-neutral-400">File Path</span>
+					<sl-tooltip content="Copy path">
+						<sl-icon-button
+							name="clipboard"
+							style="font-size:0.75rem"
+							data-on:click={ fmt.Sprintf("navigator.clipboard.writeText('%s');evt.target.name='clipboard-check';setTimeout(()=>evt.target.name='clipboard',1500)", jsEscape(info.Path)) }
+						></sl-icon-button>
+					</sl-tooltip>
+				</div>
+				<code class="text-xs text-neutral-300 font-mono break-all leading-relaxed">{ info.Path }</code>
+			</div>
+		}
+
+		<!-- Vision Projector dependency -->
+		if info.MmprojPath != "" {
+			<div class="pt-3 mt-3 border-t border-neutral-700/50">
+				<div class="flex items-center gap-1 mb-1">
+					<sl-icon name="eye" style="font-size:0.7rem;color:var(--sl-color-neutral-400)"></sl-icon>
+					<span class="text-xs text-neutral-400">Vision Projector</span>
+					<sl-tooltip content="Copy path">
+						<sl-icon-button
+							name="clipboard"
+							style="font-size:0.75rem"
+							data-on:click={ fmt.Sprintf("navigator.clipboard.writeText('%s');evt.target.name='clipboard-check';setTimeout(()=>evt.target.name='clipboard',1500)", jsEscape(info.MmprojPath)) }
+						></sl-icon-button>
+					</sl-tooltip>
+				</div>
+				<code class="text-xs text-neutral-300 font-mono break-all leading-relaxed">{ info.MmprojRel }</code>
+			</div>
+		}
+
+		<!-- Actions -->
+		<div class="pt-4 border-t border-neutral-700/50 flex items-center justify-center gap-3" style="margin-top:0.75rem">
+			if !info.IsMmproj {
+				<sl-button
+					size="small"
+					variant="primary"
+					outline
+					id="models-load-btn"
+					data-on:click={ fmt.Sprintf("window.__massLoadModel('%s','%s')",
+						jsEscape(info.Path), jsEscape(info.ModelType)) }
+				>
+					<sl-icon slot="prefix" name="cpu"></sl-icon>
+					Load into Pool
+				</sl-button>
+			}
+			<sl-button
+				size="small"
+				variant="danger"
+				outline
+				data-on:click={ fmt.Sprintf("$confirmDeleteModelPath='%s'; $confirmDeleteModelName='%s'",
+					jsEscape(info.Path), jsEscape(info.Filename)) }
+			>
+				<sl-icon slot="prefix" name="trash3"></sl-icon>
+				Delete
+			</sl-button>
+		</div>
+	</div>
+}
+
+// propRow renders a single label-value row in the properties panel.
+templ propRow(label string, value string) {
+	<div class="flex items-baseline gap-3">
+		<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:8.5rem">{ label }</span>
+		<span class="text-xs text-neutral-200 font-mono break-all min-w-0">{ value }</span>
+	</div>
+}
+
+// ModelPropsView holds display-ready strings for the properties panel.
+type ModelPropsView struct {
+	Name            string
+	RepoID          string // e.g. "nomic-ai/nomic-embed-text-v1.5-GGUF"
+	Filename        string
+	Path            string
+	ModelType       string // "chat" or "embedding" (lowercase, for load API)
+	Architecture    string
+	QuantType       string
+	ContextLength   string
+	EmbeddingLength string
+	BlockCount      string
+	HeadCount       string
+	HeadCountKV     string
+	VocabSize       string
+	TokenizerModel  string
+	FileSize        string
+	ChatTemplate    string // detected chat template name (e.g. "mistral", "chatml") or empty
+	IsMmproj        bool   // true for vision projector files (not loadable)
+	HasVision       bool   // true if a sibling mmproj exists (vision capable)
+	HasThinking     bool   // true if model supports thinking/reasoning
+	MmprojPath      string // absolute path to sibling mmproj file (if any)
+	MmprojRel       string // relative path (publisher/repo/file.gguf) for display
+}
+
+// jsEscape escapes a string for safe use inside a JS single-quoted string in templ attributes.
+func jsEscape(s string) string {
+	s = html.EscapeString(s)
+	r := ""
+	for _, c := range s {
+		switch c {
+		case '\'':
+			r += "\\'"
+		case '\\':
+			r += "\\\\"
+		default:
+			r += string(c)
+		}
+	}
+	return r
+}
+
+const modelsTabStyles = `<style>
+details.model-group[open] > summary sl-icon[name="chevron-right"] {
+  transform: rotate(90deg);
+}
+/* Cyan Get button in HF search dialog */
+#models-install-dialog sl-button[variant="primary"]::part(base) {
+  background: var(--mass-blue);
+  border-color: var(--mass-blue);
+}
+#models-install-dialog sl-button[variant="primary"]::part(base):hover {
+  background: var(--sl-color-primary-500);
+  border-color: var(--sl-color-primary-500);
+}
+/* Cyan download progress bar (override uikit blue), match Get button shape */
+#models-install-dialog .hf-dl-bar {
+  background: var(--mass-blue) !important;
+}
+#models-install-dialog [id^="pe-hf-dl-"] > div {
+  border-radius: 0.25rem;
+  min-width: 4.5rem;
+}
+</style>`
+

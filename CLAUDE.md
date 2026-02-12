@@ -1,0 +1,13 @@
+- Always keep the best Go coding and project organization practices.
+- Always keep the best Datastar practices.
+- Write simple, reusable and maintainable code.
+- Use table-driven tests as much as possible and testify/require.
+- Use Interface suffix in interface names.
+- Revisit the changes you made to figure out if anything could be done simpler or if anything is no longer needed and can be removed.
+- Don't use dirty workarounds unless there's really no other way. Follow the best practices first and foremost.
+- Write optimized code, seek for any optimization opportunities, but maintainability and simplicity goes first.
+- Don't do unnecessary moves, tidy up things.
+- You can and should do any breaking changes needed.
+- Make sure you use `golog` and `ctxerr` packages for better error handling.
+- Don't drop error checks and process them properly, defining sentinel errors, using error wrapping and passing them up the call stack.
+- Use: `make lint`, `make test` and `make build` for linting, testing and building.

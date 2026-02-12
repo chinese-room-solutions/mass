@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS device_benchmarks;
+DROP INDEX IF EXISTS queue_results_created_at_idx;
+DROP INDEX IF EXISTS queue_results_request_hash_idx;
+DROP TABLE IF EXISTS queue_results;
+DROP INDEX IF EXISTS goqite_queue_priority_created_idx;
+DROP TRIGGER IF EXISTS goqite_updated_timestamp;
+DROP TABLE IF EXISTS goqite;
+DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS downloads;

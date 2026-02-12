@@ -1,0 +1,430 @@
+package templates
+
+import (
+	"fmt"
+	"strings"
+)
+
+// schedulerTab renders the Scheduler tab content area.
+// Displays all loaded model instances with their status, fingerprints, and metadata.
+templ schedulerTab() {
+	<div id="scheduler-tab" style="height:100%; display:flex; justify-content:center">
+		<!-- Instance list -->
+		<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
+				<!-- Header -->
+				<div style="padding:0.75rem 1.5rem 0">
+					<div class="flex items-center justify-center gap-2 text-sm font-semibold text-white">
+						<sl-icon name="cpu"></sl-icon>
+						<span>Loaded Models</span>
+					</div>
+					<div class="mt-2">
+						<sl-input
+							id="scheduler-filter-input"
+							size="small"
+							clearable
+							placeholder="Filter models..."
+						>
+							<sl-icon slot="prefix" name="search"></sl-icon>
+						</sl-input>
+					</div>
+					<button
+						id="scheduler-deselect-trigger"
+						style="display:none"
+						data-on:click="$selectedSchedulerFp=''"
+					></button>
+				</div>
+				<!-- Instance list (scrollable) -->
+				<div id="scheduler-list-scroll" style="flex:1; overflow-y:auto; padding:0.75rem 1.5rem">
+					<div id="scheduler-content" data-init="@get('/api/scheduler')">
+						<div class="text-center py-8">
+							<sl-spinner style="font-size:1.5rem;--track-width:3px"></sl-spinner>
+						</div>
+					</div>
+				</div>
+				<!-- Anchored bottom bar -->
+				<div style="padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; text-align:center">
+					<sl-button
+						variant="default"
+						size="small"
+						style="min-width:16rem"
+						data-on:click="var d=document.getElementById('scheduler-load-dialog'); if(d){d.show(); window.__schedLoadInit&&window.__schedLoadInit()}"
+					>
+						<sl-icon slot="prefix" name="plus-lg"></sl-icon>
+						Load Model
+					</sl-button>
+				</div>
+			</div>
+			<!-- Properties panel (slides open when an instance is selected) -->
+			<div
+				id="scheduler-props-panel"
+				style="overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0"
+				data-attr:style="$selectedSchedulerFp !== '' ? 'overflow-y:auto;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0'"
+			>
+				<div id="scheduler-props-spacer"></div>
+				<div id="scheduler-props-content"></div>
+			</div>
+		<!-- Load Model dialog -->
+		<sl-dialog id="scheduler-load-dialog" label="Load Model into Pool" style="--width:36rem">
+			<style>
+				#scheduler-load-dialog sl-details::part(header) { padding: 0.5rem 0.75rem; }
+				#scheduler-load-dialog sl-details::part(content) { padding: 0 0.75rem 0.75rem; }
+				#scheduler-load-dialog::part(footer) { display: none; }
+			</style>
+			<div class="space-y-4">
+				<!-- Model selection: embedded list -->
+				<div>
+					<div class="mb-2">
+						<sl-input id="sched-load-filter" size="small" clearable placeholder="Filter models..."></sl-input>
+					</div>
+					<div id="sched-load-models" class="overflow-y-auto rounded border border-neutral-700/50" style="max-height:180px">
+						<div class="text-center py-4"><sl-spinner style="font-size:1rem;--track-width:2px"></sl-spinner></div>
+					</div>
+					<input type="hidden" id="sched-load-path" />
+				</div>
+				<!-- Config + submit (hidden until a model is selected) -->
+				<div id="sched-load-config" class="space-y-4" style="display:none">
+					<!-- Model settings (identity — affects fingerprint) -->
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<label class="text-xs text-neutral-400 block mb-1">Context Size</label>
+							<sl-input id="sched-load-ctx" size="small" type="number" placeholder="0 = model default" min="0"></sl-input>
+						</div>
+						<div id="sched-load-batch-wrap" class="sched-load-chat-field">
+							<label class="text-xs text-neutral-400 block mb-1">Batch Size</label>
+							<sl-input id="sched-load-batch" size="small" type="number" placeholder="0 = auto" min="0"></sl-input>
+						</div>
+						<div id="sched-load-maxtokens-wrap" class="sched-load-chat-field">
+							<label class="text-xs text-neutral-400 block mb-1">Max Tokens</label>
+							<sl-input id="sched-load-maxtokens" size="small" type="number" placeholder="0 = unlimited" min="0"></sl-input>
+						</div>
+						<div id="sched-load-flash-wrap" class="sched-load-chat-field">
+							<label class="text-xs text-neutral-400 block mb-1">Flash Attention</label>
+							<sl-select id="sched-load-flash" size="small" placeholder="Default" clearable>
+								<sl-option value="enabled">Enabled</sl-option>
+								<sl-option value="disabled">Disabled</sl-option>
+							</sl-select>
+						</div>
+					</div>
+					<div id="sched-load-thinking-wrap" class="sched-load-chat-field" style="display:none">
+						<sl-switch id="sched-load-thinking" size="small">Thinking Mode</sl-switch>
+					</div>
+					<!-- Advanced model settings -->
+					<sl-details summary="Advanced Model Settings" class="text-sm">
+						<div class="grid grid-cols-2 gap-3">
+							<div id="sched-load-chat-template-wrap">
+								<label class="text-xs text-neutral-400 block mb-1">Chat Template</label>
+								<sl-input id="sched-load-chat-template" size="small" placeholder="e.g. vicuna"></sl-input>
+							</div>
+							<div id="sched-load-cachetype-wrap" class="sched-load-chat-field">
+								<label class="text-xs text-neutral-400 block mb-1">KV Cache Type</label>
+								<sl-select id="sched-load-cachetype" size="small" placeholder="Default (q8_0)" clearable hoist>
+									<sl-option value="f16">f16 (full precision)</sl-option>
+									<sl-option value="q8_0">q8_0 (recommended)</sl-option>
+									<sl-option value="q4_0">q4_0 (low VRAM)</sl-option>
+								</sl-select>
+							</div>
+						</div>
+					</sl-details>
+					<!-- Placement overrides (scheduler decides by default) -->
+					<sl-details summary="Placement Overrides" class="text-sm">
+						<p class="text-xs text-neutral-500 mb-2">Optional. The scheduler handles these automatically based on device capabilities.</p>
+						<div class="grid grid-cols-2 gap-3">
+							<div>
+								<label class="text-xs text-neutral-400 block mb-1">Device</label>
+								<sl-select id="sched-load-device" size="small" value="gpu">
+									<sl-option value="gpu">GPU (auto)</sl-option>
+									<sl-option value="cpu">CPU only</sl-option>
+								</sl-select>
+							</div>
+							<div id="sched-load-gpu-wrap">
+								<label class="text-xs text-neutral-400 block mb-1">GPU Layers</label>
+								<sl-input id="sched-load-gpu" size="small" type="number" placeholder="auto" min="0"></sl-input>
+							</div>
+							<div>
+								<label class="text-xs text-neutral-400 block mb-1">Threads</label>
+								<sl-input id="sched-load-threads" size="small" type="number" placeholder="auto" min="0"></sl-input>
+							</div>
+							<div>
+								<label class="text-xs text-neutral-400 block mb-1">Max Concurrent</label>
+								<sl-input id="sched-load-concurrent" size="small" type="number" placeholder="auto" min="0"></sl-input>
+							</div>
+							<div id="sched-load-maingpu-wrap">
+								<label class="text-xs text-neutral-400 block mb-1">Main GPU</label>
+								<sl-input id="sched-load-maingpu" size="small" placeholder="auto"></sl-input>
+							</div>
+							<div id="sched-load-tensorsplit-wrap">
+								<label class="text-xs text-neutral-400 block mb-1">Tensor Split</label>
+								<sl-input id="sched-load-tensorsplit" size="small" placeholder="auto"></sl-input>
+							</div>
+						</div>
+					</sl-details>
+					<!-- Error + submit -->
+					<div id="sched-load-error" class="text-xs text-red-400" style="display:none"></div>
+					<div class="flex justify-end">
+						<sl-button id="sched-load-submit" variant="primary" size="small">
+							<sl-icon slot="prefix" name="cpu"></sl-icon>
+							Load
+						</sl-button>
+					</div>
+				</div>
+			</div>
+		</sl-dialog>
+		@templ.Raw(schedulerScript)
+	</div>
+}
+
+// SchedulerInstanceList renders the list of loaded model instances.
+templ SchedulerInstanceList(instances []SchedulerInstanceView) {
+	<div id="scheduler-content">
+		if len(instances) == 0 {
+			<div class="flex flex-col items-center justify-center py-16 text-center">
+				<sl-icon name="cpu" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>
+				<p class="text-neutral-400 text-sm">No models loaded.</p>
+				<p class="text-neutral-500 text-xs mt-1">Models are loaded when modules start or when requests arrive with model_config.</p>
+			</div>
+		} else {
+			<div class="space-y-2">
+				for _, inst := range instances {
+					@schedulerInstanceRow(inst)
+				}
+			</div>
+		}
+	</div>
+}
+
+templ schedulerInstanceRow(inst SchedulerInstanceView) {
+	<div
+		id={ "sched-inst-" + inst.Fingerprint }
+		class="bg-neutral-800/60 rounded-lg border border-neutral-700/50 px-4 py-3 cursor-pointer hover:border-neutral-600/80 transition-colors"
+		data-filter-text={ strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.Type + " " + inst.Source + " " + inst.Mode + " " + inst.Status + " " + inst.AgentName) }
+		data-on:click={ fmt.Sprintf("$selectedSchedulerFp='%s'; @get('/api/scheduler/info?fp=%s')", inst.Fingerprint, inst.Fingerprint) }
+	>
+		<!-- Top row: filename + evict -->
+		<div class="flex items-center gap-3">
+			@SchedulerInstanceDot(inst.Fingerprint, inst.Status)
+			<span
+				class="text-sm font-medium text-blue-400 hover:text-blue-300 truncate cursor-pointer"
+				title={ inst.Path }
+				onclick={ goToModel(inst.Path) }
+			>
+				{ inst.Filename }
+			</span>
+			<div class="flex-1"></div>
+			if inst.Status != "Loading" {
+				<div onclick="event.stopPropagation()">
+					<sl-tooltip content="Evict model">
+						<sl-icon-button
+							name="x-circle"
+							style="font-size:0.95rem;color:var(--sl-color-danger-400)"
+							data-on:click={ fmt.Sprintf("@delete('/api/scheduler/evict?fp=%s')", inst.Fingerprint) }
+						></sl-icon-button>
+					</sl-tooltip>
+				</div>
+			}
+		</div>
+		<!-- Bottom row: details + badges -->
+		<div class="flex items-center gap-4 mt-2 text-xs text-neutral-400 overflow-hidden">
+			<span class="font-mono" title="Config fingerprint">{ inst.Fingerprint }</span>
+			if inst.AgentName != "" {
+				<span
+					class="text-blue-400 hover:text-blue-300 cursor-pointer"
+					title={ "Running on agent: " + inst.AgentName }
+					onclick={ goToAgent(inst.AgentID) }
+				>
+					<sl-icon name="pc-display" style="font-size:0.75rem;vertical-align:-1px;margin-right:2px"></sl-icon>
+					{ inst.AgentName }
+				</span>
+				if len(inst.DeviceIDs) > 0 {
+					<span class="text-neutral-500" title="Device(s)">
+						{ strings.Join(inst.DeviceIDs, ", ") }
+					</span>
+				}
+			}
+			@SchedulerInstanceReqs(inst.Fingerprint, inst.ActiveReqs)
+			<span class="ml-auto flex items-center gap-2">
+				<span class={ "text-xs rounded px-1.5 py-0.5 " + sourceBadge(inst.Source) }>{ inst.Source }</span>
+				<span class={ "text-xs rounded px-1.5 py-0.5 " + modeBadge(inst.Mode) }>{ inst.Mode }</span>
+				<span class={ "text-xs font-bold rounded px-1.5 py-0.5 " + instanceTypeBadge(inst.Type) }>{ inst.Type }</span>
+				@SchedulerInstanceStatusBadge(inst.Fingerprint, inst.Status)
+			</span>
+		</div>
+	</div>
+}
+
+templ SchedulerInstanceDot(fp string, status string) {
+	<sl-tooltip id={ "sched-dot-" + fp } content={ status }>
+		<span class={ "w-2 h-2 rounded-full flex-shrink-0 " + instanceDotColor(status) }></span>
+	</sl-tooltip>
+}
+
+templ SchedulerInstanceStatusBadge(fp string, status string) {
+	<span id={ "sched-status-" + fp } class={ "text-xs px-2 py-0.5 rounded " + instanceStatusBadge(status) }>
+		{ status }
+	</span>
+}
+
+templ SchedulerInstanceReqs(fp string, activeReqs int64) {
+	<span id={ "sched-reqs-" + fp } class="text-xs text-neutral-400">
+		if activeReqs > 0 {
+			{ fmt.Sprintf("%d active req%s", activeReqs, pluralS(int(activeReqs))) }
+		}
+	</span>
+}
+
+// SchedulerInstancePropsPanel renders the properties panel for a selected scheduler instance.
+templ SchedulerInstancePropsPanel(info SchedulerInstancePropsView) {
+	<div id="scheduler-props-content" class="bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5" style="display:flex;flex-direction:column">
+		<!-- Header -->
+		<div class="flex items-start justify-between mb-4">
+			<div>
+				<h3 class="text-sm font-semibold text-white">{ info.Filename }</h3>
+				<p class="text-xs text-neutral-400 mt-0.5 font-mono">{ info.Fingerprint }</p>
+			</div>
+			<sl-icon-button
+				name="x-lg"
+				style="font-size:0.85rem"
+				data-on:click="$selectedSchedulerFp=''"
+			></sl-icon-button>
+		</div>
+
+		<!-- Properties grid -->
+		<div class="space-y-2.5">
+			@propRow("Type", info.Type)
+			@SchedulerPropsStatus(info.Fingerprint, info.Status)
+			@propRow("Source", info.Source)
+			@propRow("Mode", info.Mode)
+			if info.AgentName != "" {
+				@schedulerPropsAgent(info.AgentID, info.AgentName)
+			}
+			if len(info.DeviceIDs) > 0 {
+				@propRow("Device", strings.Join(info.DeviceIDs, ", "))
+			}
+			@SchedulerPropsReqs(info.Fingerprint, info.ActiveReqs)
+			@schedulerPropsModel(info.Path, info.Filename)
+			if len(info.Config) > 0 {
+				<div class="border-t border-neutral-700/50 my-2"></div>
+				for _, entry := range info.Config {
+					@propRow(entry.Key, entry.Value)
+				}
+			}
+		</div>
+	</div>
+}
+
+templ SchedulerPropsStatus(fp string, status string) {
+	<div id={ "sched-props-status-" + fp }>
+		@propRow("Status", status)
+	</div>
+}
+
+templ SchedulerPropsReqs(fp string, activeReqs int64) {
+	<div id={ "sched-props-reqs-" + fp }>
+		if activeReqs > 0 {
+			@propRow("Active Requests", fmt.Sprintf("%d", activeReqs))
+		}
+	</div>
+}
+
+templ schedulerPropsAgent(agentID string, agentName string) {
+	<div class="flex items-baseline gap-3">
+		<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:8.5rem">Agent</span>
+		<span
+			class="text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono"
+			onclick={ goToAgent(agentID) }
+		>
+			<sl-icon name="pc-display" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
+			{ agentName }
+		</span>
+	</div>
+}
+
+templ schedulerPropsModel(path string, filename string) {
+	<div class="flex items-baseline gap-3">
+		<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:8.5rem">Model</span>
+		<span
+			class="text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono"
+			onclick={ goToModel(path) }
+		>
+			<sl-icon name="box" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
+			{ filename }
+		</span>
+	</div>
+}
+
+func instanceDotColor(status string) string {
+	switch status {
+	case "Active":
+		return "bg-green-400"
+	case "Loading":
+		return "bg-yellow-400 animate-pulse"
+	default:
+		return "bg-neutral-400"
+	}
+}
+
+func instanceTypeBadge(typ string) string {
+	if typ == "Chat" {
+		return "bg-blue-900/60 text-blue-300"
+	}
+	return "bg-purple-900/60 text-purple-300"
+}
+
+func sourceBadge(source string) string {
+	if strings.HasPrefix(source, "module") {
+		return "bg-teal-900/60 text-teal-300"
+	}
+	return "mass-badge"
+}
+
+func modeBadge(mode string) string {
+	if mode == "dynamic" {
+		return "bg-orange-900/60 text-orange-300"
+	}
+	return "mass-badge"
+}
+
+func instanceStatusBadge(status string) string {
+	switch status {
+	case "Active":
+		return "bg-green-900/60 text-green-300"
+	case "Loading":
+		return "bg-yellow-900/60 text-yellow-300"
+	default:
+		return "mass-badge"
+	}
+}
+
+// goToAgent switches to the Agents tab and opens the specified agent card.
+script goToAgent(agentID string) {
+	event.stopPropagation();
+	// Click the Agents tab button — its data-on:click sets $activeTab via Datastar.
+	var tabBtn = document.querySelector('[data-tab-name="agents"]');
+	if (tabBtn) tabBtn.click();
+	// Open the target agent card after a short delay for DOM update.
+	setTimeout(function() {
+		var card = document.getElementById('agent-card-' + agentID);
+		if (card) { card.open = true; card.scrollIntoView({behavior:'smooth', block:'nearest'}); }
+	}, 100);
+}
+
+// goToModel switches to the Models tab, opens the model group and selects the variant.
+script goToModel(path string) {
+	event.stopPropagation();
+	var tabBtn = document.querySelector('[data-tab-name="models"]');
+	if (tabBtn) tabBtn.click();
+	setTimeout(function() {
+		// Find variant row by attribute value (avoid querySelector backslash issues on Windows paths).
+		var row = null;
+		var rows = document.querySelectorAll('[data-model-path]');
+		for (var i = 0; i < rows.length; i++) {
+			if (rows[i].getAttribute('data-model-path') === path) { row = rows[i]; break; }
+		}
+		if (!row) return;
+		// Open parent details group if collapsed.
+		var group = row.closest('details');
+		if (group) group.open = true;
+		// Click the variant row to select it and load properties.
+		row.click();
+		row.scrollIntoView({behavior:'smooth', block:'nearest'});
+	}, 100);
+}
