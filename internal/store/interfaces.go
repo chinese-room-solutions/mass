@@ -33,17 +33,23 @@ type BenchmarkStoreInterface interface {
 	// SaveBenchmark upserts a benchmark result for the given agent/device pair.
 	SaveBenchmark(row BenchmarkRow) error
 	// GetBenchmark returns the stored benchmark for an agent/device pair.
-	GetBenchmark(agentID, deviceID string) (BenchmarkRow, error)
+	GetBenchmark(workerID, deviceID string) (BenchmarkRow, error)
 	// ListBenchmarks returns all stored benchmark results.
 	ListBenchmarks() ([]BenchmarkRow, error)
 	// DeleteBenchmark removes a stored benchmark result for an agent/device pair.
-	DeleteBenchmark(agentID, deviceID string) error
+	DeleteBenchmark(workerID, deviceID string) error
 	// HasBenchmark returns true if a benchmark exists for the given agent/device pair.
-	HasBenchmark(agentID, deviceID string) (bool, error)
+	HasBenchmark(workerID, deviceID string) (bool, error)
 }
 
 // StoreInterface combines all storage interfaces.
-// Implementations must also provide lifecycle methods.
+//
+// **SQL-backed only** — same reasoning as [queue.QueueInterface]: MASS
+// relies on transactional SQL primitives (atomicity, ordering, FK
+// cascades). Not portable to KV / document / non-relational backends.
+//
+// Today: SQLite. Postgres on the roadmap (paired migrations + dialect-
+// aware timestamp helper).
 type StoreInterface interface {
 	SettingsStoreInterface
 	DownloadStoreInterface

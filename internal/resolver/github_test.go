@@ -54,9 +54,9 @@ func TestGitHubProviderFactoryWithToken(t *testing.T) {
 func TestFindPlatformAsset(t *testing.T) {
 	suffix := runtime.GOOS + "_" + runtime.GOARCH
 	assets := []githubAsset{
-		{Name: "module_linux_amd64.mass", BrowserDownloadURL: "https://example.com/linux_amd64"},
-		{Name: "module_windows_amd64.mass", BrowserDownloadURL: "https://example.com/windows_amd64"},
-		{Name: "module_darwin_arm64.mass", BrowserDownloadURL: "https://example.com/darwin_arm64"},
+		{Name: "app_linux_amd64.mass", BrowserDownloadURL: "https://example.com/linux_amd64"},
+		{Name: "app_windows_amd64.mass", BrowserDownloadURL: "https://example.com/windows_amd64"},
+		{Name: "app_darwin_arm64.mass", BrowserDownloadURL: "https://example.com/darwin_arm64"},
 		{Name: "checksums.txt", BrowserDownloadURL: "https://example.com/checksums"},
 	}
 
@@ -67,7 +67,7 @@ func TestFindPlatformAsset(t *testing.T) {
 
 func TestFindPlatformAssetNotFound(t *testing.T) {
 	assets := []githubAsset{
-		{Name: "module_fakeos_fakearch.mass", BrowserDownloadURL: "https://example.com/fake"},
+		{Name: "app_fakeos_fakearch.mass", BrowserDownloadURL: "https://example.com/fake"},
 	}
 
 	_, err := findPlatformAsset(assets)
@@ -78,7 +78,7 @@ func TestFindPlatformAssetNotFound(t *testing.T) {
 func TestFindPlatformAssetZipExtension(t *testing.T) {
 	suffix := runtime.GOOS + "_" + runtime.GOARCH
 	assets := []githubAsset{
-		{Name: "module_" + suffix + ".zip", BrowserDownloadURL: "https://example.com/zip"},
+		{Name: "app_" + suffix + ".zip", BrowserDownloadURL: "https://example.com/zip"},
 	}
 
 	url, err := findPlatformAsset(assets)

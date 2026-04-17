@@ -1,3 +1,14 @@
+// Package store implements [StoreInterface] against a SQL database.
+//
+// **Postgres readiness:** SQL-only by design. When Postgres lands, work is
+// concentrated in:
+//   - Paired migrations (`.postgres.up.sql`); [Store.migrate] picks one.
+//     SQLite `STRICT`+`TEXT`+`BLOB` → Postgres `TEXT`+`BYTEA`.
+//   - `strftime(...)` calls in [device_queue_state.go] — easiest to
+//     replace by computing timestamps in Go.
+//   - Driver: register `lib/pq` or `pgx` alongside `modernc.org/sqlite`.
+//
+// [StoreInterface] does not need to change.
 package store
 
 import (

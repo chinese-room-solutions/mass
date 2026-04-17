@@ -27,7 +27,7 @@ func (m *mockProvider) ListVersions(_ context.Context, _ string) ([]*semver.Vers
 
 func (m *mockProvider) Download(_ context.Context, _ string, version *semver.Version, dstPath string) error {
 	m.downloaded = append(m.downloaded, version.String())
-	// Create a minimal zip with a module.yml.
+	// Create a minimal zip with a app.yml.
 	return createTestArchive(dstPath, version.String())
 }
 
@@ -53,8 +53,8 @@ func mustVersion(s string) *semver.Version {
 	return v
 }
 
-// installTestModule creates a modules/{name}/{version}/module.yml on disk.
-func installTestModule(t *testing.T, installDir, name, version string, deps []Dependency) {
+// installTestApp creates an apps/{name}/{version}/app.yml on disk.
+func installTestApp(t *testing.T, installDir, name, version string, deps []Dependency) {
 	t.Helper()
 	dir := filepath.Join(installDir, name, version)
 	require.NoError(t, os.MkdirAll(dir, 0755))
@@ -69,19 +69,19 @@ func installTestModule(t *testing.T, installDir, name, version string, deps []De
 	meta := metaYAML{
 		Name:         name,
 		Version:      version,
-		SDKVersion:   "1",
+		SDKVersion:   "2",
 		Command:      "dummy",
 		Dependencies: deps,
 	}
 	data, err := yaml.Marshal(meta)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "module.yml"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.yml"), data, 0644))
 }
 
-// createTestArchive creates a minimal .mass (zip) with module.yml inside.
+// createTestArchive creates a minimal .mass (zip) with app.yml inside.
 func createTestArchive(path, _ string) error {
 	// We can't easily create a zip here without archive/zip, so write a
-	// module.yml directly. The resolver's installOne calls ExtractZip which
+	// app.yml directly. The resolver's installOne calls ExtractZip which
 	// needs a real zip. For unit tests, we test resolution separately.
 	// This is a placeholder — integration tests would use real archives.
 	return os.WriteFile(path, []byte("PK"), 0644)
@@ -216,10 +216,10 @@ func TestTopoSort(t *testing.T) {
 func TestResolveFromInstalled(t *testing.T) {
 	installDir := t.TempDir()
 
-	// Install modules on disk.
-	installTestModule(t, installDir, "foo", "1.0.0", nil)
-	installTestModule(t, installDir, "foo", "1.5.0", nil)
-	installTestModule(t, installDir, "bar", "2.0.0", nil)
+	// Install apps on disk.
+	installTestApp(t, installDir, "foo", "1.0.0", nil)
+	installTestApp(t, installDir, "foo", "1.5.0", nil)
+	installTestApp(t, installDir, "bar", "2.0.0", nil)
 
 	factory := &mockFactory{
 		providers: map[string]*mockProvider{
@@ -239,7 +239,7 @@ func TestResolveFromInstalled(t *testing.T) {
 	require.Len(t, resolved, 2)
 
 	// Build a map for order-independent assertions.
-	byName := make(map[string]ResolvedModule)
+	byName := make(map[string]ResolvedApp)
 	for _, m := range resolved {
 		byName[m.Name] = m
 	}
@@ -257,7 +257,7 @@ func TestResolveNeedsDownload(t *testing.T) {
 	installDir := t.TempDir()
 
 	// Only foo 1.0.0 installed but constraint requires ^2.0.0
-	installTestModule(t, installDir, "foo", "1.0.0", nil)
+	installTestApp(t, installDir, "foo", "1.0.0", nil)
 
 	provider := &mockProvider{
 		versions: []*semver.Version{mustVersion("1.0.0"), mustVersion("2.0.0"), mustVersion("2.5.0")},
@@ -284,9 +284,9 @@ func TestResolveConflictingConstraints(t *testing.T) {
 	installDir := t.TempDir()
 
 	// A depends on C ^1.0.0; B depends on C ^2.0.0 — no version can satisfy both.
-	installTestModule(t, installDir, "A", "1.0.0", []Dependency{{Name: "C", Version: "^1.0.0", Source: "github:test/c"}})
-	installTestModule(t, installDir, "B", "1.0.0", []Dependency{{Name: "C", Version: "^2.0.0", Source: "github:test/c"}})
-	installTestModule(t, installDir, "C", "1.5.0", nil)
+	installTestApp(t, installDir, "A", "1.0.0", []Dependency{{Name: "C", Version: "^1.0.0", Source: "github:test/c"}})
+	installTestApp(t, installDir, "B", "1.0.0", []Dependency{{Name: "C", Version: "^2.0.0", Source: "github:test/c"}})
+	installTestApp(t, installDir, "C", "1.5.0", nil)
 
 	provider := &mockProvider{
 		versions: []*semver.Version{mustVersion("1.0.0"), mustVersion("1.5.0"), mustVersion("2.0.0"), mustVersion("2.5.0")},
@@ -311,9 +311,9 @@ func TestResolveTransitiveDeps(t *testing.T) {
 	installDir := t.TempDir()
 
 	// A -> B -> C (all installed)
-	installTestModule(t, installDir, "A", "1.0.0", []Dependency{{Name: "B", Version: ">=1.0.0"}})
-	installTestModule(t, installDir, "B", "1.0.0", []Dependency{{Name: "C", Version: ">=1.0.0"}})
-	installTestModule(t, installDir, "C", "1.0.0", nil)
+	installTestApp(t, installDir, "A", "1.0.0", []Dependency{{Name: "B", Version: ">=1.0.0"}})
+	installTestApp(t, installDir, "B", "1.0.0", []Dependency{{Name: "C", Version: ">=1.0.0"}})
+	installTestApp(t, installDir, "C", "1.0.0", nil)
 
 	factory := &mockFactory{providers: map[string]*mockProvider{}}
 	r := NewResolver(installDir, factory, zerolog.Nop())
@@ -337,9 +337,9 @@ func TestResolveTransitiveDeps(t *testing.T) {
 func TestListInstalledVersions(t *testing.T) {
 	installDir := t.TempDir()
 
-	installTestModule(t, installDir, "mod", "1.0.0", nil)
-	installTestModule(t, installDir, "mod", "2.0.0", nil)
-	installTestModule(t, installDir, "mod", "1.5.0", nil)
+	installTestApp(t, installDir, "mod", "1.0.0", nil)
+	installTestApp(t, installDir, "mod", "2.0.0", nil)
+	installTestApp(t, installDir, "mod", "1.5.0", nil)
 
 	r := NewResolver(installDir, nil, zerolog.Nop())
 	versions := r.listInstalledVersions("mod")

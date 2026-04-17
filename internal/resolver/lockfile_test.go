@@ -9,10 +9,10 @@ import (
 )
 
 func TestLockFileRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "module.lock")
+	path := filepath.Join(t.TempDir(), "app.lock")
 
 	original := &LockFile{
-		Modules: map[string]LockedModule{
+		Apps: map[string]LockedApp{
 			"foo": {Version: "1.2.3", Source: "github:test/foo", SHA256: "abc123"},
 			"bar": {Version: "2.0.0", Source: "github:test/bar"},
 		},
@@ -22,31 +22,31 @@ func TestLockFileRoundTrip(t *testing.T) {
 
 	loaded, err := ReadLockFile(path)
 	require.NoError(t, err)
-	require.Equal(t, original.Modules, loaded.Modules)
+	require.Equal(t, original.Apps, loaded.Apps)
 }
 
 func TestReadLockFileMissing(t *testing.T) {
 	lf, err := ReadLockFile(filepath.Join(t.TempDir(), "nonexistent.lock"))
 	require.NoError(t, err)
-	require.NotNil(t, lf.Modules)
-	require.Empty(t, lf.Modules)
+	require.NotNil(t, lf.Apps)
+	require.Empty(t, lf.Apps)
 }
 
 func TestLockFileFromResolved(t *testing.T) {
-	modules := []ResolvedModule{
+	apps := []ResolvedApp{
 		{Name: "foo", Version: mustVersion("1.0.0"), Source: "github:test/foo"},
 		{Name: "bar", Version: mustVersion("2.5.0"), Source: "github:test/bar"},
 	}
 
-	lf := LockFileFromResolved(modules)
-	require.Len(t, lf.Modules, 2)
-	require.Equal(t, "1.0.0", lf.Modules["foo"].Version)
-	require.Equal(t, "2.5.0", lf.Modules["bar"].Version)
+	lf := LockFileFromResolved(apps)
+	require.Len(t, lf.Apps, 2)
+	require.Equal(t, "1.0.0", lf.Apps["foo"].Version)
+	require.Equal(t, "2.5.0", lf.Apps["bar"].Version)
 }
 
 func TestLockFileToResolved(t *testing.T) {
 	lf := &LockFile{
-		Modules: map[string]LockedModule{
+		Apps: map[string]LockedApp{
 			"bar": {Version: "2.0.0", Source: "github:test/bar"},
 			"foo": {Version: "1.0.0", Source: "github:test/foo"},
 		},
@@ -62,7 +62,7 @@ func TestLockFileToResolved(t *testing.T) {
 
 func TestLockFileToResolvedInvalidVersion(t *testing.T) {
 	lf := &LockFile{
-		Modules: map[string]LockedModule{
+		Apps: map[string]LockedApp{
 			"foo": {Version: "not-a-version"},
 		},
 	}
@@ -74,7 +74,7 @@ func TestLockFileToResolvedInvalidVersion(t *testing.T) {
 
 func TestLockFileIsStale(t *testing.T) {
 	lf := &LockFile{
-		Modules: map[string]LockedModule{
+		Apps: map[string]LockedApp{
 			"foo": {Version: "1.5.0", Source: "github:test/foo"},
 			"bar": {Version: "2.0.0", Source: "github:test/bar"},
 		},
@@ -121,7 +121,7 @@ func TestLockFileIsStale(t *testing.T) {
 
 func TestLockFileIsStaleInvalidConstraint(t *testing.T) {
 	lf := &LockFile{
-		Modules: map[string]LockedModule{
+		Apps: map[string]LockedApp{
 			"foo": {Version: "1.0.0"},
 		},
 	}

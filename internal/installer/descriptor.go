@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
-// ServiceRoute describes a single RPC method exposed by a module.
+// ServiceRoute describes a single RPC method exposed by a app.
 type ServiceRoute struct {
 	// FullMethod is the ConnectRPC-style path: "/{package}.{Service}/{Method}".
 	FullMethod string
@@ -54,12 +54,12 @@ func ParseServiceDescriptor(pbPath string) ([]ServiceRoute, error) {
 	return routes, nil
 }
 
-// ParseServiceDescriptorFromDir reads a service.pb from a module directory
-// using the path specified in module metadata.
-func ParseServiceDescriptorFromDir(moduleDir string, meta *ModuleMetadata) ([]ServiceRoute, error) {
+// ParseServiceDescriptorFromDir reads a service.pb from a app directory
+// using the path specified in app metadata.
+func ParseServiceDescriptorFromDir(appDir string, meta *AppMetadata) ([]ServiceRoute, error) {
 	if meta == nil || meta.ServiceProto == "" {
 		return nil, nil
 	}
-	pbPath := filepath.Join(moduleDir, meta.ServiceProto)
+	pbPath := filepath.Join(appDir, meta.ServiceProto)
 	return ParseServiceDescriptor(pbPath)
 }

@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestChatModelConfigValidate(t *testing.T) {
+func TestLlamaChatConfigValidate(t *testing.T) {
 	t.Run("valid config", func(t *testing.T) {
-		cfg := ChatModelConfig{
+		cfg := LlamaChatConfig{
 			Path:        "./models/test.gguf",
 			ContextSize: 2048,
 			MaxTokens:   1024,
@@ -20,16 +20,16 @@ func TestChatModelConfigValidate(t *testing.T) {
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		cfg := ChatModelConfig{
+		cfg := LlamaChatConfig{
 			ContextSize: 2048,
 		}
 		require.ErrorIs(t, cfg.Validate(), ErrModelPathEmpty)
 	})
 }
 
-func TestEmbeddingModelConfigValidate(t *testing.T) {
+func TestLlamaEmbeddingConfigValidate(t *testing.T) {
 	t.Run("valid config", func(t *testing.T) {
-		cfg := EmbeddingModelConfig{
+		cfg := LlamaEmbeddingConfig{
 			Path:        "./models/test-embed.gguf",
 			ContextSize: 2048,
 		}
@@ -37,7 +37,7 @@ func TestEmbeddingModelConfigValidate(t *testing.T) {
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		cfg := EmbeddingModelConfig{
+		cfg := LlamaEmbeddingConfig{
 			ContextSize: 2048,
 		}
 		require.ErrorIs(t, cfg.Validate(), ErrModelPathEmpty)
@@ -56,7 +56,7 @@ func TestEffectiveLaunchMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mc := ModuleConfig{LaunchMode: tt.mode}
+			mc := AppConfig{LaunchMode: tt.mode}
 			require.Equal(t, tt.want, mc.EffectiveLaunchMode())
 		})
 	}
@@ -82,26 +82,26 @@ func TestEffectiveModelIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestEffectiveModuleIdleTimeout(t *testing.T) {
+func TestEffectiveAppIdleTimeout(t *testing.T) {
 	tests := []struct {
 		name    string
 		timeout string
 		want    time.Duration
 	}{
-		{"empty defaults to 5s", "", DefaultModuleIdleTimeout},
+		{"empty defaults to 5s", "", DefaultAppIdleTimeout},
 		{"valid 10s", "10s", 10 * time.Second},
 		{"valid 1m", "1m", time.Minute},
-		{"invalid falls back to default", "notaduration", DefaultModuleIdleTimeout},
+		{"invalid falls back to default", "notaduration", DefaultAppIdleTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{ModuleIdleTimeout: tt.timeout}
-			require.Equal(t, tt.want, cfg.EffectiveModuleIdleTimeout())
+			cfg := Config{AppIdleTimeout: tt.timeout}
+			require.Equal(t, tt.want, cfg.EffectiveAppIdleTimeout())
 		})
 	}
 }
 
-func TestAutoStartMigration(t *testing.T) {
+func TestLoadApps(t *testing.T) {
 	tests := []struct {
 		name          string
 		yaml          string
@@ -109,7 +109,7 @@ func TestAutoStartMigration(t *testing.T) {
 		wantMode      LaunchMode
 	}{
 		{
-			"auto_start true keeps auto_start",
+			"auto_start true",
 			"- name: test\n  command: ./test\n  auto_start: true\n",
 			true, LaunchModeOnDemand,
 		},
@@ -124,11 +124,6 @@ func TestAutoStartMigration(t *testing.T) {
 			false, LaunchModeOnDemand,
 		},
 		{
-			"legacy launch_mode auto migrates to auto_start",
-			"- name: test\n  command: ./test\n  launch_mode: auto\n",
-			true, LaunchModeManual,
-		},
-		{
 			"on_demand with auto_start",
 			"- name: test\n  command: ./test\n  launch_mode: on_demand\n  auto_start: true\n",
 			true, LaunchModeOnDemand,
@@ -137,17 +132,14 @@ func TestAutoStartMigration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			cfgPath := filepath.Join(dir, "config.yml")
-			modPath := filepath.Join(dir, "modules.yml")
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ConfigFile), []byte("listen_addr: ':3455'\n"), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, AppsFile), []byte(tt.yaml), 0644))
 
-			require.NoError(t, os.WriteFile(cfgPath, []byte("listen_addr: ':3455'\n"), 0644))
-			require.NoError(t, os.WriteFile(modPath, []byte(tt.yaml), 0644))
-
-			cfg, _, err := Load(cfgPath)
+			cfg, _, err := Load(dir)
 			require.NoError(t, err)
-			require.Len(t, cfg.Modules, 1)
-			require.Equal(t, tt.wantAutoStart, cfg.Modules[0].AutoStart)
-			require.Equal(t, tt.wantMode, cfg.Modules[0].EffectiveLaunchMode())
+			require.Len(t, cfg.Apps, 1)
+			require.Equal(t, tt.wantAutoStart, cfg.Apps[0].AutoStart)
+			require.Equal(t, tt.wantMode, cfg.Apps[0].EffectiveLaunchMode())
 		})
 	}
 }

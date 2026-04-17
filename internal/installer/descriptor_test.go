@@ -104,7 +104,7 @@ func TestParseServiceDescriptorFromDir_NoMeta(t *testing.T) {
 }
 
 func TestParseServiceDescriptorFromDir_EmptyServiceProto(t *testing.T) {
-	routes, err := ParseServiceDescriptorFromDir("/some/dir", &ModuleMetadata{})
+	routes, err := ParseServiceDescriptorFromDir("/some/dir", &AppMetadata{})
 	require.NoError(t, err)
 	require.Nil(t, routes)
 }

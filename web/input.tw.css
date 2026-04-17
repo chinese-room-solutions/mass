@@ -14,7 +14,7 @@ html:not(.sl-theme-light) .text-white { color: #faf8f6 !important; }
 /* ── Structural elements ─────────────────────────────────────────────────── */
 header                    { background: var(--mass-bg-panel) !important; border-color: var(--mass-border) !important; }
 #mass-left-panel           { background: var(--mass-bg-panel) !important; border-color: var(--mass-border) !important; }
-#module-content-wrapper   { background: var(--mass-bg-base)  !important; }
+#app-content-wrapper      { background: var(--mass-bg-base)  !important; }
 
 /* borders inside the left panel */
 #mass-left-panel .border-b,
@@ -36,12 +36,12 @@ html:not(.sl-theme-light) .mass-badge-embedding { background: #2e1065 !important
 html.sl-theme-dark .mass-badge-mmproj,
 html:not(.sl-theme-light) .mass-badge-mmproj    { background: #3b2f1e !important; color: #e2c088 !important; }
 
-/* ── Agent cards (sl-details) ────────────────────────────────────────────── */
-sl-details.agent-card::part(base)    { background: var(--mass-bg-panel); border-color: var(--mass-border); }
-sl-details.agent-card::part(header)  { background: var(--mass-bg-panel); color: var(--mass-text); }
-sl-details.agent-card::part(content) { background: var(--mass-bg-base); }
+/* ── Worker cards (sl-details) ───────────────────────────────────────────── */
+sl-details.worker-card::part(base)    { background: var(--mass-bg-panel); border-color: var(--mass-border); }
+sl-details.worker-card::part(header)  { background: var(--mass-bg-panel); color: var(--mass-text); }
+sl-details.worker-card::part(content) { background: var(--mass-bg-base); }
 
-/* ── Module rows ─────────────────────────────────────────────────────────── */
+/* ── App rows ────────────────────────────────────────────────────────────── */
 .mass-row-hover:hover { background: var(--mass-bg-hover)  !important; }
 .mass-row-active      { background: var(--mass-bg-active) !important; }
 .mass-row-active:hover{ background: var(--mass-bg-active) !important; }
@@ -51,7 +51,7 @@ sl-details.agent-card::part(content) { background: var(--mass-bg-base); }
 .mass-sidebar-icon:hover { opacity: 0.8; }
 /* Secondary sidebar icons: hidden until row hover */
 .mass-sidebar-secondary { display: none; }
-.module-row:hover .mass-sidebar-secondary { display: contents; }
+.app-row:hover .mass-sidebar-secondary { display: contents; }
 
 /* ── Tailwind neutral → theme variable mapping (light mode) ──────────────── */
 html.sl-theme-light .bg-neutral-950  { background-color: var(--mass-bg-base)  !important; }
@@ -123,9 +123,9 @@ html.sl-theme-light [id^="sidebar-dot-"] { border-color: var(--mass-bg-panel) !i
 .bg-red-400   { background-color: var(--mass-red) !important; }
 
 
-/* Center Modules-tab dialogs relative to the right content panel (not full viewport).
+/* Center Apps-tab dialogs relative to the right content panel (not full viewport).
    --mass-sidebar-w is set by JS from the sidebar's current width. */
-#mass-add-module-dialog::part(panel),
+#mass-add-app-dialog::part(panel),
 #mass-confirm-uninstall-dialog::part(panel),
 #mass-file-browser::part(panel),
 #mass-hf-dialog::part(panel),

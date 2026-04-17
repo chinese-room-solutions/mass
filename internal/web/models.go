@@ -9,29 +9,50 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chinese-room-solutions/mass-module/uikit"
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
 	"github.com/chinese-room-solutions/mass/internal/gguf"
 )
 
+// ModelFileKind classifies a GGUF file found on disk. Lowercase for
+// consistency with llm.ModelKind (which uses "chat" / "embedding"); the
+// file-scan domain adds two more values for sidecar / unrecognised files.
+type ModelFileKind string
+
+const (
+	ModelFileKindChat      ModelFileKind = "chat"
+	ModelFileKindEmbedding ModelFileKind = "embedding"
+	ModelFileKindMmproj    ModelFileKind = "mmproj"  // vision projector sidecar
+	ModelFileKindUnknown   ModelFileKind = "unknown" // reserved; not produced today
+)
+
+// Title returns a Title-case display string ("Chat", "Embedding", ...).
+func (k ModelFileKind) Title() string {
+	if k == "" {
+		return ""
+	}
+	s := string(k)
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 // LocalModelInfo represents a GGUF model file found in the centralized models directory.
 type LocalModelInfo struct {
-	Path         string    // absolute path to the .gguf file
-	Filename     string    // base filename (e.g. "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
-	RelPath      string    // path relative to models root (e.g. "publisher/repo/file.gguf")
-	ModelID      string    // relative path without extension (e.g. "publisher/repo/file")
-	ModelType    string    // "Chat", "Embedding", or "Unknown"
-	Quantization string    // parsed quant tag like "Q4_K_M", "Q5_K_S", ""
-	SizeBytes    int64     // file size
-	ModTime      time.Time // modification time
-	SubDir       string    // publisher/repo prefix (first two path segments)
-	HasVision    bool      // true if a sibling mmproj file exists in the same directory
-	HasThinking  bool      // true if GGUF chat template contains thinking tokens
+	Path         string        // absolute path to the .gguf file
+	Filename     string        // base filename (e.g. "Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+	RelPath      string        // path relative to models root (e.g. "publisher/repo/file.gguf")
+	ModelID      string        // relative path without extension (e.g. "publisher/repo/file")
+	ModelType    ModelFileKind // chat / embedding / mmproj / unknown
+	Quantization string        // parsed quant tag like "Q4_K_M", "Q5_K_S", ""
+	SizeBytes    int64         // file size
+	ModTime      time.Time     // modification time
+	SubDir       string        // publisher/repo prefix (first two path segments)
+	HasVision    bool          // true if a sibling mmproj file exists in the same directory
+	HasThinking  bool          // true if GGUF chat template contains thinking tokens
 }
 
 // ModelGroup groups variants of the same base model together.
 type ModelGroup struct {
 	BaseName  string           // human-readable base model name (quant stripped)
-	ModelType string           // dominant type among variants
+	ModelType ModelFileKind    // dominant type among variants
 	SubDir    string           // subdirectory under models/
 	Variants  []LocalModelInfo // individual GGUF files
 }
@@ -94,12 +115,12 @@ func ScanModels(modelsDir string) ([]LocalModelInfo, error) {
 	// then set HasVision on non-mmproj models in those directories.
 	mmprojDirs := make(map[string]bool)
 	for _, m := range models {
-		if m.ModelType == "Mmproj" {
+		if m.ModelType == ModelFileKindMmproj {
 			mmprojDirs[filepath.Dir(m.Path)] = true
 		}
 	}
 	for i := range models {
-		if models[i].ModelType != "Mmproj" && mmprojDirs[filepath.Dir(models[i].Path)] {
+		if models[i].ModelType != ModelFileKindMmproj && mmprojDirs[filepath.Dir(models[i].Path)] {
 			models[i].HasVision = true
 		}
 	}
@@ -107,7 +128,7 @@ func ScanModels(modelsDir string) ([]LocalModelInfo, error) {
 	// Detect thinking-capable models from cached GGUF metadata (parallel).
 	var wg sync.WaitGroup
 	for i := range models {
-		if models[i].ModelType == "Mmproj" || models[i].ModelType == "Embedding" {
+		if models[i].ModelType == ModelFileKindMmproj || models[i].ModelType == ModelFileKindEmbedding {
 			continue
 		}
 		wg.Add(1)
@@ -127,18 +148,18 @@ func ScanModels(modelsDir string) ([]LocalModelInfo, error) {
 	return models, nil
 }
 
-// inferModelType guesses the model type from the filename and relative path.
-func inferModelType(filename, relPath string) string {
+// inferModelType guesses the model file kind from the filename and relative path.
+func inferModelType(filename, relPath string) ModelFileKind {
 	lower := strings.ToLower(filename + " " + relPath)
 	if strings.Contains(lower, "mmproj") {
-		return "Mmproj"
+		return ModelFileKindMmproj
 	}
 	if strings.Contains(lower, "embed") || strings.Contains(lower, "sentence") ||
 		strings.Contains(lower, "feature-extraction") || strings.Contains(lower, "bge-") ||
 		strings.Contains(lower, "gte-") || strings.Contains(lower, "e5-") {
-		return "Embedding"
+		return ModelFileKindEmbedding
 	}
-	return "Chat"
+	return ModelFileKindChat
 }
 
 // stripQuant removes the quantization suffix from a GGUF filename to get the base model name.
@@ -228,7 +249,7 @@ func GroupModels(models []LocalModelInfo) []ModelGroup {
 
 	// First pass: group non-mmproj models.
 	for _, m := range models {
-		if m.ModelType == "Mmproj" {
+		if m.ModelType == ModelFileKindMmproj {
 			continue
 		}
 		base := stripQuant(m.Filename)
@@ -253,7 +274,7 @@ func GroupModels(models []LocalModelInfo) []ModelGroup {
 		}
 	}
 	for _, m := range models {
-		if m.ModelType != "Mmproj" {
+		if m.ModelType != ModelFileKindMmproj {
 			continue
 		}
 		if parentKey, ok := subDirGroup[m.SubDir]; ok {
@@ -396,4 +417,36 @@ func downloadedFilesMap(modelsDir string) map[string]bool {
 		m[e.RelPath] = true
 	}
 	return m
+}
+
+// CanonicalModelFiles returns every .gguf under modelsDir as forward-
+// slash relative paths. Used by the worker hub for cache reconciliation —
+// anything a worker has outside this set is stale.
+//
+// Walks directly (not via [ScanModels]) because reconciliation runs on
+// every heartbeat and only needs filenames, not GGUF metadata.
+func CanonicalModelFiles(modelsDir string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if modelsDir == "" {
+		return out
+	}
+	_ = filepath.WalkDir(modelsDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, ".downloading-") {
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(name), ".gguf") {
+			return nil
+		}
+		rel, err := filepath.Rel(modelsDir, path)
+		if err != nil {
+			return nil
+		}
+		out[filepath.ToSlash(rel)] = struct{}{}
+		return nil
+	})
+	return out
 }

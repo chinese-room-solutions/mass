@@ -142,7 +142,7 @@
 		var container = document.getElementById('sched-load-models');
 		if (!container) return;
 		container.innerHTML = '<div class="text-center py-4"><sl-spinner style="font-size:1rem;--track-width:2px"></sl-spinner></div>';
-		fetch('/api/models/select').then(function(r) { return r.text(); }).then(function(html) {
+		fetch('/api/v1/models/select').then(function(r) { return r.text(); }).then(function(html) {
 			container.innerHTML = html;
 			// Remove the embedded search input — we have our own filter above.
 			var embeddedSearch = container.querySelector('#mass-model-select-search');

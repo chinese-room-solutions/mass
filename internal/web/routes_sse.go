@@ -22,10 +22,10 @@ func (h *Handler) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	// Replay-on-connect: browsers may drop the SSE connection when the tab
 	// is backgrounded. Events broadcast during the gap are lost (clients=0).
 	// Each replay method sends the current state so the UI catches up.
-	h.replayModuleStates(sse)
+	h.replayAppStates(sse)
 	h.replaySystemLogs(sse)
 	h.pushSchedulerContent(sse)
-	h.replayAgents(sse)
+	h.replayWorkers(sse)
 
 	for {
 		select {
@@ -34,32 +34,32 @@ func (h *Handler) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		case evt := <-ch:
 			switch evt.Type {
 			case EventTypeStatus:
-				if err := sse.PatchElements(templates.RenderModuleStatus(evt.ModuleName, evt.State, evt.Error, "")); err != nil {
-					h.logger.Debug().Err(err).Str("module", evt.ModuleName).Msg("SSE patch module-status (expected if no module selected)")
+				if err := sse.PatchElements(templates.RenderAppStatus(evt.AppName, evt.State, evt.Error, "")); err != nil {
+					h.logger.Debug().Err(err).Str("app", evt.AppName).Msg("SSE patch app-status (expected if no app selected)")
 				}
 				launchMode := config.LaunchModeManual
-				if pc := h.cfg.FindModule(evt.ModuleName); pc != nil {
+				if pc := h.cfg.FindApp(evt.AppName); pc != nil {
 					launchMode = pc.EffectiveLaunchMode()
 				}
-				if err := sse.PatchElements(templates.RenderSidebarDot(evt.ModuleName, evt.State, launchMode),
-					datastar.WithSelector("#sidebar-dot-"+evt.ModuleName)); err != nil {
-					h.logger.Warn().Err(err).Str("module", evt.ModuleName).Msg("SSE patch sidebar-dot failed")
+				if err := sse.PatchElements(templates.RenderSidebarDot(evt.AppName, evt.State, launchMode),
+					datastar.WithSelector("#sidebar-dot-"+evt.AppName)); err != nil {
+					h.logger.Warn().Err(err).Str("app", evt.AppName).Msg("SSE patch sidebar-dot failed")
 				}
-				if err := sse.PatchElements(templates.RenderModuleActions(evt.ModuleName, evt.State),
-					datastar.WithSelector("#module-actions-"+evt.ModuleName)); err != nil {
-					h.logger.Warn().Err(err).Str("module", evt.ModuleName).Msg("SSE patch module-actions failed")
+				if err := sse.PatchElements(templates.RenderAppActions(evt.AppName, evt.State),
+					datastar.WithSelector("#app-actions-"+evt.AppName)); err != nil {
+					h.logger.Warn().Err(err).Str("app", evt.AppName).Msg("SSE patch app-actions failed")
 				}
 				if evt.State != scheduler.StateRunning {
-					_ = sse.PatchElements(templates.RenderRestartNoticeClear())
+					mustSSE(sse.PatchElements(templates.RenderRestartNoticeClear()))
 				}
 			case EventTypeProgress:
-				_ = sse.PatchElements(templates.RenderModuleStatus(evt.ModuleName, scheduler.StateStarting, nil, evt.Progress))
+				mustSSE(sse.PatchElements(templates.RenderAppStatus(evt.AppName, scheduler.StateStarting, nil, evt.Progress)))
 			case EventTypeLog:
 				line := templates.RenderLogLine(evt.LogLine)
-				_ = sse.ExecuteScript(appendLogLineScript(line))
+				mustSSE(sse.ExecuteScript(appendLogLineScript(line)))
 			case EventTypeSystemLog:
 				rendered := templates.RenderSystemLogLine(evt.SysLogLine)
-				_ = sse.ExecuteScript(appendSysLogLineScript(rendered))
+				mustSSE(sse.ExecuteScript(appendSysLogLineScript(rendered)))
 			case EventTypePoolChange:
 				if evt.PoolChange == scheduler.PoolChangeList {
 					h.pushSchedulerContent(sse)
@@ -71,50 +71,50 @@ func (h *Handler) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				jsFile := jsStringEscape(evt.DlFilename)
 				if evt.DlStart {
 					jsGroup := jsStringEscape(evt.DlGroupName)
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlStart('%s','%s')`, jsFile, jsGroup))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlStart('%s','%s')`, jsFile, jsGroup)))
 				} else if evt.DlPaused {
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlPaused('%s')`, jsFile))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlPaused('%s')`, jsFile)))
 				} else if evt.DlCancelled {
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlCancel('%s')`, jsFile))
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__hfDlCancel('%s')`, jsFile))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlCancel('%s')`, jsFile)))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__hfDlCancel('%s')`, jsFile)))
 				} else if evt.Error != nil {
 					jsErr := jsStringEscape(evt.Error.Error())
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__hfDlErr('%s','%s')`, jsFile, jsErr))
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlErr('%s','%s')`, jsFile, jsErr))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__hfDlErr('%s','%s')`, jsFile, jsErr)))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlErr('%s','%s')`, jsFile, jsErr)))
 				} else if evt.DlDone {
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__hfDlDone('%s')`, jsFile))
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlDone('%s')`, jsFile))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__hfDlDone('%s')`, jsFile)))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlDone('%s')`, jsFile)))
 					jsPath := jsStringEscape(evt.DlPath)
-					_ = sse.ExecuteScript(fmt.Sprintf(
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(
 						`(function(){var el=document.querySelector('[data-bind="modelPath"]');`+
 							`if(el){el.value='%s';el.dispatchEvent(new Event('input',{bubbles:true}))}})()`,
-						jsPath))
-					_ = sse.ExecuteScript(`(function(){var b=document.getElementById('mass-models-refresh-btn');if(b)b.click()})()`)
+						jsPath)))
+					mustSSE(sse.ExecuteScript(`(function(){var b=document.getElementById('mass-models-refresh-btn');if(b)b.click()})()`))
 				} else {
 					pct := 0
 					if evt.DlTotal > 0 {
 						pct = int(100 * evt.DlDownloaded / evt.DlTotal)
 					}
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__hfDlProgress('%s',%d)`, jsFile, pct))
-					_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlProgress('%s',%d,%d,%d)`, jsFile, pct, evt.DlDownloaded, evt.DlTotal))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__hfDlProgress('%s',%d)`, jsFile, pct)))
+					mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlProgress('%s',%d,%d,%d)`, jsFile, pct, evt.DlDownloaded, evt.DlTotal)))
 				}
-			case EventTypeAgentChange:
-				h.patchAgentsList(sse, h.buildAgentViews())
-			case EventTypeAgentStats:
-				h.patchAgentStats(sse)
+			case EventTypeWorkerChange:
+				h.patchWorkersList(sse, h.buildWorkerViews())
+			case EventTypeWorkerStats:
+				h.patchWorkerStats(sse)
 			}
 		}
 	}
 }
 
-// parseDownloadLine detects structured download progress lines from module
+// parseDownloadLine detects structured download progress lines from app
 // stderr and converts them into EventTypeDownload events.
-func parseDownloadLine(moduleName, line string) (SSEEvent, bool) {
+func parseDownloadLine(appName, line string) (SSEEvent, bool) {
 	if strings.HasPrefix(line, "MASS_DL_DONE:") {
 		parts := strings.SplitN(line[len("MASS_DL_DONE:"):], ":", 2)
 		if len(parts) == 2 {
 			return SSEEvent{
-				Type: EventTypeDownload, ModuleName: moduleName,
+				Type: EventTypeDownload, AppName: appName,
 				DlFilename: parts[0], DlDone: true, DlPath: parts[1],
 			}, true
 		}
@@ -123,7 +123,7 @@ func parseDownloadLine(moduleName, line string) (SSEEvent, bool) {
 		parts := strings.SplitN(line[len("MASS_DL_ERR:"):], ":", 2)
 		if len(parts) == 2 {
 			return SSEEvent{
-				Type: EventTypeDownload, ModuleName: moduleName,
+				Type: EventTypeDownload, AppName: appName,
 				DlFilename: parts[0], Error: errors.New(parts[1]),
 			}, true
 		}
@@ -134,7 +134,7 @@ func parseDownloadLine(moduleName, line string) (SSEEvent, bool) {
 			dl, _ := strconv.ParseInt(parts[1], 10, 64)
 			tot, _ := strconv.ParseInt(parts[2], 10, 64)
 			return SSEEvent{
-				Type: EventTypeDownload, ModuleName: moduleName,
+				Type: EventTypeDownload, AppName: appName,
 				DlFilename: parts[0], DlDownloaded: dl, DlTotal: tot,
 			}, true
 		}
@@ -142,29 +142,29 @@ func parseDownloadLine(moduleName, line string) (SSEEvent, bool) {
 	return SSEEvent{}, false
 }
 
-// replayModuleStates sends the current sidebar dot and action buttons for all
-// modules so the client catches up after an SSE reconnect.
-func (h *Handler) replayModuleStates(sse *datastar.ServerSentEventGenerator) {
-	allModules := h.orch.GetAllModules()
-	for name, mp := range allModules {
+// replayAppStates sends the current sidebar dot and action buttons for all
+// apps so the client catches up after an SSE reconnect.
+func (h *Handler) replayAppStates(sse *datastar.ServerSentEventGenerator) {
+	allApps := h.orch.GetAllApps()
+	for name, mp := range allApps {
 		launchMode := config.LaunchModeManual
-		if pc := h.cfg.FindModule(name); pc != nil {
+		if pc := h.cfg.FindApp(name); pc != nil {
 			launchMode = pc.EffectiveLaunchMode()
 		}
-		_ = sse.PatchElements(templates.RenderSidebarDot(name, mp.State, launchMode),
-			datastar.WithSelector("#sidebar-dot-"+name))
-		_ = sse.PatchElements(templates.RenderModuleActions(name, mp.State),
-			datastar.WithSelector("#module-actions-"+name))
+		mustSSE(sse.PatchElements(templates.RenderSidebarDot(name, mp.State, launchMode),
+			datastar.WithSelector("#sidebar-dot-"+name)))
+		mustSSE(sse.PatchElements(templates.RenderAppActions(name, mp.State),
+			datastar.WithSelector("#app-actions-"+name)))
 	}
 }
 
 // handleSyncLogs returns the current system logs and (optionally) the active
-// module's live logs as pre-rendered HTML so the browser can catch up after
+// app's live logs as pre-rendered HTML so the browser can catch up after
 // regaining focus.
 func (h *Handler) handleSyncLogs(w http.ResponseWriter, r *http.Request) {
 	type syncResponse struct {
-		SysLog    string `json:"sysLog"`
-		ModuleLog string `json:"moduleLog,omitempty"`
+		SysLog string `json:"sysLog"`
+		AppLog string `json:"appLog,omitempty"`
 	}
 
 	var resp syncResponse
@@ -177,14 +177,14 @@ func (h *Handler) handleSyncLogs(w http.ResponseWriter, r *http.Request) {
 		resp.SysLog = sb.String()
 	}
 
-	if name := r.URL.Query().Get("module"); name != "" {
+	if name := r.URL.Query().Get("app"); name != "" {
 		lines := h.orch.GetLogHistory(name)
 		if len(lines) > 0 {
 			var sb strings.Builder
 			for _, line := range lines {
 				sb.WriteString(templates.RenderLogLine(line))
 			}
-			resp.ModuleLog = sb.String()
+			resp.AppLog = sb.String()
 		}
 	}
 
@@ -198,10 +198,10 @@ func (h *Handler) replaySystemLogs(sse *datastar.ServerSentEventGenerator) {
 		return
 	}
 	lines := h.sysLog.Lines()
-	_ = sse.ExecuteScript("(function(){var el=document.getElementById('syslog-entries');if(el)el.innerHTML=''})()")
+	mustSSE(sse.ExecuteScript("(function(){var el=document.getElementById('syslog-entries');if(el)el.innerHTML=''})()"))
 	for _, line := range lines {
 		rendered := templates.RenderSystemLogLine(line)
-		_ = sse.ExecuteScript(appendSysLogLineScript(rendered))
+		mustSSE(sse.ExecuteScript(appendSysLogLineScript(rendered)))
 	}
 }
 

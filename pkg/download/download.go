@@ -265,7 +265,11 @@ func (m *Manager) handleResumeResponse(ctx context.Context, resp *http.Response,
 
 	case http.StatusRequestedRangeNotSatisfiable:
 		// Partial file invalid — restart fresh.
-		_ = resp.Body.Close()
+		// Body close failure here is a network-level issue we can't recover
+		// from anyway; the next request will surface the real error.
+		if cErr := resp.Body.Close(); cErr != nil {
+			return 0, nil, ctxerr.With(fmt.Errorf("closing partial-content response: %w", cErr), map[string]any{"url": url})
+		}
 		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return 0, nil, fmt.Errorf("creating request: %w", err)
@@ -281,7 +285,9 @@ func (m *Manager) handleResumeResponse(ctx context.Context, resp *http.Response,
 		}
 		if resp2.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp2.Body, 1024))
-			_ = resp2.Body.Close()
+			if cErr := resp2.Body.Close(); cErr != nil {
+				return 0, nil, ctxerr.With(fmt.Errorf("%w: %d: %s (body-close: %v)", httpSentinel(resp2.StatusCode), resp2.StatusCode, string(body), cErr), map[string]any{"url": url, "status": resp2.StatusCode})
+			}
 			return 0, nil, ctxerr.With(fmt.Errorf("%w: %d: %s", httpSentinel(resp2.StatusCode), resp2.StatusCode, string(body)), map[string]any{"url": url, "status": resp2.StatusCode})
 		}
 		return 0, resp2, nil

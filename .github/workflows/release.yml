@@ -1,0 +1,170 @@
+name: release
+
+# Builds and publishes per-platform/per-backend mass binaries on tag push.
+# Tier-1 artifacts (built on every release):
+#   - linux-amd64-cpu      (CPU-only)
+#   - linux-amd64-cuda     (NVIDIA, CUDA arch 86 = RTX 30xx baseline)
+#   - macos-arm64-metal    (Apple Silicon)
+#   - windows-amd64-cuda   (NVIDIA via make-win.ps1)
+#
+# AMD ROCm and Linux arm64 (Jetson) are tier-2 — add jobs here once demand exists
+# (ROCm in particular needs a self-hosted runner).
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required to upload release artifacts
+
+env:
+  LLAMA_GO_DIR: ${{ github.workspace }}/../llama-go
+
+jobs:
+  linux-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - name: Build CPU binary
+        working-directory: mass
+        env:
+          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
+        run: make build-cpu
+      - name: Package
+        working-directory: mass
+        run: |
+          tar -czf mass-${{ github.ref_name }}-linux-amd64-cpu.tar.gz -C bin mass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mass-linux-amd64-cpu
+          path: mass/mass-${{ github.ref_name }}-linux-amd64-cpu.tar.gz
+
+  linux-cuda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.5.0'
+          method: network
+      - name: Build CUDA binary
+        working-directory: mass
+        env:
+          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
+          CUDA_ARCH: "86"  # RTX 30xx baseline; users can rebuild for other archs
+        run: make build-cuda
+      - name: Package
+        working-directory: mass
+        run: |
+          tar -czf mass-${{ github.ref_name }}-linux-amd64-cuda.tar.gz -C bin mass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mass-linux-amd64-cuda
+          path: mass/mass-${{ github.ref_name }}-linux-amd64-cuda.tar.gz
+
+  macos-metal:
+    runs-on: macos-14  # arm64 (Apple Silicon)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - name: Install build deps
+        run: brew install cmake ninja
+      - name: Build Metal binary
+        working-directory: mass
+        env:
+          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
+        run: make build-metal
+      - name: Package
+        working-directory: mass
+        run: |
+          tar -czf mass-${{ github.ref_name }}-macos-arm64-metal.tar.gz -C bin mass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mass-macos-arm64-metal
+          path: mass/mass-${{ github.ref_name }}-macos-arm64-metal.tar.gz
+
+  windows-cuda:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja mingw-w64-x86_64-cmake
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.5.0'
+          method: network
+      - name: Build CUDA binary (Windows)
+        working-directory: mass
+        shell: pwsh
+        run: .\make-win.ps1 build
+      - name: Package
+        working-directory: mass
+        shell: pwsh
+        run: |
+          Compress-Archive -Path bin\mass.exe,bin\*.dll -DestinationPath mass-${{ github.ref_name }}-windows-amd64-cuda.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mass-windows-amd64-cuda
+          path: mass/mass-${{ github.ref_name }}-windows-amd64-cuda.zip
+
+  publish:
+    needs: [linux-cpu, linux-cuda, macos-metal, windows-cuda]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

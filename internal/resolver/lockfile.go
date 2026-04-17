@@ -9,26 +9,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// LockFile represents the module.lock file that records exact resolved versions.
+// LockFile represents the app.lock file that records exact resolved versions.
 type LockFile struct {
 	// Comment is written as a header.
-	Modules map[string]LockedModule `yaml:"modules"`
+	Apps map[string]LockedApp `yaml:"apps"`
 }
 
-// LockedModule is a single entry in the lock file.
-type LockedModule struct {
+// LockedApp is a single entry in the lock file.
+type LockedApp struct {
 	Version string `yaml:"version"`
 	Source  string `yaml:"source"`
 	SHA256  string `yaml:"sha256,omitempty"`
 }
 
-// ReadLockFile reads and parses a module.lock file. Returns an empty lock file
+// ReadLockFile reads and parses a app.lock file. Returns an empty lock file
 // if the file does not exist.
 func ReadLockFile(path string) (*LockFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &LockFile{Modules: make(map[string]LockedModule)}, nil
+			return &LockFile{Apps: make(map[string]LockedApp)}, nil
 		}
 		return nil, fmt.Errorf("reading lock file: %w", err)
 	}
@@ -37,8 +37,8 @@ func ReadLockFile(path string) (*LockFile, error) {
 	if err := yaml.Unmarshal(data, &lf); err != nil {
 		return nil, fmt.Errorf("parsing lock file: %w", err)
 	}
-	if lf.Modules == nil {
-		lf.Modules = make(map[string]LockedModule)
+	if lf.Apps == nil {
+		lf.Apps = make(map[string]LockedApp)
 	}
 	return &lf, nil
 }
@@ -54,13 +54,13 @@ func WriteLockFile(path string, lf *LockFile) error {
 	return os.WriteFile(path, append([]byte(header), data...), 0644)
 }
 
-// LockFileFromResolved creates a LockFile from resolved modules.
-func LockFileFromResolved(modules []ResolvedModule) *LockFile {
+// LockFileFromResolved creates a LockFile from resolved apps.
+func LockFileFromResolved(apps []ResolvedApp) *LockFile {
 	lf := &LockFile{
-		Modules: make(map[string]LockedModule, len(modules)),
+		Apps: make(map[string]LockedApp, len(apps)),
 	}
-	for _, m := range modules {
-		lf.Modules[m.Name] = LockedModule{
+	for _, m := range apps {
+		lf.Apps[m.Name] = LockedApp{
 			Version: m.Version.String(),
 			Source:  m.Source,
 		}
@@ -68,23 +68,23 @@ func LockFileFromResolved(modules []ResolvedModule) *LockFile {
 	return lf
 }
 
-// ToResolved converts lock file entries back to ResolvedModule slice.
-// Modules are returned sorted by name for deterministic ordering.
-func (lf *LockFile) ToResolved() ([]ResolvedModule, error) {
-	names := make([]string, 0, len(lf.Modules))
-	for name := range lf.Modules {
+// ToResolved converts lock file entries back to ResolvedApp slice.
+// Apps are returned sorted by name for deterministic ordering.
+func (lf *LockFile) ToResolved() ([]ResolvedApp, error) {
+	names := make([]string, 0, len(lf.Apps))
+	for name := range lf.Apps {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	result := make([]ResolvedModule, 0, len(names))
+	result := make([]ResolvedApp, 0, len(names))
 	for _, name := range names {
-		entry := lf.Modules[name]
+		entry := lf.Apps[name]
 		v, err := semver.NewVersion(entry.Version)
 		if err != nil {
 			return nil, fmt.Errorf("invalid version %q for %s in lock file: %w", entry.Version, name, err)
 		}
-		result = append(result, ResolvedModule{
+		result = append(result, ResolvedApp{
 			Name:    name,
 			Version: v,
 			Source:  entry.Source,
@@ -97,7 +97,7 @@ func (lf *LockFile) ToResolved() ([]ResolvedModule, error) {
 // or any locked version no longer satisfies the constraints.
 func (lf *LockFile) IsStale(deps []Dependency) bool {
 	for _, dep := range deps {
-		locked, ok := lf.Modules[dep.Name]
+		locked, ok := lf.Apps[dep.Name]
 		if !ok {
 			return true // new dependency not in lock file
 		}

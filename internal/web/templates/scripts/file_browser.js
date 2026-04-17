@@ -1,4 +1,4 @@
-// Shared file browser logic used by both the module file picker (__massBrowse)
+// Shared file browser logic used by both the app file picker (__massBrowse)
 // and the settings directory picker (__massBrowseDir).
 //
 // Usage:

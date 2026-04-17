@@ -12,13 +12,10 @@ import (
 // Must match what TempFilePath produces so pause/cancel handlers find the right file.
 const hfTempSuffix = ".downloading"
 
-// Download fetches a GGUF file from HuggingFace and saves it locally.
-// The file is saved to {destDir}/{sanitized_repo_id}/{filename}.
-// progressFn is called periodically with bytes downloaded and total bytes.
-//
-// Downloads are resumable: on context cancellation the partial file is
-// preserved and reused on the next call. On completion, the temp file is
-// renamed to the final path atomically.
+// Download fetches a GGUF file from HuggingFace to
+// {destDir}/{sanitized_repo_id}/{filename}. Resumable on context cancel;
+// the partial file is preserved and reused. progressFn is called with
+// bytes downloaded and total.
 func Download(ctx context.Context, repoID, filename, destDir string, progressFn func(downloaded, total int64)) (string, error) {
 	sanitized := SanitizeRepoID(repoID)
 	destPath := filepath.Join(destDir, sanitized, filename)

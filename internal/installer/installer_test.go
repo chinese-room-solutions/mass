@@ -10,27 +10,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// installTestModule creates a modules/{name}/{version}/module.yml.
-func installTestModule(t *testing.T, installDir, name, version string) {
+// installTestApp creates an apps/{name}/{version}/app.yml.
+func installTestApp(t *testing.T, installDir, name, version string) {
 	t.Helper()
 	dir := filepath.Join(installDir, name, version)
 	require.NoError(t, os.MkdirAll(dir, 0755))
 
-	meta := ModuleMetadata{
+	meta := AppMetadata{
 		Name:       name,
 		Version:    version,
-		SDKVersion: "1",
+		SDKVersion: "2",
 		Command:    "dummy",
 	}
 	data, err := yaml.Marshal(meta)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "module.yml"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.yml"), data, 0644))
 }
 
 func TestCheckDependencies_Satisfied(t *testing.T) {
 	installDir := t.TempDir()
-	installTestModule(t, installDir, "foo", "1.5.0")
-	installTestModule(t, installDir, "bar", "2.0.0")
+	installTestApp(t, installDir, "foo", "1.5.0")
+	installTestApp(t, installDir, "bar", "2.0.0")
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	err := inst.CheckDependencies([]Dependency{
@@ -53,7 +53,7 @@ func TestCheckDependencies_NotInstalled(t *testing.T) {
 
 func TestCheckDependencies_VersionMismatch(t *testing.T) {
 	installDir := t.TempDir()
-	installTestModule(t, installDir, "foo", "1.0.0")
+	installTestApp(t, installDir, "foo", "1.0.0")
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	err := inst.CheckDependencies([]Dependency{
@@ -65,8 +65,8 @@ func TestCheckDependencies_VersionMismatch(t *testing.T) {
 
 func TestCheckDependencies_MultipleVersionsSatisfied(t *testing.T) {
 	installDir := t.TempDir()
-	installTestModule(t, installDir, "foo", "1.0.0")
-	installTestModule(t, installDir, "foo", "2.0.0")
+	installTestApp(t, installDir, "foo", "1.0.0")
+	installTestApp(t, installDir, "foo", "2.0.0")
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	err := inst.CheckDependencies([]Dependency{
@@ -77,7 +77,7 @@ func TestCheckDependencies_MultipleVersionsSatisfied(t *testing.T) {
 
 func TestCheckDependencies_NoConstraint(t *testing.T) {
 	installDir := t.TempDir()
-	installTestModule(t, installDir, "foo", "0.1.0")
+	installTestApp(t, installDir, "foo", "0.1.0")
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	err := inst.CheckDependencies([]Dependency{
@@ -88,9 +88,9 @@ func TestCheckDependencies_NoConstraint(t *testing.T) {
 
 func TestListInstalled_VersionedLayout(t *testing.T) {
 	installDir := t.TempDir()
-	installTestModule(t, installDir, "foo", "1.0.0")
-	installTestModule(t, installDir, "foo", "2.0.0")
-	installTestModule(t, installDir, "bar", "3.0.0")
+	installTestApp(t, installDir, "foo", "1.0.0")
+	installTestApp(t, installDir, "foo", "2.0.0")
+	installTestApp(t, installDir, "bar", "3.0.0")
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	installed, err := inst.ListInstalled()
@@ -106,27 +106,27 @@ func TestListInstalled_VersionedLayout(t *testing.T) {
 	require.True(t, names["bar@3.0.0"])
 }
 
-func TestListInstalled_LegacyFlatLayout(t *testing.T) {
+func TestListInstalled_FlatLayout(t *testing.T) {
 	installDir := t.TempDir()
 
-	// Legacy flat layout: modules/{name}/module.yml (no version subdir).
-	dir := filepath.Join(installDir, "legacy")
+	// Flat layout: apps/{name}/app.yml (no version subdir).
+	dir := filepath.Join(installDir, "flat")
 	require.NoError(t, os.MkdirAll(dir, 0755))
-	meta := ModuleMetadata{
-		Name:       "legacy",
+	meta := AppMetadata{
+		Name:       "flat",
 		Version:    "0.1.0",
-		SDKVersion: "1",
+		SDKVersion: "2",
 		Command:    "dummy",
 	}
 	data, err := yaml.Marshal(meta)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "module.yml"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.yml"), data, 0644))
 
 	inst := NewInstaller("", installDir, zerolog.Nop())
 	installed, err := inst.ListInstalled()
 	require.NoError(t, err)
 	require.Len(t, installed, 1)
-	require.Equal(t, "legacy", installed[0].Name)
+	require.Equal(t, "flat", installed[0].Name)
 }
 
 func TestListInstalled_EmptyDir(t *testing.T) {

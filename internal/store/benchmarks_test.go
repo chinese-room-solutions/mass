@@ -12,7 +12,7 @@ func TestBenchmarks(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	row := BenchmarkRow{
-		AgentID:       "local",
+		WorkerID:      "local",
 		DeviceID:      "cpu:0",
 		DeviceName:    "12-core x86_64/linux",
 		MemoryGBs:     25.5,
@@ -46,7 +46,7 @@ func TestBenchmarks(t *testing.T) {
 
 				got, err := s.GetBenchmark("local", "cpu:0")
 				require.NoError(t, err)
-				require.Equal(t, row.AgentID, got.AgentID)
+				require.Equal(t, row.WorkerID, got.WorkerID)
 				require.Equal(t, row.DeviceID, got.DeviceID)
 				require.Equal(t, row.DeviceName, got.DeviceName)
 				require.InDelta(t, row.MemoryGBs, got.MemoryGBs, 0.01)
@@ -85,7 +85,7 @@ func TestBenchmarks(t *testing.T) {
 				require.NoError(t, s.SaveBenchmark(row))
 
 				remoteRow := BenchmarkRow{
-					AgentID:       "remote-1",
+					WorkerID:      "remote-1",
 					DeviceID:      "cpu:0",
 					DeviceName:    "8-core arm64/linux",
 					MemoryGBs:     15.0,
@@ -109,7 +109,7 @@ func TestBenchmarks(t *testing.T) {
 				require.NoError(t, s.SaveBenchmark(row))
 
 				row2 := BenchmarkRow{
-					AgentID:       "local",
+					WorkerID:      "local",
 					DeviceID:      "gpu:0",
 					DeviceName:    "NVIDIA RTX 4090",
 					MemoryGBs:     1008.0,

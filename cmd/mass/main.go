@@ -14,15 +14,15 @@ import (
 	"time"
 
 	"github.com/KernelPryanic/golog"
-	"github.com/chinese-room-solutions/mass/internal/agent"
+	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/gui"
 	"github.com/chinese-room-solutions/mass/internal/installer"
-	"github.com/chinese-room-solutions/mass/internal/llm"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/tlsutil"
 	"github.com/chinese-room-solutions/mass/internal/web"
+	"github.com/chinese-room-solutions/mass/internal/worker"
 	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/http2"
@@ -30,9 +30,28 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
+func init() {
+	// Respect container memory limits (cgroup) with system fallback.
+	// Safe to ignore the error: on bare hosts the fallback is used.
+	_, _ = memlimit.SetGoMemLimitWithOpts(
+		memlimit.WithProvider(
+			memlimit.ApplyFallback(memlimit.FromCgroup, memlimit.FromSystem),
+		),
+	)
+}
+
 func main() {
 	headless := flag.Bool("headless", false, "Don't open the webview window or browser")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("mass", version)
+		return
+	}
 
 	// In headless mode, attach to the parent console (or allocate one)
 	// so stderr output is visible. In GUI mode the exe is built with
@@ -41,14 +60,14 @@ func main() {
 		attachOrAllocConsole()
 	}
 
-	cfgPath, err := config.DefaultPath()
+	cfgDir, err := config.DefaultDir()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fatal: getting config path:", err)
+		fmt.Fprintln(os.Stderr, "fatal: getting config dir:", err)
 		os.Exit(1)
 	}
 
 	// Set up log file with rotation in the config directory.
-	logsDir := config.LogsDir(cfgPath)
+	logsDir := config.LogsDir(cfgDir)
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal: creating logs directory:", err)
 		os.Exit(1)
@@ -75,20 +94,26 @@ func main() {
 	}
 	logger := golog.New(false, io.MultiWriter(consoleOut, logFile))
 
-	cfg, firstRun, err := config.Load(cfgPath)
+	cfg, firstRun, err := config.Load(cfgDir)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("loading config")
 	}
 
 	// Write defaults on first run so the config file exists on disk.
 	if firstRun {
-		if err := config.Save(cfg, cfgPath); err != nil {
+		if err := config.Save(cfg, cfgDir); err != nil {
 			logger.Error().Err(err).Msg("writing default config")
 		}
 	}
 
 	// Apply logger settings from config.
 	zerolog.SetGlobalLevel(zerolog.Level(cfg.Logger.Level))
+
+	logger.Info().Str("version", version).Msg("mass starting")
+
+	// Log effective config with secret fields censored (see `secret:"true"` tags in Config).
+	cfgLogger := golog.WithCensoredSecretFields(logger.With(), "config", cfg).Logger()
+	cfgLogger.Debug().Msg("loaded config")
 
 	// Ensure data directory exists.
 	dataDir, err := cfg.EffectiveDataDir()
@@ -100,45 +125,43 @@ func main() {
 	}
 
 	saveFn := func() {
-		if err := config.Save(cfg, cfgPath); err != nil {
+		if err := config.Save(cfg, cfgDir); err != nil {
 			logger.Error().Err(err).Msg("saving config")
 		}
 	}
 
-	// Create agent registry with built-in local agent.
-	bencher := &llm.Bencher{}
-	localAgent := agent.NewLocalAgent(llm.NewLlamaLoader(), bencher)
-	agents := agent.NewRegistry()
-	if err := agents.Register(localAgent); err != nil {
-		logger.Fatal().Err(err).Msg("registering local agent")
-	}
+	// MASS is a coordinator — inference happens on workers (local or remote).
+	// Workers register dynamically via the WorkerHub stream; the fleet starts
+	// empty. Inference requests fail with "no device available" until at least
+	// one worker connects.
+	workers := worker.NewFleet()
 
-	orch := scheduler.New(cfg, saveFn, logger, agents)
+	orch := scheduler.New(cfg, saveFn, logger, workers)
 
-	// Register saved modules from disk metadata (no subprocess started).
-	for i := range cfg.Modules {
-		if cfg.Modules[i].Command == "" {
-			logger.Warn().Str("module", cfg.Modules[i].Name).Msg("skipping module with empty command")
+	// Register saved apps from disk metadata (no subprocess started).
+	for i := range cfg.Apps {
+		if cfg.Apps[i].Command == "" {
+			logger.Warn().Str("app", cfg.Apps[i].Name).Msg("skipping app with empty command")
 			continue
 		}
-		if err := orch.Register(&cfg.Modules[i]); err != nil {
-			logger.Warn().Err(err).Str("module", cfg.Modules[i].Name).Msg("failed to register module")
+		if err := orch.Register(&cfg.Apps[i]); err != nil {
+			logger.Warn().Err(err).Str("app", cfg.Apps[i].Name).Msg("failed to register app")
 		}
 	}
 
-	// Auto-start modules based on config.
-	for i := range cfg.Modules {
-		if cfg.Modules[i].AutoStart {
-			if err := orch.Start(cfg.Modules[i].Name); err != nil {
-				logger.Warn().Err(err).Str("module", cfg.Modules[i].Name).Msg("failed to auto-start module")
+	// Auto-start apps based on config.
+	for i := range cfg.Apps {
+		if cfg.Apps[i].AutoStart {
+			if err := orch.Start(cfg.Apps[i].Name); err != nil {
+				logger.Warn().Err(err).Str("app", cfg.Apps[i].Name).Msg("failed to auto-start app")
 			}
-		} else if cfg.Modules[i].EffectiveLaunchMode() == config.LaunchModeOnDemand {
-			logger.Info().Str("module", cfg.Modules[i].Name).Msg("on-demand module ready")
+		} else if cfg.Apps[i].EffectiveLaunchMode() == config.LaunchModeOnDemand {
+			logger.Info().Str("app", cfg.Apps[i].Name).Msg("on-demand app ready")
 		}
 	}
 
-	// Create module installer.
-	inst := installer.NewInstaller("", config.ModuleInstallDir(dataDir), logger)
+	// Create app installer.
+	inst := installer.NewInstaller("", config.AppInstallDir(dataDir), logger)
 
 	// Open persistent store.
 	dbPath := filepath.Join(dataDir, "mass.db")
@@ -185,7 +208,18 @@ func main() {
 	sessions := web.NewSessionStore(30 * 24 * time.Hour)
 
 	// Create web handler.
-	handler, err := web.NewHandler(cfg, orch, inst, saveFn, logger, appStore, authHash, sessions, sysLog, agents)
+	handler, err := web.NewHandler(web.HandlerOptions{
+		Config:    cfg,
+		Scheduler: orch,
+		Installer: inst,
+		SaveFn:    saveFn,
+		Logger:    logger,
+		Store:     appStore,
+		AuthHash:  authHash,
+		Sessions:  sessions,
+		SysLog:    sysLog,
+		Workers:   workers,
+	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("creating web handler")
 	}

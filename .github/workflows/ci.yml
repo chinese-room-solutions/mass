@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  LLAMA_GO_DIR: ${{ github.workspace }}/../llama-go
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - name: Build llama-go static libs (CPU)
+        working-directory: llama-go
+        run: |
+          CMAKE_ARGS="-DBUILD_SHARED_LIBS=OFF" make libbinding.a
+      - uses: golangci/golangci-lint-action@v8
+        env:
+          GOFLAGS: "-buildvcs=false"
+          CGO_ENABLED: "1"
+          C_INCLUDE_PATH: ${{ github.workspace }}/llama-go
+          LIBRARY_PATH: ${{ github.workspace }}/llama-go
+        with:
+          version: latest
+          working-directory: mass
+          args: --timeout 10m --concurrency 0
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mass
+      - uses: actions/checkout@v4
+        with:
+          repository: tcpipuk/llama-go
+          submodules: recursive
+          path: llama-go
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mass/go.mod
+          check-latest: true
+      - name: Build llama-go static libs (CPU)
+        working-directory: llama-go
+        run: |
+          CMAKE_ARGS="-DBUILD_SHARED_LIBS=OFF" make libbinding.a
+      - name: Run tests
+        working-directory: mass
+        env:
+          CGO_ENABLED: "1"
+          C_INCLUDE_PATH: ${{ github.workspace }}/llama-go
+          LIBRARY_PATH: ${{ github.workspace }}/llama-go
+        run: |
+          go test ./internal/... ./pkg/... \
+            -race -covermode=atomic -coverprofile=coverage.out \
+            -count=1 -timeout 15m
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod

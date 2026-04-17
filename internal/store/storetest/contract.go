@@ -13,7 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Factory creates a fresh StoreInterface for each test.
+// Factory creates a fresh StoreInterface for each test. The contract
+// suite is backend-agnostic: any SQL implementation should pass it. To
+// wire a new backend, add a sibling test file calling [RunAll] with a
+// factory for that backend.
 type Factory func(t *testing.T) store.StoreInterface
 
 // RunAll runs the full contract test suite against the given factory.
@@ -189,7 +192,7 @@ func RunBenchmarks(t *testing.T, factory Factory) {
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	row := store.BenchmarkRow{
-		AgentID:       "local",
+		WorkerID:      "local",
 		DeviceID:      "cpu:0",
 		DeviceName:    "12-core x86_64/linux",
 		MemoryGBs:     25.5,
@@ -222,7 +225,7 @@ func RunBenchmarks(t *testing.T, factory Factory) {
 				require.NoError(t, s.SaveBenchmark(row))
 				got, err := s.GetBenchmark("local", "cpu:0")
 				require.NoError(t, err)
-				require.Equal(t, row.AgentID, got.AgentID)
+				require.Equal(t, row.WorkerID, got.WorkerID)
 				require.Equal(t, row.DeviceID, got.DeviceID)
 				require.Equal(t, row.DeviceName, got.DeviceName)
 				require.InDelta(t, row.MemoryGBs, got.MemoryGBs, 0.01)
@@ -255,7 +258,7 @@ func RunBenchmarks(t *testing.T, factory Factory) {
 			run: func(t *testing.T, s store.BenchmarkStoreInterface) { //nolint:thelper
 				require.NoError(t, s.SaveBenchmark(row))
 				remote := store.BenchmarkRow{
-					AgentID:       "remote-1",
+					WorkerID:      "remote-1",
 					DeviceID:      "cpu:0",
 					DeviceName:    "8-core arm64/linux",
 					MemoryGBs:     15.0,
@@ -278,7 +281,7 @@ func RunBenchmarks(t *testing.T, factory Factory) {
 			run: func(t *testing.T, s store.BenchmarkStoreInterface) { //nolint:thelper
 				require.NoError(t, s.SaveBenchmark(row))
 				row2 := store.BenchmarkRow{
-					AgentID:       "local",
+					WorkerID:      "local",
 					DeviceID:      "gpu:0",
 					DeviceName:    "NVIDIA RTX 4090",
 					MemoryGBs:     1008.0,
@@ -322,12 +325,13 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 	t.Helper()
 
 	state := store.DeviceQueueState{
-		QueueName:  "device:local:gpu:0",
-		AgentID:    "local",
-		DeviceIDs:  []string{"gpu:0"},
-		TailHash:   "abc123",
-		TailLength: 5,
-		LoadedHash: "def456",
+		QueueName:      "device:local:gpu:0",
+		WorkerID:       "local",
+		DeviceIDs:      []string{"gpu:0"},
+		TailHash:       "abc123",
+		TailDifficulty: 250.5,
+		LoadedHash:     "def456",
+		Enabled:        true,
 	}
 
 	tests := []struct {
@@ -348,10 +352,10 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 				got, err := s.GetDeviceQueueState("device:local:gpu:0")
 				require.NoError(t, err)
 				require.Equal(t, "device:local:gpu:0", got.QueueName)
-				require.Equal(t, "local", got.AgentID)
+				require.Equal(t, "local", got.WorkerID)
 				require.Equal(t, []string{"gpu:0"}, got.DeviceIDs)
 				require.Equal(t, "abc123", got.TailHash)
-				require.Equal(t, 5, got.TailLength)
+				require.InDelta(t, 250.5, got.TailDifficulty, 1e-9)
 				require.Equal(t, "def456", got.LoadedHash)
 			},
 		},
@@ -361,12 +365,12 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 				require.NoError(t, s.UpsertDeviceQueueState(state))
 				updated := state
 				updated.TailHash = "newHash"
-				updated.TailLength = 10
+				updated.TailDifficulty = 1000
 				require.NoError(t, s.UpsertDeviceQueueState(updated))
 				got, err := s.GetDeviceQueueState("device:local:gpu:0")
 				require.NoError(t, err)
 				require.Equal(t, "newHash", got.TailHash)
-				require.Equal(t, 10, got.TailLength)
+				require.InDelta(t, 1000.0, got.TailDifficulty, 1e-9)
 			},
 		},
 		{
@@ -374,7 +378,7 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
 				multi := store.DeviceQueueState{
 					QueueName: "device:local:gpu:0+gpu:1",
-					AgentID:   "local",
+					WorkerID:  "local",
 					DeviceIDs: []string{"gpu:0", "gpu:1"},
 				}
 				require.NoError(t, s.UpsertDeviceQueueState(multi))
@@ -387,7 +391,7 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 			name: "list returns all",
 			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
 				s1 := state
-				s2 := store.DeviceQueueState{QueueName: "device:local:cpu:0", AgentID: "local", DeviceIDs: []string{"cpu:0"}}
+				s2 := store.DeviceQueueState{QueueName: "device:local:cpu:0", WorkerID: "local", DeviceIDs: []string{"cpu:0"}}
 				require.NoError(t, s.UpsertDeviceQueueState(s1))
 				require.NoError(t, s.UpsertDeviceQueueState(s2))
 				all, err := s.ListDeviceQueueStates()
@@ -408,11 +412,28 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 			name: "update tail",
 			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
 				require.NoError(t, s.UpsertDeviceQueueState(state))
-				require.NoError(t, s.UpdateTail("device:local:gpu:0", "newTail", 99))
+				require.NoError(t, s.UpdateTail("device:local:gpu:0", "newTail", 99.5))
 				got, err := s.GetDeviceQueueState("device:local:gpu:0")
 				require.NoError(t, err)
 				require.Equal(t, "newTail", got.TailHash)
-				require.Equal(t, 99, got.TailLength)
+				require.InDelta(t, 99.5, got.TailDifficulty, 1e-9)
+			},
+		},
+		{
+			name: "add tail difficulty accumulates and clamps",
+			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
+				require.NoError(t, s.UpsertDeviceQueueState(state))
+				// state starts at 250.5
+				require.NoError(t, s.AddTailDifficulty("device:local:gpu:0", 100))
+				got, err := s.GetDeviceQueueState("device:local:gpu:0")
+				require.NoError(t, err)
+				require.InDelta(t, 350.5, got.TailDifficulty, 1e-9)
+
+				// Subtract more than current — should clamp to 0, not go negative.
+				require.NoError(t, s.AddTailDifficulty("device:local:gpu:0", -10000))
+				got, err = s.GetDeviceQueueState("device:local:gpu:0")
+				require.NoError(t, err)
+				require.InDelta(t, 0.0, got.TailDifficulty, 1e-9)
 			},
 		},
 		{
@@ -426,12 +447,21 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 			},
 		},
 		{
-			name: "new queue defaults to enabled",
+			name: "insert honors caller-supplied enabled",
 			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
 				require.NoError(t, s.UpsertDeviceQueueState(state))
 				got, err := s.GetDeviceQueueState("device:local:gpu:0")
 				require.NoError(t, err)
-				require.True(t, got.Enabled)
+				require.True(t, got.Enabled, "enabled=true must round-trip on insert")
+
+				disabled := state
+				disabled.QueueName = "device:local:cpu:0"
+				disabled.DeviceIDs = []string{"cpu:0"}
+				disabled.Enabled = false
+				require.NoError(t, s.UpsertDeviceQueueState(disabled))
+				got, err = s.GetDeviceQueueState("device:local:cpu:0")
+				require.NoError(t, err)
+				require.False(t, got.Enabled, "enabled=false must round-trip on insert")
 			},
 		},
 		{
@@ -466,7 +496,7 @@ func RunDeviceQueueState(t *testing.T, factory Factory) {
 			name: "list includes enabled field",
 			run: func(t *testing.T, s store.DeviceQueueStateStoreInterface) { //nolint:thelper
 				require.NoError(t, s.UpsertDeviceQueueState(state))
-				s2 := store.DeviceQueueState{QueueName: "device:local:cpu:0", AgentID: "local", DeviceIDs: []string{"cpu:0"}}
+				s2 := store.DeviceQueueState{QueueName: "device:local:cpu:0", WorkerID: "local", DeviceIDs: []string{"cpu:0"}}
 				require.NoError(t, s.UpsertDeviceQueueState(s2))
 				require.NoError(t, s.SetEnabled("device:local:cpu:0", false))
 

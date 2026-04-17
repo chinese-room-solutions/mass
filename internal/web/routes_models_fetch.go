@@ -9,7 +9,7 @@ import (
 	"github.com/chinese-room-solutions/mass/internal/config"
 )
 
-// handleFetchModel serves model files to remote agents.
+// handleFetchModel serves model files to remote workers.
 // GET /api/models/fetch/{path...}
 // The path is relative to the models directory.
 // Supports range requests for resumable downloads.
@@ -51,7 +51,11 @@ func (h *Handler) handleFetchModel(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if cErr := f.Close(); cErr != nil {
+			h.logger.Warn().Err(cErr).Str("path", absPath).Msg("closing model fetch file")
+		}
+	}()
 
 	stat, err := f.Stat()
 	if err != nil {

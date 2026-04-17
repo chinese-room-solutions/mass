@@ -47,23 +47,23 @@ func Shell(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" data-init=\"@get('/api/events')\" class=\"min-h-screen\"><!-- Header --><header class=\"sticky top-0 z-20 bg-neutral-900 border-b border-neutral-800\"><div class=\"px-4 py-2 flex items-center gap-3\"><img data-attr:src=\"$theme === 'dark' ? '/public/MASS-Dark.png' : '/public/MASS-Light.png'\" alt=\"MASS\" style=\"height:1.25rem\"><div class=\"ml-auto flex items-center gap-1\"><sl-tooltip content=\"Toggle light/dark theme\"><sl-icon-button data-attr:name=\"$theme === 'dark' ? 'sun' : 'moon-stars'\" data-on:click=\"@post('/api/settings/theme')\" style=\"font-size:1.1rem\"></sl-icon-button></sl-tooltip></div></div><!-- Tab nav --><div class=\"px-4 flex gap-4 border-t border-neutral-800\"><button class=\"px-4 py-2 text-sm font-medium border-b-2 border-transparent hover:text-white transition-colors\" data-attr:class=\"$activeTab === 'modules' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'modules'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"modules\">Modules</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'models' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'models'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"models\">Models</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'scheduler' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'scheduler'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'; @get('/api/scheduler')\" data-tab-name=\"scheduler\">Scheduler</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'agents' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'agents'\" data-tab-name=\"agents\">Agents</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'settings' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'settings'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"settings\">Settings</button></div></header><!-- Modules tab --><div data-show=\"$activeTab === 'modules'\" class=\"flex\" style=\"height: calc(100vh - 88px);\"><!-- Left panel (resizable) --><div id=\"mass-left-panel\" class=\"flex flex-col bg-neutral-900 overflow-x-hidden flex-shrink-0\" style=\"width:22%;min-width:270px\"><!-- Search + collapse toggle --><div class=\"flex items-center gap-2 px-2 py-2 border-b border-neutral-800 flex-shrink-0 justify-end\"><sl-input data-show=\"!$sidebarCollapsed\" size=\"small\" clearable placeholder=\"Search modules...\" value=\"\" data-bind=\"moduleSearch\" data-on:sl-clear=\"$moduleSearch=''\" class=\"flex-1\" style=\"min-width:0\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input> <sl-tooltip data-attr:content=\"$sidebarCollapsed ? 'Expand panel' : 'Collapse panel'\"><sl-icon-button id=\"mass-collapse-btn\" data-attr:name=\"$sidebarCollapsed ? 'layout-sidebar-reverse' : 'layout-sidebar'\" data-on:click=\"$sidebarCollapsed = !$sidebarCollapsed\" style=\"font-size:1.1rem;flex-shrink:0\"></sl-icon-button></sl-tooltip></div><!-- Module list --><div class=\"flex-1 overflow-y-auto py-1\" id=\"module-list\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\" data-init=\"@get('/internal/events')\" class=\"min-h-screen\"><!-- Header --><header class=\"sticky top-0 z-20 bg-neutral-900 border-b border-neutral-800\"><div class=\"px-4 py-2 flex items-center gap-3\"><img data-attr:src=\"$theme === 'dark' ? '/public/MASS-Dark.png' : '/public/MASS-Light.png'\" alt=\"MASS\" style=\"height:1.25rem\"><div class=\"ml-auto flex items-center gap-1\"><sl-tooltip content=\"Toggle light/dark theme\"><sl-icon-button data-attr:name=\"$theme === 'dark' ? 'sun' : 'moon-stars'\" data-on:click=\"@post('/internal/settings/theme')\" style=\"font-size:1.1rem\"></sl-icon-button></sl-tooltip></div></div><!-- Tab nav --><div class=\"px-4 flex gap-4 border-t border-neutral-800\"><button class=\"px-4 py-2 text-sm font-medium border-b-2 border-transparent hover:text-white transition-colors\" data-attr:class=\"$activeTab === 'apps' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'apps'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"apps\">Apps</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'models' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'models'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"models\">Models</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'scheduler' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'scheduler'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'; @get('/internal/scheduler')\" data-tab-name=\"scheduler\">Scheduler</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'workers' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'workers'\" data-tab-name=\"workers\">Workers</button> <button class=\"px-4 py-2 text-sm font-medium border-b-2 transition-colors\" data-attr:class=\"$activeTab === 'settings' ? 'border-blue-500 text-white' : 'text-neutral-400 border-transparent hover:text-white'\" data-on:click=\"$activeTab = 'settings'; $authTokenEdited = false; $authToken = $authTokenSet ? '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' : ''; var _i=document.getElementById('auth-token-input');if(_i)_i.type='password';var _e=document.getElementById('auth-token-eye');if(_e)_e.name='eye'\" data-tab-name=\"settings\">Settings</button></div></header><!-- Apps tab --><div data-show=\"$activeTab === 'apps'\" class=\"flex\" style=\"height: calc(100vh - 88px);\"><!-- Left panel (resizable) --><div id=\"mass-left-panel\" class=\"flex flex-col bg-neutral-900 overflow-x-hidden flex-shrink-0\" style=\"width:22%;min-width:270px\"><!-- Search + collapse toggle --><div class=\"flex items-center gap-2 px-2 py-2 border-b border-neutral-800 flex-shrink-0 justify-end\"><sl-input data-show=\"!$sidebarCollapsed\" size=\"small\" clearable placeholder=\"Search apps...\" value=\"\" data-bind=\"appSearch\" data-on:sl-clear=\"$appSearch=''\" class=\"flex-1\" style=\"min-width:0\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input> <sl-tooltip data-attr:content=\"$sidebarCollapsed ? 'Expand panel' : 'Collapse panel'\"><sl-icon-button id=\"mass-collapse-btn\" data-attr:name=\"$sidebarCollapsed ? 'layout-sidebar-reverse' : 'layout-sidebar'\" data-on:click=\"$sidebarCollapsed = !$sidebarCollapsed\" style=\"font-size:1.1rem;flex-shrink:0\"></sl-icon-button></sl-tooltip></div><!-- App list --><div class=\"flex-1 overflow-y-auto py-1\" id=\"app-list\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = moduleListItems(data.Modules, data.ActiveModule).Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = appListItems(data.Apps, data.ActiveApp).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</div><!-- Install New Module --><div class=\"p-2 border-t border-neutral-800 flex-shrink-0\"><sl-button data-show=\"!$sidebarCollapsed\" size=\"small\" variant=\"default\" class=\"w-full\" data-on:click=\"$addModuleOpen = true\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Install New Module</sl-button> <sl-tooltip data-show=\"$sidebarCollapsed\" content=\"Install new module\"><sl-icon-button name=\"plus-lg\" data-on:click=\"$addModuleOpen = true\" style=\"font-size:1.1rem\"></sl-icon-button></sl-tooltip></div></div><!-- Resize handle: always in DOM, width controlled by JS --><div id=\"mass-resize-handle\" class=\"mass-resize-handle\"><div class=\"mass-resize-bar\" id=\"mass-resize-bar\"></div></div><!-- Main content panel --><main class=\"flex-1 overflow-hidden relative\" id=\"module-content-wrapper\"><!-- Hidden deselect trigger: clicked by JS when user clicks empty space --><button id=\"mass-deselect-trigger\" style=\"display:none\" data-on:click=\"@get('/api/modules/deselect')\"></button><div id=\"module-content\" data-show=\"!$activeModule || $moduleView === 'logs'\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "</div><!-- Install New App --><div class=\"p-2 border-t border-neutral-800 flex-shrink-0\"><sl-button data-show=\"!$sidebarCollapsed\" size=\"small\" variant=\"default\" class=\"w-full\" data-on:click=\"$addAppOpen = true\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Install New App</sl-button> <sl-tooltip data-show=\"$sidebarCollapsed\" content=\"Install new app\"><sl-icon-button name=\"plus-lg\" data-on:click=\"$addAppOpen = true\" style=\"font-size:1.1rem\"></sl-icon-button></sl-tooltip></div></div><!-- Resize handle: always in DOM, width controlled by JS --><div id=\"mass-resize-handle\" class=\"mass-resize-handle\"><div class=\"mass-resize-bar\" id=\"mass-resize-bar\"></div></div><!-- Main content panel --><main class=\"flex-1 overflow-hidden relative\" id=\"app-content-wrapper\"><!-- Hidden deselect trigger: clicked by JS when user clicks empty space --><button id=\"mass-deselect-trigger\" style=\"display:none\" data-on:click=\"@get('/internal/apps/deselect')\"></button><div id=\"app-content\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = welcomeState(len(data.Modules) == 0).Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = welcomeState(len(data.Apps) == 0).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div><!-- Module UI iframe: shown when a module with UI is selected --><iframe id=\"module-iframe\" data-show=\"$activeModule && $moduleView !== 'logs'\" data-attr:src=\"$activeModule ? '/modules/' + $activeModule + '/?theme=' + $theme : ''\" style=\"width:100%;height:100%;border:none\"></iframe></main></div><!-- Models tab --><div data-show=\"$activeTab === 'models'\" style=\"height: calc(100vh - 88px);\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div></main></div><!-- Models tab --><div data-show=\"$activeTab === 'models'\" style=\"height: calc(100vh - 88px);\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -71,7 +71,7 @@ func Shell(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</div><!-- Hidden refresh trigger for models list (clicked by JS after download completes) --><button id=\"mass-models-refresh-btn\" style=\"display:none\" data-on:click=\"@get('/api/models')\"></button><!-- Scheduler tab --><div data-show=\"$activeTab === 'scheduler'\" style=\"height: calc(100vh - 88px);\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</div><!-- Hidden refresh trigger for models list (clicked by JS after download completes) --><button id=\"mass-models-refresh-btn\" style=\"display:none\" data-on:click=\"@get('/internal/models')\"></button><!-- Scheduler tab --><div data-show=\"$activeTab === 'scheduler'\" style=\"height: calc(100vh - 88px);\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -79,7 +79,7 @@ func Shell(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div><!-- Agents tab --><div data-show=\"$activeTab === 'agents'\" style=\"height: calc(100vh - 88px);\"><div style=\"display:flex;justify-content:center;height:100%\"><div style=\"display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem\"><!-- Header --><div style=\"padding:0.75rem 1.5rem 0\"><div class=\"flex items-center justify-center gap-2 text-sm font-semibold text-white\"><sl-icon name=\"pc-display-horizontal\"></sl-icon> <span>Agents</span></div><div class=\"mt-2\"><sl-input id=\"agents-filter-input\" size=\"small\" clearable placeholder=\"Filter agents...\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input></div></div><!-- Agent list (scrollable) --><div style=\"flex:1; overflow-y:auto; padding:0.75rem 1.5rem\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "</div><!-- Workers tab --><div data-show=\"$activeTab === 'workers'\" style=\"height: calc(100vh - 88px);\"><div style=\"display:flex;justify-content:center;height:100%\"><div style=\"display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem\"><!-- Header --><div style=\"padding:0.75rem 1.5rem 0\"><div class=\"flex items-center justify-center gap-2 text-sm font-semibold text-white\"><sl-icon name=\"pc-display-horizontal\"></sl-icon> <span>Workers</span></div><div class=\"mt-2\"><sl-input id=\"workers-filter-input\" size=\"small\" clearable placeholder=\"Filter workers...\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input></div></div><!-- Worker list (scrollable) --><div style=\"flex:1; overflow-y:auto; padding:0.75rem 1.5rem\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -87,7 +87,7 @@ func Shell(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</div><!-- Anchored bottom bar --><div style=\"padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; text-align:center\"><sl-button variant=\"default\" size=\"small\" style=\"min-width:16rem\" id=\"bench-all-agents-btn\" data-on:click=\"@post('/api/agents/benchmark?agentIds=' + window.__visibleAgentIds())\"><sl-icon slot=\"prefix\" name=\"speedometer2\"></sl-icon> <span id=\"bench-all-agents-label\">Benchmark All</span></sl-button></div></div></div></div><!-- Settings tab --><div data-show=\"$activeTab === 'settings'\" style=\"height: calc(100vh - 88px);\" class=\"flex\"><!-- Left: settings form --><div id=\"settings-left-panel\" class=\"overflow-auto flex-shrink-0\" style=\"width:40%;min-width:480px\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "</div><!-- Anchored bottom bar --><div style=\"padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; text-align:center\"><sl-button variant=\"default\" size=\"small\" style=\"min-width:16rem\" id=\"bench-all-workers-btn\" data-on:click=\"@post('/internal/workers/benchmark?workerIds=' + window.__visibleWorkerIds())\"><sl-icon slot=\"prefix\" name=\"speedometer2\"></sl-icon> <span id=\"bench-all-workers-label\">Benchmark All</span></sl-button></div></div></div></div><!-- Settings tab --><div data-show=\"$activeTab === 'settings'\" style=\"height: calc(100vh - 88px);\" class=\"flex\"><!-- Left: settings form --><div id=\"settings-left-panel\" class=\"overflow-auto flex-shrink-0\" style=\"width:40%;min-width:480px\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -95,15 +95,15 @@ func Shell(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</div><!-- Resize handle --><div id=\"settings-resize-handle\" class=\"mass-resize-handle\"><div class=\"mass-resize-bar\" id=\"settings-resize-bar\"></div></div><!-- Right: system logs --><div class=\"flex-1 overflow-hidden flex flex-col p-6\"><div class=\"flex items-center gap-2 text-sm font-semibold mb-3 flex-shrink-0\" style=\"color:var(--mass-text)\"><sl-icon name=\"terminal\"></sl-icon> <span>System Logs</span></div><div id=\"syslog-entries\" class=\"font-mono text-xs rounded-lg p-4 flex-1 overflow-y-auto space-y-px\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><p id=\"syslog-placeholder\" style=\"color:var(--mass-text-muted)\">Waiting for system log output...</p></div></div></div><!-- Confirm Uninstall Dialog --><sl-dialog id=\"mass-confirm-uninstall-dialog\" label=\"Uninstall Module\" data-attr:open=\"$confirmOpen\" data-on:sl-hide=\"$confirmOpen = false\"><p class=\"text-sm text-neutral-300\">This will permanently delete the module binary, config, and all models in its data directory. This cannot be undone.</p><div slot=\"footer\" class=\"flex gap-2 justify-end\"><sl-button size=\"small\" data-on:click=\"$confirmOpen = false\">Cancel</sl-button> <sl-button variant=\"danger\" size=\"small\" data-on:click=\"@delete('/api/modules/' + $confirmUninstall); $confirmOpen = false\">Uninstall</sl-button></div></sl-dialog><!-- Add Module Dialog -->")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</div><!-- Resize handle --><div id=\"settings-resize-handle\" class=\"mass-resize-handle\"><div class=\"mass-resize-bar\" id=\"settings-resize-bar\"></div></div><!-- Right: system logs --><div class=\"flex-1 overflow-hidden flex flex-col p-6\"><div class=\"flex items-center gap-2 text-sm font-semibold mb-3 flex-shrink-0\" style=\"color:var(--mass-text)\"><sl-icon name=\"terminal\"></sl-icon> <span>System Logs</span></div><div id=\"syslog-entries\" class=\"font-mono text-xs rounded-lg p-4 flex-1 overflow-y-auto space-y-px\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><p id=\"syslog-placeholder\" style=\"color:var(--mass-text-muted)\">Waiting for system log output...</p></div></div></div><!-- Confirm Uninstall Dialog --><sl-dialog id=\"mass-confirm-uninstall-dialog\" label=\"Uninstall App\" data-attr:open=\"$confirmOpen\" data-on:sl-hide=\"$confirmOpen = false\"><p class=\"text-sm text-neutral-300\">This will permanently delete the app binary, config, and all models in its data directory. This cannot be undone.</p><div slot=\"footer\" class=\"flex gap-2 justify-end\"><sl-button size=\"small\" data-on:click=\"$confirmOpen = false\">Cancel</sl-button> <sl-button variant=\"danger\" size=\"small\" data-on:click=\"@delete('/api/apps/' + $confirmUninstall); $confirmOpen = false\">Uninstall</sl-button></div></sl-dialog><!-- Add App Dialog -->")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = addModuleDialog().Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = addAppDialog().Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<!-- Persistent file browser dialog (used by module UIs via window.__massBrowse) --><sl-dialog id=\"mass-file-browser\" label=\"Browse Files\" style=\"--width: 640px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large); --footer-spacing: 0;\"><div id=\"mass-fb-path\" class=\"flex items-center gap-1 flex-wrap text-xs mb-2 min-h-[24px]\"></div><div id=\"mass-fb-entries\" class=\"max-h-[420px] overflow-y-auto space-y-0.5 pb-2 border-b border-neutral-700\"></div><sl-button slot=\"footer\" size=\"small\" variant=\"default\" onclick=\"document.getElementById('mass-file-browser').hide()\">Cancel</sl-button> <sl-button slot=\"footer\" size=\"small\" variant=\"primary\" id=\"mass-fb-select\" disabled>Select</sl-button></sl-dialog><!-- Persistent HF search dialog (used by module UIs) --><sl-dialog id=\"mass-hf-dialog\" label=\"Find on HuggingFace\" style=\"--width: 520px;\"><div id=\"mass-hf-inner\"></div></sl-dialog><!-- Model selection dialog (used by module config UIs) --><sl-dialog id=\"mass-model-select-dialog\" label=\"Select Model\" style=\"--width: 540px; --body-spacing: 0.25rem 0.75rem;\"><div id=\"mass-model-select-inner\"><div class=\"text-center py-8\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div></div></sl-dialog>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<!-- Persistent file browser dialog (used by app config UIs via window.__massBrowse) --><sl-dialog id=\"mass-file-browser\" label=\"Browse Files\" style=\"--width: 640px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large); --footer-spacing: 0;\"><div id=\"mass-fb-path\" class=\"flex items-center gap-1 flex-wrap text-xs mb-2 min-h-[24px]\"></div><div id=\"mass-fb-entries\" class=\"max-h-[420px] overflow-y-auto space-y-0.5 pb-2 border-b border-neutral-700\"></div><sl-button slot=\"footer\" size=\"small\" variant=\"default\" onclick=\"document.getElementById('mass-file-browser').hide()\">Cancel</sl-button> <sl-button slot=\"footer\" size=\"small\" variant=\"primary\" id=\"mass-fb-select\" disabled>Select</sl-button></sl-dialog><!-- Persistent HF search dialog --><sl-dialog id=\"mass-hf-dialog\" label=\"Find on HuggingFace\" style=\"--width: 520px;\"><div id=\"mass-hf-inner\"></div></sl-dialog><!-- Model selection dialog --><sl-dialog id=\"mass-model-select-dialog\" label=\"Select Model\" style=\"--width: 540px; --body-spacing: 0.25rem 0.75rem;\"><div id=\"mass-model-select-inner\"><div class=\"text-center py-8\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div></div></sl-dialog>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -127,7 +127,7 @@ func Shell(data DashboardData) templ.Component {
 	})
 }
 
-func moduleListItems(modules []ModuleViewData, activeModule string) templ.Component {
+func appListItems(apps []AppViewData, activeApp string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -148,15 +148,15 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 			templ_7745c5c3_Var3 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		for _, p := range modules {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<div class=\"module-row flex items-center gap-2 px-3 py-1.5 rounded-lg mx-2 cursor-pointer group\" data-attr:class=\"")
+		for _, p := range apps {
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<div class=\"app-row flex items-center gap-2 px-3 py-1.5 rounded-lg mx-2 cursor-pointer group\" data-attr:class=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var4 string
-			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("'module-row flex items-center py-1.5 cursor-pointer group ' + ($sidebarCollapsed ? 'justify-center mx-1 px-0 rounded-full' : 'gap-2 px-3 rounded-lg mx-2') + ' ' + ($activeModule === '%s' ? 'mass-row-active' : 'mass-row-hover')", p.Name))
+			templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("'app-row flex items-center py-1.5 cursor-pointer group ' + ($sidebarCollapsed ? 'justify-center mx-1 px-0 rounded-full' : 'gap-2 px-3 rounded-lg mx-2') + ' ' + ($activeApp === '%s' ? 'mass-row-active' : 'mass-row-hover')", p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 300, Col: 270}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 292, Col: 264}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 			if templ_7745c5c3_Err != nil {
@@ -167,22 +167,22 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var5 string
-			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("!$moduleSearch || '%s'.includes($moduleSearch.toLowerCase())", strings.ToLower(p.Name)))
+			templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("!$appSearch || '%s'.includes($appSearch.toLowerCase())", strings.ToLower(p.Name)))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 301, Col: 115}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 293, Col: 109}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "\" data-module-name=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "\" data-app-name=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var6 string
 			templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(p.Name)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 302, Col: 28}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 294, Col: 25}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 			if templ_7745c5c3_Err != nil {
@@ -193,9 +193,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var7 string
-			templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("if(!event.target.closest('sl-icon-button,sl-switch,sl-dropdown,sl-menu')){$activeModule='%s'; $moduleView='ui'}", p.Name))
+			templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("if(!event.target.closest('sl-icon-button,sl-switch,sl-dropdown,sl-menu')){$activeApp='%s'; @get('/internal/apps/%s/logs')}", p.Name, p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 303, Col: 153}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 295, Col: 172}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
 			if templ_7745c5c3_Err != nil {
@@ -211,9 +211,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var8 string
-				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("/api/modules/%s/icon", p.Name))
+				templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("/internal/apps/%s/icon", p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 309, Col: 55}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 301, Col: 57}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 				if templ_7745c5c3_Err != nil {
@@ -226,7 +226,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				var templ_7745c5c3_Var9 string
 				templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(p.Name)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 310, Col: 18}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 302, Col: 18}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 				if templ_7745c5c3_Err != nil {
@@ -237,9 +237,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var10 string
-				templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeModule='%s'; $moduleView='ui'", p.Name))
+				templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeApp='%s'; @get('/internal/apps/%s/logs')", p.Name, p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 312, Col: 81}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 304, Col: 100}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 				if templ_7745c5c3_Err != nil {
@@ -255,9 +255,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var11 string
-				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeModule='%s'; $moduleView='ui'", p.Name))
+				templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeApp='%s'; @get('/internal/apps/%s/logs')", p.Name, p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 317, Col: 81}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 309, Col: 100}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 				if templ_7745c5c3_Err != nil {
@@ -270,7 +270,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				var templ_7745c5c3_Var12 string
 				templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(initial(p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 318, Col: 23}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 310, Col: 23}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 				if templ_7745c5c3_Err != nil {
@@ -293,7 +293,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 			var templ_7745c5c3_Var14 string
 			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("sidebar-dot-%s", p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 321, Col: 47}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 313, Col: 47}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 			if templ_7745c5c3_Err != nil {
@@ -317,9 +317,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var16 string
-			templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeModule='%s'; $moduleView='ui'", p.Name))
+			templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeApp='%s'; @get('/internal/apps/%s/logs')", p.Name, p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 331, Col: 80}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 323, Col: 99}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 			if templ_7745c5c3_Err != nil {
@@ -332,7 +332,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 			var templ_7745c5c3_Var17 string
 			templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs(p.Name)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 333, Col: 13}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 325, Col: 13}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 			if templ_7745c5c3_Err != nil {
@@ -350,7 +350,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 				var templ_7745c5c3_Var18 string
 				templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(p.Version)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 335, Col: 65}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 327, Col: 65}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 				if templ_7745c5c3_Err != nil {
@@ -379,9 +379,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var19 string
-				templ_7745c5c3_Var19, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/auto-start')", p.Name))
+				templ_7745c5c3_Var19, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/auto-start')", p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 351, Col: 83}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 343, Col: 80}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var19))
 				if templ_7745c5c3_Err != nil {
@@ -397,9 +397,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var20 string
-				templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/auto-start')", p.Name))
+				templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/auto-start')", p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 357, Col: 83}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 349, Col: 80}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 				if templ_7745c5c3_Err != nil {
@@ -420,9 +420,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var21 string
-				templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/debug')", p.Name))
+				templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/debug')", p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 369, Col: 79}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 361, Col: 76}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
 				if templ_7745c5c3_Err != nil {
@@ -438,9 +438,9 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 				var templ_7745c5c3_Var22 string
-				templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/debug')", p.Name))
+				templ_7745c5c3_Var22, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/debug')", p.Name))
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 375, Col: 79}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 367, Col: 76}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var22))
 				if templ_7745c5c3_Err != nil {
@@ -451,54 +451,41 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</sl-tooltip></div><!-- Logs --><sl-tooltip content=\"View live logs\"><sl-icon-button name=\"terminal\" class=\"mass-sidebar-icon\" data-on:click=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "</sl-tooltip></div><!-- Uninstall --><sl-tooltip content=\"Uninstall (removes all files)\"><sl-icon-button name=\"trash3\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-danger-400)\" data-on:click=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var23 string
-			templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$activeModule='%s'; $moduleView='logs'; @get('/api/modules/%s/ui/logs')", p.Name, p.Name))
+			templ_7745c5c3_Var23, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$confirmUninstall='%s'; $confirmOpen=true", p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 385, Col: 126}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 378, Col: 88}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var23))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "\"></sl-icon-button></sl-tooltip><!-- Uninstall --><sl-tooltip content=\"Uninstall (removes all files)\"><sl-icon-button name=\"trash3\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-danger-400)\" data-on:click=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "\"></sl-icon-button></sl-tooltip></div><!-- Start/Stop (patched by SSE) --><span id=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var24 string
-			templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$confirmUninstall='%s'; $confirmOpen=true", p.Name))
+			templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("app-actions-%s", p.Name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 394, Col: 88}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 383, Col: 53}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "\"></sl-icon-button></sl-tooltip></div><!-- Start/Stop (patched by SSE) --><span id=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var25 string
-			templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("module-actions-%s", p.Name))
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 399, Col: 56}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
+			templ_7745c5c3_Err = appActionIcons(p.Name, p.State).Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "\">")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = moduleActionIcons(p.Name, p.State).Render(ctx, templ_7745c5c3_Buffer)
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</span></div></div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "</span></div></div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -507,7 +494,7 @@ func moduleListItems(modules []ModuleViewData, activeModule string) templ.Compon
 	})
 }
 
-func moduleActionIcons(name string, state scheduler.ModuleState) templ.Component {
+func appActionIcons(name string, state scheduler.AppState) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -523,50 +510,50 @@ func moduleActionIcons(name string, state scheduler.ModuleState) templ.Component
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var26 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var26 == nil {
-			templ_7745c5c3_Var26 = templ.NopComponent
+		templ_7745c5c3_Var25 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var25 == nil {
+			templ_7745c5c3_Var25 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		switch state {
 		case scheduler.StateStopped, scheduler.StateError:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "<sl-tooltip content=\"Start module\"><sl-icon-button name=\"play-fill\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-success-400)\" data-on:click=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "<sl-tooltip content=\"Start app\"><sl-icon-button name=\"play-fill\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-success-400)\" data-on:click=\"")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var26 string
+			templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/start')", name))
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 400, Col: 69}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "\"></sl-icon-button></sl-tooltip>")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+		case scheduler.StateRunning:
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<sl-tooltip content=\"Stop app\"><sl-icon-button name=\"stop-fill\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-danger-400)\" data-on:click=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var27 string
-			templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/start')", name))
+			templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/stop')", name))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 416, Col: 72}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 409, Col: 68}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "\"></sl-icon-button></sl-tooltip>")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-		case scheduler.StateRunning:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "<sl-tooltip content=\"Stop module\"><sl-icon-button name=\"stop-fill\" class=\"mass-sidebar-icon\" style=\"opacity:1;color:var(--sl-color-danger-400)\" data-on:click=\"")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			var templ_7745c5c3_Var28 string
-			templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/stop')", name))
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 425, Col: 71}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "\"></sl-icon-button></sl-tooltip>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "\"></sl-icon-button></sl-tooltip>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		case scheduler.StateStarting, scheduler.StateStopping:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<sl-spinner style=\"font-size:0.8rem;--track-width:2px\"></sl-spinner>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "<sl-spinner style=\"font-size:0.8rem;--track-width:2px\"></sl-spinner>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -575,7 +562,7 @@ func moduleActionIcons(name string, state scheduler.ModuleState) templ.Component
 	})
 }
 
-func launchModeDropdown(moduleName string, current config.LaunchMode) templ.Component {
+func launchModeDropdown(appName string, current config.LaunchMode) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -591,76 +578,76 @@ func launchModeDropdown(moduleName string, current config.LaunchMode) templ.Comp
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var29 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var29 == nil {
-			templ_7745c5c3_Var29 = templ.NopComponent
+		templ_7745c5c3_Var28 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var28 == nil {
+			templ_7745c5c3_Var28 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "<div id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<div id=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var29 string
+		templ_7745c5c3_Var29, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("launch-mode-%s", appName))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 418, Col: 49}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var29))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "\"><sl-tooltip content=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var30 string
-		templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("launch-mode-%s", moduleName))
+		templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(launchModeTooltip(current))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 434, Col: 52}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 419, Col: 50}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "\"><sl-tooltip content=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "\"><sl-dropdown><sl-icon-button slot=\"trigger\" name=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var31 string
-		templ_7745c5c3_Var31, templ_7745c5c3_Err = templ.JoinStringErrs(launchModeTooltip(current))
+		templ_7745c5c3_Var31, templ_7745c5c3_Err = templ.JoinStringErrs(launchModeIcon(current))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 435, Col: 50}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 423, Col: 35}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var31))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "\"><sl-dropdown><sl-icon-button slot=\"trigger\" name=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "\" class=\"mass-sidebar-icon\" style=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var32 string
-		templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.JoinStringErrs(launchModeIcon(current))
+		templ_7745c5c3_Var32, templ_7745c5c3_Err = templruntime.SanitizeStyleAttributeValues(launchModeIconColor(current))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 439, Col: 35}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 425, Col: 41}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var32))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "\" class=\"mass-sidebar-icon\" style=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "\"></sl-icon-button> <sl-menu>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var33 string
-		templ_7745c5c3_Var33, templ_7745c5c3_Err = templruntime.SanitizeStyleAttributeValues(launchModeIconColor(current))
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 441, Col: 41}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var33))
+		templ_7745c5c3_Err = launchModeMenuItem(appName, "on_demand", "activity", "On Demand", current).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "\"></sl-icon-button> <sl-menu>")
+		templ_7745c5c3_Err = launchModeMenuItem(appName, "manual", "hand-index", "Manual", current).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = launchModeMenuItem(moduleName, "on_demand", "activity", "On Demand", current).Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = launchModeMenuItem(moduleName, "manual", "hand-index", "Manual", current).Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "</sl-menu></sl-dropdown></sl-tooltip></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "</sl-menu></sl-dropdown></sl-tooltip></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -668,7 +655,7 @@ func launchModeDropdown(moduleName string, current config.LaunchMode) templ.Comp
 	})
 }
 
-func launchModeMenuItem(moduleName, mode, icon, label string, current config.LaunchMode) templ.Component {
+func launchModeMenuItem(appName, mode, icon, label string, current config.LaunchMode) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -684,74 +671,74 @@ func launchModeMenuItem(moduleName, mode, icon, label string, current config.Lau
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var34 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var34 == nil {
-			templ_7745c5c3_Var34 = templ.NopComponent
+		templ_7745c5c3_Var33 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var33 == nil {
+			templ_7745c5c3_Var33 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "<sl-menu-item value=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "<sl-menu-item value=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var34 string
+		templ_7745c5c3_Var34, templ_7745c5c3_Err = templ.JoinStringErrs(mode)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 438, Col: 14}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var34))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "\" data-on:click=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var35 string
-		templ_7745c5c3_Var35, templ_7745c5c3_Err = templ.JoinStringErrs(mode)
+		templ_7745c5c3_Var35, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/apps/%s/launch-mode?mode=%s')", appName, mode))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 454, Col: 14}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 439, Col: 89}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var35))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "\" data-on:click=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "\"><sl-icon slot=\"prefix\" name=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var36 string
-		templ_7745c5c3_Var36, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@post('/api/modules/%s/launch-mode?mode=%s')", moduleName, mode))
+		templ_7745c5c3_Var36, templ_7745c5c3_Err = templ.JoinStringErrs(icon)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 455, Col: 95}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 441, Col: 36}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var36))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "\"><sl-icon slot=\"prefix\" name=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "\" style=\"font-size:0.9rem\"></sl-icon> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var37 string
-		templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(icon)
+		templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(label)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 457, Col: 36}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 442, Col: 9}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var37))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "\" style=\"font-size:0.9rem\"></sl-icon> ")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		var templ_7745c5c3_Var38 string
-		templ_7745c5c3_Var38, templ_7745c5c3_Err = templ.JoinStringErrs(label)
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 458, Col: 9}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var38))
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, " ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, " ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if string(current) == mode {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "<sl-icon slot=\"suffix\" name=\"check-lg\" style=\"font-size:0.8rem\"></sl-icon>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "<sl-icon slot=\"suffix\" name=\"check-lg\" style=\"font-size:0.8rem\"></sl-icon>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "</sl-menu-item>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "</sl-menu-item>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -775,58 +762,58 @@ func settingsPanel(configDir string, logsDir string, dataDir string) templ.Compo
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var39 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var39 == nil {
-			templ_7745c5c3_Var39 = templ.NopComponent
+		templ_7745c5c3_Var38 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var38 == nil {
+			templ_7745c5c3_Var38 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<div class=\"max-w-lg space-y-6 p-6\"><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Server</h3><!-- Hidden auto-save trigger for settings --><button id=\"settings-autosave-trigger\" style=\"display:none\" data-on:click=\"@post('/api/settings')\"></button> <sl-input label=\"Listen Address\" size=\"small\" data-bind=\"listenAddr\" placeholder=\":3455\" tooltip=\"HTTP listen address. Restart required to take effect.\"></sl-input><div class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Data Directory\" size=\"small\" data-bind=\"dataDir\" placeholder=\"Platform default\" tooltip=\"Root directory for modules and models.\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowseDir('dataDir')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div><sl-input label=\"Model Idle Timeout\" size=\"small\" data-bind=\"modelIdleTimeout\" placeholder=\"2m\" help-text=\"Evict dynamic models after this idle period (e.g. 30s, 2m, 1h). Default: 2m.\"></sl-input> <sl-input label=\"Module Idle Timeout\" size=\"small\" data-bind=\"moduleIdleTimeout\" placeholder=\"5s\" help-text=\"Stop on-demand modules after this idle period (e.g. 5s, 30s, 1m). Default: 5s.\"></sl-input> <sl-select label=\"Log Level\" size=\"small\" data-attr:value=\"$logLevel\" data-on:sl-change=\"$logLevel = evt.target.value\" help-text=\"Controls MASS and module log verbosity. Applied immediately.\"><sl-option value=\"trace\">Trace</sl-option> <sl-option value=\"debug\">Debug</sl-option> <sl-option value=\"info\">Info</sl-option> <sl-option value=\"warn\">Warn</sl-option> <sl-option value=\"error\">Error</sl-option></sl-select> <sl-input id=\"auth-token-input\" label=\"Auth Token\" size=\"small\" data-bind=\"authToken\" type=\"password\" data-on:focus=\"if (!$authTokenEdited) { $authTokenEdited = true; $authToken = '' }\" data-on:blur=\"if ($authTokenEdited && $authToken === '' && $authTokenSet) { $authTokenEdited = false; $authToken = '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' }\" data-on:input=\"if ($authTokenEdited) $authTokenSet = $authToken.length > 0\" help-text=\"Leave empty for no auth (dev mode).\"><div slot=\"suffix\" style=\"display:flex;align-items:center;gap:6px;margin-right:var(--sl-input-spacing-small)\"><sl-icon-button data-show=\"$authTokenEdited && $authToken.length > 0\" name=\"eye\" id=\"auth-token-eye\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"var i=document.getElementById('auth-token-input');if(i.type==='password'){i.type='text';this.name='eye-slash'}else{i.type='password';this.name='eye'}\"></sl-icon-button> <sl-icon-button data-show=\"$authToken.length > 0\" name=\"x-circle-fill\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"$authTokenEdited = true; $authToken = ''; $authTokenSet = false; @post('/api/settings')\"></sl-icon-button></div></sl-input><div id=\"settings-status\"></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">TLS / SSL</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Enable TLS</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Encrypt agent and API communication. Restart required.</div></div><sl-switch size=\"small\" data-attr:checked=\"$tlsEnabled\" data-on:sl-change=\"$tlsEnabled = evt.target.checked\"></sl-switch></div><div data-show=\"$tlsEnabled\" class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Certificate PEM\" size=\"small\" data-bind=\"tlsCertFile\" placeholder=\"/path/to/server.pem\" tooltip=\"PEM file containing certificate and private key.\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowseFile('tlsCertFile','.pem')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Developer</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Developer Mode</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Show developer controls for module development</div></div><sl-switch size=\"small\" data-attr:checked=\"$devMode\" data-on:sl-change=\"$devMode = evt.target.checked\"></sl-switch></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "<div class=\"max-w-lg space-y-6 p-6\"><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Server</h3><!-- Hidden auto-save trigger for settings --><button id=\"settings-autosave-trigger\" style=\"display:none\" data-on:click=\"@post('/api/settings')\"></button> <sl-input label=\"Listen Address\" size=\"small\" data-bind=\"listenAddr\" placeholder=\":3455\" tooltip=\"HTTP listen address. Restart required to take effect.\"></sl-input><div class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Data Directory\" size=\"small\" data-bind=\"dataDir\" placeholder=\"Platform default\" tooltip=\"Root directory for apps and models.\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowseDir('dataDir')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div><sl-input label=\"Model Idle Timeout\" size=\"small\" data-bind=\"modelIdleTimeout\" placeholder=\"2m\" help-text=\"Evict dynamic models after this idle period (e.g. 30s, 2m, 1h). Default: 2m.\"></sl-input> <sl-input label=\"App Idle Timeout\" size=\"small\" data-bind=\"appIdleTimeout\" placeholder=\"5s\" help-text=\"Stop on-demand apps after this idle period (e.g. 5s, 30s, 1m). Default: 5s.\"></sl-input> <sl-input label=\"Result TTL\" size=\"small\" data-bind=\"resultTtl\" placeholder=\"24h\" help-text=\"How long to keep cached inference results before cleanup (e.g. 1h, 24h, 7d). Default: 24h.\"></sl-input> <sl-select label=\"Log Level\" size=\"small\" data-attr:value=\"$logLevel\" data-on:sl-change=\"$logLevel = evt.target.value\" help-text=\"Controls MASS and app log verbosity. Applied immediately.\"><sl-option value=\"trace\">Trace</sl-option> <sl-option value=\"debug\">Debug</sl-option> <sl-option value=\"info\">Info</sl-option> <sl-option value=\"warn\">Warn</sl-option> <sl-option value=\"error\">Error</sl-option></sl-select> <sl-input id=\"auth-token-input\" label=\"Auth Token\" size=\"small\" data-bind=\"authToken\" type=\"password\" data-on:focus=\"if (!$authTokenEdited) { $authTokenEdited = true; $authToken = '' }\" data-on:blur=\"if ($authTokenEdited && $authToken === '' && $authTokenSet) { $authTokenEdited = false; $authToken = '\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022' }\" data-on:input=\"if ($authTokenEdited) $authTokenSet = $authToken.length > 0\" help-text=\"Leave empty for no auth (dev mode).\"><div slot=\"suffix\" style=\"display:flex;align-items:center;gap:6px;margin-right:var(--sl-input-spacing-small)\"><sl-icon-button data-show=\"$authTokenEdited && $authToken.length > 0\" name=\"eye\" id=\"auth-token-eye\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"var i=document.getElementById('auth-token-input');if(i.type==='password'){i.type='text';this.name='eye-slash'}else{i.type='password';this.name='eye'}\"></sl-icon-button> <sl-icon-button data-show=\"$authToken.length > 0\" name=\"x-circle-fill\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"$authTokenEdited = true; $authToken = ''; $authTokenSet = false; @post('/api/settings')\"></sl-icon-button></div></sl-input><div id=\"settings-status\"></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">TLS / SSL</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Enable TLS</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Encrypt agent and API communication. Restart required.</div></div><sl-switch size=\"small\" data-attr:checked=\"$tlsEnabled\" data-on:sl-change=\"$tlsEnabled = evt.target.checked\"></sl-switch></div><div data-show=\"$tlsEnabled\" class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Certificate PEM\" size=\"small\" data-bind=\"tlsCertFile\" placeholder=\"/path/to/server.pem\" tooltip=\"PEM file containing certificate and private key.\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowseFile('tlsCertFile','.pem')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Developer</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Developer Mode</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Show developer controls for app development</div></div><sl-switch size=\"small\" data-attr:checked=\"$devMode\" data-on:sl-change=\"$devMode = evt.target.checked\"></sl-switch></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if configDir != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "<div class=\"text-xs text-neutral-500 space-y-1\"><div>Configs: <span class=\"font-mono text-neutral-400\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<div class=\"text-xs text-neutral-500 space-y-1\"><div>Configs: <span class=\"font-mono text-neutral-400\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var40 string
-			templ_7745c5c3_Var40, templ_7745c5c3_Err = templ.JoinStringErrs(configDir)
+			var templ_7745c5c3_Var39 string
+			templ_7745c5c3_Var39, templ_7745c5c3_Err = templ.JoinStringErrs(configDir)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 609, Col: 70}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 601, Col: 70}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var40))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var39))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "</span></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "</span></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			if logsDir != "" {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "<div>Logs: <span class=\"font-mono text-neutral-400\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "<div>Logs: <span class=\"font-mono text-neutral-400\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				var templ_7745c5c3_Var41 string
-				templ_7745c5c3_Var41, templ_7745c5c3_Err = templ.JoinStringErrs(logsDir)
+				var templ_7745c5c3_Var40 string
+				templ_7745c5c3_Var40, templ_7745c5c3_Err = templ.JoinStringErrs(logsDir)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 611, Col: 66}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 603, Col: 66}
 				}
-				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var41))
+				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var40))
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 68, "</span></div>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "</span></div>")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 69, "<div data-show=\"$dataDir\">Data: <span class=\"font-mono text-neutral-400\" data-text=\"$dataDir\"></span></div></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 68, "<div data-show=\"$dataDir\">Data: <span class=\"font-mono text-neutral-400\" data-text=\"$dataDir\"></span></div></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 70, "<!-- Directory browser dialog for settings --><sl-dialog id=\"settings-file-browser\" label=\"Browse Directory\" style=\"--width: 640px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large); --footer-spacing: 0;\"><div id=\"sfb-path\" class=\"flex items-center gap-1 flex-wrap text-xs mb-2 min-h-[24px]\"></div><div id=\"sfb-entries\" class=\"max-h-[420px] overflow-y-auto space-y-0.5 pb-2 border-b border-neutral-700\"></div><sl-button slot=\"footer\" size=\"small\" variant=\"default\" onclick=\"document.getElementById('settings-file-browser').hide()\">Cancel</sl-button> <sl-button slot=\"footer\" size=\"small\" variant=\"primary\" id=\"sfb-select\">Select This Folder</sl-button></sl-dialog>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 69, "<!-- Directory browser dialog for settings --><sl-dialog id=\"settings-file-browser\" label=\"Browse Directory\" style=\"--width: 640px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large); --footer-spacing: 0;\"><div id=\"sfb-path\" class=\"flex items-center gap-1 flex-wrap text-xs mb-2 min-h-[24px]\"></div><div id=\"sfb-entries\" class=\"max-h-[420px] overflow-y-auto space-y-0.5 pb-2 border-b border-neutral-700\"></div><sl-button slot=\"footer\" size=\"small\" variant=\"default\" onclick=\"document.getElementById('settings-file-browser').hide()\">Cancel</sl-button> <sl-button slot=\"footer\" size=\"small\" variant=\"primary\" id=\"sfb-select\">Select This Folder</sl-button></sl-dialog>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -834,7 +821,7 @@ func settingsPanel(configDir string, logsDir string, dataDir string) templ.Compo
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 71, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 70, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -858,27 +845,27 @@ func welcomeState(empty bool) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var42 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var42 == nil {
-			templ_7745c5c3_Var42 = templ.NopComponent
+		templ_7745c5c3_Var41 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var41 == nil {
+			templ_7745c5c3_Var41 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 72, "<div class=\"flex flex-col items-center justify-center h-64 text-center\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 71, "<div class=\"flex flex-col items-center justify-center h-64 text-center\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if empty {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 73, "<h2 class=\"text-lg font-semibold mb-2\">No modules configured</h2><p class=\"text-neutral-400 text-sm mb-4\">Add a module to get started.</p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 72, "<h2 class=\"text-lg font-semibold mb-2\">No apps installed</h2><p class=\"text-neutral-400 text-sm mb-4\">Install an app to get started.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 74, "<h2 class=\"text-lg font-semibold mb-2\">Select a module</h2><p class=\"text-neutral-400 text-sm mb-4\">Choose a module from the sidebar, or install a new one.</p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 73, "<h2 class=\"text-lg font-semibold mb-2\">Select an app</h2><p class=\"text-neutral-400 text-sm mb-4\">Choose an app from the sidebar, or install a new one.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 75, "<sl-button variant=\"primary\" size=\"small\" data-on:click=\"$addModuleOpen = true\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Install New Module</sl-button></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 74, "<sl-button variant=\"primary\" size=\"small\" data-on:click=\"$addAppOpen = true\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Install New App</sl-button></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -886,7 +873,7 @@ func welcomeState(empty bool) templ.Component {
 	})
 }
 
-func addModuleDialog() templ.Component {
+func addAppDialog() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -902,12 +889,12 @@ func addModuleDialog() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var43 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var43 == nil {
-			templ_7745c5c3_Var43 = templ.NopComponent
+		templ_7745c5c3_Var42 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var42 == nil {
+			templ_7745c5c3_Var42 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 76, "<sl-dialog id=\"mass-add-module-dialog\" label=\"Install Module\" data-attr:open=\"$addModuleOpen\" data-on:sl-hide=\"if(!$installing){$addModuleOpen = false}\" style=\"--width: 520px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large) var(--sl-spacing-small); --footer-spacing: var(--sl-spacing-small) var(--sl-spacing-large);\"><div class=\"space-y-4\"><div id=\"install-error\"></div><div data-show=\"!$installing\"><label class=\"text-sm font-medium text-white\">Package File</label><div class=\"flex items-center gap-2 mt-1\"><sl-input size=\"small\" data-bind=\"packagePath\" placeholder=\"/path/to/module.mass\" required class=\"flex-1\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('packagePath', '.mass')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon>Browse</sl-button></div></div><div data-show=\"$installing\" class=\"flex items-center gap-3 py-4 justify-center\"><sl-spinner style=\"font-size: 1.5rem;\"></sl-spinner> <span class=\"text-sm text-neutral-400\">Installing module…</span></div></div><div slot=\"footer\" class=\"flex gap-2 justify-end\"><sl-button size=\"small\" data-on:click=\"$addModuleOpen = false\" data-attr:disabled=\"$installing\">Cancel</sl-button> <sl-button variant=\"primary\" size=\"small\" data-on:click=\"$installing = true; @post('/api/modules/install')\" data-attr:disabled=\"$installing\">Install</sl-button></div></sl-dialog>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 75, "<sl-dialog id=\"mass-add-app-dialog\" label=\"Install App\" data-attr:open=\"$addAppOpen\" data-on:sl-hide=\"if(!$installing){$addAppOpen = false}\" style=\"--width: 520px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large) var(--sl-spacing-small); --footer-spacing: var(--sl-spacing-small) var(--sl-spacing-large);\"><div class=\"space-y-4\"><div id=\"install-error\"></div><div data-show=\"!$installing\"><label class=\"text-sm font-medium text-white\">Package File</label><div class=\"flex items-center gap-2 mt-1\"><sl-input size=\"small\" data-bind=\"packagePath\" placeholder=\"/path/to/app.mass\" required class=\"flex-1\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('packagePath', '.mass')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon>Browse</sl-button></div></div><div data-show=\"$installing\" class=\"flex items-center gap-3 py-4 justify-center\"><sl-spinner style=\"font-size: 1.5rem;\"></sl-spinner> <span class=\"text-sm text-neutral-400\">Installing app…</span></div></div><div slot=\"footer\" class=\"flex gap-2 justify-end\"><sl-button size=\"small\" data-on:click=\"$addAppOpen = false\" data-attr:disabled=\"$installing\">Cancel</sl-button> <sl-button variant=\"primary\" size=\"small\" data-on:click=\"$installing = true; @post('/api/apps/install')\" data-attr:disabled=\"$installing\">Install</sl-button></div></sl-dialog>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

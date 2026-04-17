@@ -13,15 +13,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Dependency declares a required module with a semver constraint and source.
+// Dependency declares a required app with a semver constraint and source.
 type Dependency struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`          // semver constraint, e.g. ">=0.5.0", "^1.2.0"
 	Source  string `yaml:"source,omitempty"` // e.g. "github:owner/repo"
 }
 
-// ResolvedModule is the result of dependency resolution for a single module.
-type ResolvedModule struct {
+// ResolvedApp is the result of dependency resolution for a single app.
+type ResolvedApp struct {
 	Name    string          `yaml:"name"`
 	Version *semver.Version `yaml:"-"`
 	Source  string          `yaml:"source"`
@@ -31,7 +31,7 @@ type ResolvedModule struct {
 
 // Resolver performs dependency resolution: it builds a dependency graph,
 // checks installed versions, queries providers for missing ones, and
-// returns the full set of resolved modules.
+// returns the full set of resolved apps.
 type Resolver struct {
 	installDir string
 	factory    ProviderFactoryInterface
@@ -39,7 +39,7 @@ type Resolver struct {
 }
 
 // NewResolver creates a Resolver.
-// installDir is the modules root directory (e.g. {dataDir}/modules).
+// installDir is the apps root directory (e.g. {dataDir}/apps).
 func NewResolver(installDir string, factory ProviderFactoryInterface, logger zerolog.Logger) *Resolver {
 	return &Resolver{
 		installDir: installDir,
@@ -51,7 +51,7 @@ func NewResolver(installDir string, factory ProviderFactoryInterface, logger zer
 // Resolve takes a set of top-level dependencies and returns the full resolved
 // set (including transitive dependencies). It checks installed versions first
 // and only queries providers when no installed version satisfies a constraint.
-func (r *Resolver) Resolve(ctx context.Context, deps []Dependency) ([]ResolvedModule, error) {
+func (r *Resolver) Resolve(ctx context.Context, deps []Dependency) ([]ResolvedApp, error) {
 	// Build the full dependency graph (including transitive deps).
 	graph, err := r.buildGraph(ctx, deps)
 	if err != nil {
@@ -64,15 +64,15 @@ func (r *Resolver) Resolve(ctx context.Context, deps []Dependency) ([]ResolvedMo
 		return nil, err
 	}
 
-	// Merge constraints for each module from all dependants AND the
+	// Merge constraints for each app from all dependants AND the
 	// top-level deps list (which acts as an implicit root node).
 	merged, err := mergeConstraints(graph, deps)
 	if err != nil {
 		return nil, err
 	}
 
-	// For each module (in install order), pick the best version.
-	var result []ResolvedModule
+	// For each app (in install order), pick the best version.
+	var result []ResolvedApp
 	for _, name := range order {
 		mc := merged[name]
 		resolved, err := r.resolveOne(ctx, name, mc)
@@ -85,11 +85,11 @@ func (r *Resolver) Resolve(ctx context.Context, deps []Dependency) ([]ResolvedMo
 	return result, nil
 }
 
-// Install downloads and extracts all uninstalled resolved modules.
-func (r *Resolver) Install(ctx context.Context, modules []ResolvedModule) error {
-	for _, m := range modules {
+// Install downloads and extracts all uninstalled resolved apps.
+func (r *Resolver) Install(ctx context.Context, apps []ResolvedApp) error {
+	for _, m := range apps {
 		if m.Installed {
-			r.logger.Debug().Str("module", m.Name).Str("version", m.Version.String()).Msg("already installed")
+			r.logger.Debug().Str("app", m.Name).Str("version", m.Version.String()).Msg("already installed")
 			continue
 		}
 
@@ -100,7 +100,7 @@ func (r *Resolver) Install(ctx context.Context, modules []ResolvedModule) error 
 	return nil
 }
 
-// mergedConstraint holds all constraints for a single module and the source
+// mergedConstraint holds all constraints for a single app and the source
 // to fetch it from.
 type mergedConstraint struct {
 	constraints []*semver.Constraints
@@ -108,15 +108,15 @@ type mergedConstraint struct {
 	source      string
 }
 
-// graphNode represents a module in the dependency graph.
+// graphNode represents a app in the dependency graph.
 type graphNode struct {
 	name   string
 	deps   []Dependency
 	source string
 }
 
-// buildGraph recursively resolves the dependency tree. It reads module.yml
-// from installed modules (or queries providers) to discover transitive deps.
+// buildGraph recursively resolves the dependency tree. It reads app.yml
+// from installed apps (or queries providers) to discover transitive deps.
 func (r *Resolver) buildGraph(_ context.Context, rootDeps []Dependency) (map[string]*graphNode, error) {
 	graph := make(map[string]*graphNode)
 	return graph, r.walkDeps(rootDeps, graph)
@@ -137,9 +137,9 @@ func (r *Resolver) walkDeps(deps []Dependency, graph map[string]*graphNode) erro
 		// Try to read transitive deps from an installed version.
 		transDeps := r.readInstalledDeps(dep.Name)
 		if transDeps == nil && dep.Source != "" {
-			// Module not installed — we'll resolve its deps after install.
+			// App not installed — we'll resolve its deps after install.
 			// For now, add a node with no children. Transitive deps of
-			// uninstalled modules will be discovered during install.
+			// uninstalled apps will be discovered during install.
 			continue
 		}
 
@@ -151,17 +151,17 @@ func (r *Resolver) walkDeps(deps []Dependency, graph map[string]*graphNode) erro
 	return nil
 }
 
-// readInstalledDeps reads module.yml from all installed versions of the named
-// module and returns dependencies from the latest version. Returns nil if none
+// readInstalledDeps reads app.yml from all installed versions of the named
+// app and returns dependencies from the latest version. Returns nil if none
 // are installed.
 func (r *Resolver) readInstalledDeps(name string) []Dependency {
-	moduleDir := filepath.Join(r.installDir, name)
-	entries, err := os.ReadDir(moduleDir)
+	appDir := filepath.Join(r.installDir, name)
+	entries, err := os.ReadDir(appDir)
 	if err != nil {
 		return nil
 	}
 
-	var latestMeta *installer.ModuleMetadata
+	var latestMeta *installer.AppMetadata
 	var latestVer *semver.Version
 
 	for _, e := range entries {
@@ -172,7 +172,7 @@ func (r *Resolver) readInstalledDeps(name string) []Dependency {
 		if err != nil {
 			continue
 		}
-		meta, err := installer.ReadMetadataFromDir(filepath.Join(moduleDir, e.Name()))
+		meta, err := installer.ReadMetadataFromDir(filepath.Join(appDir, e.Name()))
 		if err != nil {
 			continue
 		}
@@ -197,7 +197,7 @@ func (r *Resolver) readInstalledDeps(name string) []Dependency {
 	return deps
 }
 
-// topoSort returns module names in topological order (dependencies first).
+// topoSort returns app names in topological order (dependencies first).
 func topoSort(graph map[string]*graphNode) ([]string, error) {
 	const (
 		white = 0 // unvisited
@@ -246,7 +246,7 @@ func topoSort(graph map[string]*graphNode) ([]string, error) {
 	return order, nil
 }
 
-// mergeConstraints collects all version constraints for each module across
+// mergeConstraints collects all version constraints for each app across
 // the entire graph plus the top-level dependency list (which acts as an
 // implicit root node).
 func mergeConstraints(graph map[string]*graphNode, rootDeps []Dependency) (map[string]*mergedConstraint, error) {
@@ -299,12 +299,12 @@ func mergeConstraints(graph map[string]*graphNode, rootDeps []Dependency) (map[s
 	return result, nil
 }
 
-// resolveOne picks the best version for a single module.
-func (r *Resolver) resolveOne(ctx context.Context, name string, mc *mergedConstraint) (ResolvedModule, error) {
+// resolveOne picks the best version for a single app.
+func (r *Resolver) resolveOne(ctx context.Context, name string, mc *mergedConstraint) (ResolvedApp, error) {
 	// 1. Check installed versions.
 	installed := r.listInstalledVersions(name)
 	if v := pickBest(installed, mc.constraints); v != nil {
-		return ResolvedModule{
+		return ResolvedApp{
 			Name:      name,
 			Version:   v,
 			Source:    mc.source,
@@ -314,27 +314,27 @@ func (r *Resolver) resolveOne(ctx context.Context, name string, mc *mergedConstr
 
 	// 2. No installed version fits — query the provider.
 	if mc.source == "" {
-		return ResolvedModule{}, fmt.Errorf("no installed version satisfies constraints (%s) and no source configured",
+		return ResolvedApp{}, fmt.Errorf("no installed version satisfies constraints (%s) and no source configured",
 			strings.Join(mc.rawVersions, ", "))
 	}
 
 	provider, err := r.factory.ProviderFor(mc.source)
 	if err != nil {
-		return ResolvedModule{}, err
+		return ResolvedApp{}, err
 	}
 
 	available, err := provider.ListVersions(ctx, name)
 	if err != nil {
-		return ResolvedModule{}, fmt.Errorf("listing remote versions: %w", err)
+		return ResolvedApp{}, fmt.Errorf("listing remote versions: %w", err)
 	}
 
 	v := pickBest(available, mc.constraints)
 	if v == nil {
-		return ResolvedModule{}, fmt.Errorf("no remote version satisfies constraints (%s), available: %s",
+		return ResolvedApp{}, fmt.Errorf("no remote version satisfies constraints (%s), available: %s",
 			strings.Join(mc.rawVersions, ", "), versionList(available))
 	}
 
-	return ResolvedModule{
+	return ResolvedApp{
 		Name:      name,
 		Version:   v,
 		Source:    mc.source,
@@ -342,10 +342,10 @@ func (r *Resolver) resolveOne(ctx context.Context, name string, mc *mergedConstr
 	}, nil
 }
 
-// listInstalledVersions scans modules/{name}/ for version subdirectories.
+// listInstalledVersions scans apps/{name}/ for version subdirectories.
 func (r *Resolver) listInstalledVersions(name string) []*semver.Version {
-	moduleDir := filepath.Join(r.installDir, name)
-	entries, err := os.ReadDir(moduleDir)
+	appDir := filepath.Join(r.installDir, name)
+	entries, err := os.ReadDir(appDir)
 	if err != nil {
 		return nil
 	}
@@ -359,8 +359,8 @@ func (r *Resolver) listInstalledVersions(name string) []*semver.Version {
 		if err != nil {
 			continue
 		}
-		// Verify module.yml exists in this version dir.
-		if _, err := installer.ReadMetadataFromDir(filepath.Join(moduleDir, e.Name())); err != nil {
+		// Verify app.yml exists in this version dir.
+		if _, err := installer.ReadMetadataFromDir(filepath.Join(appDir, e.Name())); err != nil {
 			continue
 		}
 		versions = append(versions, v)
@@ -397,8 +397,8 @@ func matchesAll(v *semver.Version, constraints []*semver.Constraints) bool {
 	return true
 }
 
-// installOne downloads and extracts a single module version.
-func (r *Resolver) installOne(ctx context.Context, m ResolvedModule) error {
+// installOne downloads and extracts a single app version.
+func (r *Resolver) installOne(ctx context.Context, m ResolvedApp) error {
 	provider, err := r.factory.ProviderFor(m.Source)
 	if err != nil {
 		return err
@@ -413,31 +413,33 @@ func (r *Resolver) installOne(ctx context.Context, m ResolvedModule) error {
 	defer os.Remove(tmpPath) //nolint:errcheck
 
 	r.logger.Info().
-		Str("module", m.Name).
+		Str("app", m.Name).
 		Str("version", m.Version.String()).
 		Str("source", m.Source).
-		Msg("downloading module")
+		Msg("downloading app")
 
 	if err := provider.Download(ctx, m.Name, m.Version, tmpPath); err != nil {
 		return err
 	}
 
-	// Extract to modules/{name}/{version}/
+	// Extract to apps/{name}/{version}/
 	destDir := filepath.Join(r.installDir, m.Name, m.Version.String())
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("creating install dir: %w", err)
 	}
 
 	if err := installer.ExtractZip(tmpPath, destDir); err != nil {
-		_ = os.RemoveAll(destDir)
+		if rmErr := os.RemoveAll(destDir); rmErr != nil {
+			r.logger.Warn().Err(rmErr).Str("dest", destDir).Msg("cleaning up after failed extract")
+		}
 		return fmt.Errorf("extracting: %w", err)
 	}
 
 	r.logger.Info().
-		Str("module", m.Name).
+		Str("app", m.Name).
 		Str("version", m.Version.String()).
 		Str("dir", destDir).
-		Msg("module installed")
+		Msg("app installed")
 
 	return nil
 }

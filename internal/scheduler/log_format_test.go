@@ -16,8 +16,8 @@ func TestNormalizeLogLine(t *testing.T) {
 	}{
 		{
 			name:  "plain text unchanged",
-			input: "2026-03-10T00:54:16Z INF module starting",
-			exact: "2026-03-10T00:54:16Z INF module starting",
+			input: "2026-03-10T00:54:16Z INF app starting",
+			exact: "2026-03-10T00:54:16Z INF app starting",
 		},
 		{
 			name:  "empty string unchanged",

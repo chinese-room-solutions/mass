@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	sdkhf "github.com/chinese-room-solutions/mass-module/huggingface"
-	"github.com/chinese-room-solutions/mass/internal/agent"
+	"github.com/chinese-room-solutions/mass-proto/gen/go/rpcconnect"
+	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
+	sdkhf "github.com/chinese-room-solutions/mass-sdk/huggingface"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/huggingface"
 	"github.com/chinese-room-solutions/mass/internal/installer"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/store"
-	"github.com/chinese-room-solutions/mass/rpc/agent/agentconnect"
-	"github.com/chinese-room-solutions/mass/rpc/rpcconnect"
+	"github.com/chinese-room-solutions/mass/internal/worker"
 	"github.com/rs/zerolog"
 	"github.com/starfederation/datastar-go/datastar"
 )
@@ -59,50 +59,57 @@ type Handler struct {
 
 	sysLog *SystemLogBuffer // MASS system log ring buffer (nil = disabled)
 
-	agents        *agent.Registry
+	workers       *worker.Fleet
 	onThemeChange func(dark bool) // optional: update native window title bar theme
 }
 
+// HandlerOptions bundles the dependencies needed to construct a Handler.
+// All fields are required unless noted otherwise.
+type HandlerOptions struct {
+	Config    *config.Config
+	Scheduler *scheduler.Scheduler
+	Installer *installer.Installer
+	SaveFn    func() // persists current config to disk
+	Logger    zerolog.Logger
+	Store     store.StoreInterface
+	AuthHash  []byte // bcrypt hash of the auth token; nil disables auth
+	Sessions  *SessionStore
+	SysLog    *SystemLogBuffer // nil disables system log streaming
+	Workers   *worker.Fleet
+}
+
 // NewHandler creates the main HTTP handler for the MASS web UI.
-func NewHandler(
-	cfg *config.Config,
-	orch *scheduler.Scheduler,
-	inst *installer.Installer,
-	saveFn func(),
-	logger zerolog.Logger,
-	appStore store.StoreInterface,
-	authHash []byte,
-	sessions *SessionStore,
-	sysLog *SystemLogBuffer,
-	agents *agent.Registry,
-) (*Handler, error) {
+func NewHandler(opts HandlerOptions) (*Handler, error) {
 	// Migrate legacy "owner--repo" model directories to "owner/repo" structure.
-	if dataDir, err := cfg.EffectiveDataDir(); err == nil {
-		MigrateModelDirs(config.ModelsDir(dataDir), logger)
+	if dataDir, err := opts.Config.EffectiveDataDir(); err == nil {
+		MigrateModelDirs(config.ModelsDir(dataDir), opts.Logger)
 	}
 
 	h := &Handler{
-		cfg:       cfg,
-		orch:      orch,
-		installer: inst,
-		store:     appStore,
-		saveFn:    saveFn,
-		logger:    logger,
-		broker:    NewSSEBroker(logger),
+		cfg:       opts.Config,
+		orch:      opts.Scheduler,
+		installer: opts.Installer,
+		store:     opts.Store,
+		saveFn:    opts.SaveFn,
+		logger:    opts.Logger,
+		broker:    NewSSEBroker(opts.Logger),
 		downloads: make(map[string]*downloadState),
-		authHash:  authHash,
-		sessions:  sessions,
-		sysLog:    sysLog,
-		agents:    agents,
+		authHash:  opts.AuthHash,
+		sessions:  opts.Sessions,
+		sysLog:    opts.SysLog,
+		workers:   opts.Workers,
 	}
+	orch := opts.Scheduler
+	sysLog := opts.SysLog
+	workers := opts.Workers
 
 	// Wire scheduler callbacks to SSE broker.
-	orch.AddStatusCallback(func(name string, state scheduler.ModuleState, err error) {
+	orch.AddStatusCallback(func(name string, state scheduler.AppState, err error) {
 		h.broker.Broadcast(SSEEvent{
-			Type:       EventTypeStatus,
-			ModuleName: name,
-			State:      state,
-			Error:      err,
+			Type:    EventTypeStatus,
+			AppName: name,
+			State:   state,
+			Error:   err,
 		})
 	})
 	orch.AddLogCallback(func(name, line string) {
@@ -111,9 +118,9 @@ func NewHandler(
 			return
 		}
 		h.broker.Broadcast(SSEEvent{
-			Type:       EventTypeLog,
-			ModuleName: name,
-			LogLine:    line,
+			Type:    EventTypeLog,
+			AppName: name,
+			LogLine: line,
 		})
 	})
 
@@ -139,12 +146,12 @@ func NewHandler(
 		}()
 	}
 
-	// Wire agent registry changes to SSE broker.
-	agents.AddChangeCallback(func(evt agent.RegistryChangeEvent) {
-		h.broker.Broadcast(SSEEvent{Type: EventTypeAgentChange})
-		// Auto-benchmark newly connected agents' unbenchmarked devices.
-		if evt.Kind == agent.RegistryChangeAdded {
-			go h.autoBenchmarkAgent(evt.AgentID)
+	// Wire worker fleet changes to SSE broker.
+	workers.AddChangeCallback(func(evt worker.FleetChangeEvent) {
+		h.broker.Broadcast(SSEEvent{Type: EventTypeWorkerChange})
+		// Auto-benchmark newly connected workers' unbenchmarked devices.
+		if evt.Kind == worker.FleetChangeAdded {
+			go h.autoBenchmarkWorker(evt.WorkerID)
 		}
 	})
 
@@ -153,15 +160,15 @@ func NewHandler(
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			h.broker.Broadcast(SSEEvent{Type: EventTypeAgentStats})
+			h.broker.Broadcast(SSEEvent{Type: EventTypeWorkerStats})
 		}
 	}()
 
-	// Auto-benchmark devices on agents registered before callbacks were wired
-	// (e.g. the local agent). Remote agents trigger via RegistryChangeAdded.
+	// Auto-benchmark devices on workers registered before callbacks were wired
+	// (e.g. the local worker). Remote workers trigger via FleetChangeAdded.
 	go func() {
-		for _, ag := range agents.All() {
-			h.autoBenchmarkAgent(ag.ID())
+		for _, ag := range workers.All() {
+			h.autoBenchmarkWorker(ag.ID())
 		}
 	}()
 
@@ -251,80 +258,102 @@ func (h *Handler) buildMux() (*http.ServeMux, error) {
 	mux.HandleFunc("GET /", h.handlePageDashboard)
 	mux.HandleFunc("GET /login", h.handlePageLogin)
 	mux.HandleFunc("POST /login", h.handlePostLogin)
-	// SSE event stream.
-	mux.HandleFunc("GET /api/events", h.handleSSEEvents)
-	mux.HandleFunc("GET /api/v1/sync-logs", h.handleSyncLogs)
+	// --- /internal/ — UI-only plumbing: SSE event streams, HTML/Datastar
+	// fragments, binary assets, browser state toggles. NOT part of the
+	// public mass.v1 contract; can change shape without notice. External
+	// callers should use ConnectRPC under /mass.v1.Mass/* instead.
 
-	// Module lifecycle API.
-	mux.HandleFunc("GET /api/modules/deselect", h.handleDeselectModule)
-	mux.HandleFunc("POST /api/modules/install", h.handleInstallModule)
-	mux.HandleFunc("POST /api/modules/{name}/start", h.handleStartModule)
-	mux.HandleFunc("POST /api/modules/{name}/stop", h.handleStopModule)
-	mux.HandleFunc("DELETE /api/modules/{name}", h.handleRemoveModule)
-	mux.HandleFunc("POST /api/modules/{name}/launch-mode", h.handleSetLaunchMode)
-	mux.HandleFunc("POST /api/modules/{name}/auto-start", h.handleToggleAutoStart)
-	mux.HandleFunc("POST /api/modules/{name}/debug", h.handleToggleDebug)
+	// SSE event streams.
+	mux.HandleFunc("GET /internal/events", h.handleSSEEvents)
+	mux.HandleFunc("GET /internal/sync-logs", h.handleSyncLogs)
 
-	mux.HandleFunc("GET /api/modules/{name}/icon", h.handleModuleIcon)
+	// App UI (icons, log streaming, deselection — purely browser concerns).
+	mux.HandleFunc("GET /internal/apps/deselect", h.handleDeselectApp)
+	mux.HandleFunc("GET /internal/apps/{name}/icon", h.handleAppIcon)
+	mux.HandleFunc("GET /internal/apps/{name}/logs", h.handleAppRenderLogs)
 
-	// Module UI proxy — forwards HTTP to module's built-in handler via gRPC.
-	mux.HandleFunc("GET /modules/{name}/{path...}", h.handleModuleProxy)
-	mux.HandleFunc("POST /modules/{name}/{path...}", h.handleModuleProxy)
-	// Module logs view (still uses Datastar SSE into MASS shell).
-	mux.HandleFunc("GET /api/modules/{name}/ui/logs", h.handleModuleRenderLogs)
+	// Settings UI toggle.
+	mux.HandleFunc("POST /internal/settings/theme", h.handleToggleTheme)
 
-	// Settings API.
+	// Scheduler tab UI (Datastar HTML rendering).
+	mux.HandleFunc("GET /internal/scheduler", h.handleSchedulerInstances)
+	mux.HandleFunc("GET /internal/scheduler/info", h.handleSchedulerInstanceInfo)
+
+	// Workers benchmark progress (SSE wrapper around RunBenchmark).
+	mux.HandleFunc("POST /internal/workers/benchmark", h.handleBenchmarkSSE)
+
+	// --- /api/* — management endpoints, transitional (Phase 4 migrates
+	// the dual-implemented ones to ConnectRPC). New external callers
+	// should prefer ConnectRPC.
+
+	// App lifecycle.
+	mux.HandleFunc("POST /api/apps/install", h.handleInstallApp)
+	mux.HandleFunc("POST /api/apps/{name}/start", h.handleStartApp)
+	mux.HandleFunc("POST /api/apps/{name}/stop", h.handleStopApp)
+	mux.HandleFunc("DELETE /api/apps/{name}", h.handleRemoveApp)
+	mux.HandleFunc("POST /api/apps/{name}/launch-mode", h.handleSetLaunchMode)
+	mux.HandleFunc("POST /api/apps/{name}/auto-start", h.handleToggleAutoStart)
+	mux.HandleFunc("POST /api/apps/{name}/debug", h.handleToggleDebug)
+
+	// Settings update.
 	mux.HandleFunc("POST /api/settings", h.handleUpdateSettings)
-	mux.HandleFunc("POST /api/settings/theme", h.handleToggleTheme)
 
-	// Agents tab API.
-	mux.HandleFunc("GET /api/agents", h.handleListAgents)
-	mux.HandleFunc("POST /api/agents/benchmark", h.handleBenchmarkSSE)
-	mux.HandleFunc("POST /api/agents/toggle", h.handleToggleAgentScheduling)
-	mux.HandleFunc("POST /api/agents/devices/toggle", h.handleToggleDeviceScheduling)
+	// Workers / devices (UI plumbing — rendered HTML cards + toggle-shape).
+	mux.HandleFunc("GET /internal/workers", h.handleListWorkers)
+	mux.HandleFunc("POST /internal/workers/toggle", h.handleToggleWorkerScheduling)
+	mux.HandleFunc("POST /internal/workers/devices/toggle", h.handleToggleDeviceScheduling)
 	mux.HandleFunc("POST /api/v1/benchmark", h.handleBenchmarkAPI)
 
-	// AgentHub: bidirectional stream for remote agents.
+	// WorkerHub: bidirectional stream for remote workers.
 	// ConnectRPC uses POST for all RPCs, so prefix with POST to avoid
 	// conflict with the GET / catch-all route.
-	_, hubHandler := agentconnect.NewAgentHubHandler(
-		agent.NewHub(h.agents, "http://"+h.cfg.EffectiveListenAddr(), h.modelsDir(), h.logger),
+	canonicalFn := func() map[string]struct{} { return CanonicalModelFiles(h.modelsDir()) }
+	_, hubHandler := workerconnect.NewWorkerHubHandler(
+		worker.NewHub(h.workers, "http://"+h.cfg.EffectiveListenAddr(), h.modelsDir(), canonicalFn, h.logger),
 	)
-	mux.Handle("POST "+agentconnect.AgentHubConnectProcedure, hubHandler)
+	mux.Handle("POST "+workerconnect.WorkerHubConnectProcedure, hubHandler)
 
-	// Models tab API.
-	mux.HandleFunc("GET /api/models", h.handleListModels)
-	mux.HandleFunc("GET /api/models/fetch/{path...}", h.handleFetchModel)
-	mux.HandleFunc("DELETE /api/models", h.handleDeleteModel)
-	mux.HandleFunc("POST /api/models/search", h.handleSearchHF)
-	mux.HandleFunc("POST /api/models/search/more", h.handleSearchHFMore)
-	mux.HandleFunc("POST /api/models/download", h.handleDownloadModel)
-	mux.HandleFunc("POST /api/models/download/pause", h.handleDownloadPause)
-	mux.HandleFunc("POST /api/models/download/resume", h.handleDownloadResume)
-	mux.HandleFunc("POST /api/models/download/cancel", h.handleDownloadCancel)
-	mux.HandleFunc("GET /api/models/info", h.handleModelInfo)
-	mux.HandleFunc("GET /api/models/select", h.handleModelsSelect)
+	// Worker model file fetch — public coordination endpoint that remote
+	// workers hit to download model files MASS owns. Versioned because
+	// it's a stable cross-process URL, not UI plumbing.
+	mux.HandleFunc("GET /api/v1/models/fetch/{path...}", h.handleFetchModel)
 
-	// Scheduler tab API (SSE/Datastar).
-	mux.HandleFunc("GET /api/scheduler", h.handleSchedulerInstances)
-	mux.HandleFunc("GET /api/scheduler/info", h.handleSchedulerInstanceInfo)
-	mux.HandleFunc("DELETE /api/scheduler/evict", h.handleSchedulerEvict)
+	// Models tab UI (Datastar SSE / HTML rendering).
+	mux.HandleFunc("GET /internal/models", h.handleListModels)
+	mux.HandleFunc("DELETE /internal/models", h.handleDeleteModel)
+	mux.HandleFunc("POST /internal/models/download", h.handleDownloadModel)
+	mux.HandleFunc("POST /internal/models/download/pause", h.handleDownloadPause)
+	mux.HandleFunc("POST /internal/models/download/resume", h.handleDownloadResume)
+	mux.HandleFunc("POST /internal/models/download/cancel", h.handleDownloadCancel)
+	mux.HandleFunc("GET /internal/models/info", h.handleModelInfo)
 
-	// Public API v1 (JSON).
+	// Scheduler tab UI eviction (Datastar).
+	mux.HandleFunc("DELETE /internal/scheduler/evict", h.handleSchedulerEvict)
+
+	// Public API v1 — JSON endpoints + embeddable HTML widgets that apps
+	// reuse (model picker dialog, HF search results). Both shapes share
+	// the same stability promise as ConnectRPC under /mass.v1.Mass/*.
 	mux.HandleFunc("GET /api/v1/models", h.handleAPIListModels)
 	mux.HandleFunc("POST /api/v1/models/load", h.handleLoadModel)
 	mux.HandleFunc("POST /api/v1/models/import", h.handleImportModel)
+	mux.HandleFunc("GET /api/v1/models/select", h.handleModelsSelect)
+	mux.HandleFunc("POST /api/v1/models/search", h.handleSearchHF)
+	mux.HandleFunc("POST /api/v1/models/search/more", h.handleSearchHFMore)
 	mux.HandleFunc("GET /api/v1/browse/roots", h.handleBrowseRoots)
 	mux.HandleFunc("GET /api/v1/browse", h.handleBrowseFiles)
 
-	// Management RPCs — handled directly by the web handler (not proxied to scheduler).
+	// ConnectRPC endpoints — public mass.v1 contract handled directly by
+	// the web handler (not proxied to scheduler).
 	mux.HandleFunc("POST "+rpcconnect.MassListModelsProcedure, h.handleRPCListModels)
+	mux.HandleFunc("POST "+rpcconnect.MassListLoadedModelsProcedure, h.handleRPCListLoadedModels)
 	mux.HandleFunc("POST "+rpcconnect.MassLoadModelProcedure, h.handleRPCLoadModel)
 	mux.HandleFunc("POST "+rpcconnect.MassDownloadModelProcedure, h.handleRPCDownloadModel)
 	mux.HandleFunc("POST "+rpcconnect.MassRunBenchmarkProcedure, h.handleRPCRunBenchmark)
 	mux.HandleFunc("POST "+rpcconnect.MassSetDeviceEnabledProcedure, h.handleRPCSetDeviceEnabled)
 
 	// Proxy remaining ConnectRPC (inference) and ping endpoints to scheduler.
+	// App-registered services use paths like "/mass.<app>.v1.<Service>/<Method>"
+	// and are routed by ServeHTTP before reaching this mux.
 	mux.HandleFunc("POST /mass.v1.Mass/", h.handleAPIProxy)
 	mux.HandleFunc("GET /ping", h.handlePing)
 
@@ -338,6 +367,18 @@ func (h *Handler) SetOnThemeChange(fn func(dark bool)) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// App-registered services use paths "/mass.<app>.v1.<Service>/<Method>"
+	// — anything under /mass. that isn't a core MASS RPC. Routed straight
+	// to the scheduler (ServeMux can't express this as a single literal).
+	// Exclusions: /mass.v1.Mass/ (public inference API, on the mux) and
+	// /mass.v1.worker.WorkerHub/ (worker bidi stream, also on the mux).
+	if r.Method == http.MethodPost &&
+		strings.HasPrefix(r.URL.Path, "/mass.") &&
+		!strings.HasPrefix(r.URL.Path, "/mass.v1.Mass/") &&
+		!strings.HasPrefix(r.URL.Path, "/mass.v1.worker.") {
+		h.orch.ServeHTTP(w, r)
+		return
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -352,24 +393,24 @@ type SSEBroker struct {
 type EventKind int
 
 const (
-	EventTypeStatus      EventKind = iota
-	EventTypeProgress              // model loading progress
-	EventTypeLog                   // module stderr log line
-	EventTypeDownload              // model download progress
-	EventTypeSystemLog             // MASS system log line
-	EventTypePoolChange            // model pool changed (model loaded/evicted)
-	EventTypeAgentChange           // agent registry changed (agent connected/disconnected)
-	EventTypeAgentStats            // agent stats update (gauges only, no DOM replace)
+	EventTypeStatus       EventKind = iota
+	EventTypeProgress               // model loading progress
+	EventTypeLog                    // app stderr log line
+	EventTypeDownload               // model download progress
+	EventTypeSystemLog              // MASS system log line
+	EventTypePoolChange             // model pool changed (model loaded/evicted)
+	EventTypeWorkerChange           // worker fleet changed (agent connected/disconnected)
+	EventTypeWorkerStats            // agent stats update (gauges only, no DOM replace)
 )
 
 // SSEEvent is an event broadcast to SSE clients.
 type SSEEvent struct {
-	Type       EventKind
-	ModuleName string
-	State      scheduler.ModuleState
-	Error      error
-	Progress   string
-	LogLine    string
+	Type     EventKind
+	AppName  string
+	State    scheduler.AppState
+	Error    error
+	Progress string
+	LogLine  string
 	// Download progress fields (EventTypeDownload).
 	DlFilename   string
 	DlDownloaded int64
@@ -442,12 +483,14 @@ func decodeJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-// writeJSON writes a JSON response.
+// writeJSON writes a JSON response. Panics on unmarshalable v (programmer bug);
+// tolerates client-disconnect errors silently.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	//nolint:errchkjson // Can only fail if v is unmarshalable or client disconnected; both non-actionable.
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil && !expectedClientDisconnect(err) {
+		panic(err)
+	}
 }
 
 // addDownload registers a new active download and returns its state.
@@ -505,14 +548,13 @@ func (h *Handler) replayDownloads(sse *datastar.ServerSentEventGenerator) {
 		total := ds.Total
 		paused := ds.Paused
 		ds.mu.Unlock()
-
-		_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlStart('%s','%s')`, jsFile, jsGroup))
+		mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlStart('%s','%s')`, jsFile, jsGroup)))
 		if total > 0 {
 			pct := int(100 * downloaded / total)
-			_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlProgress('%s',%d,%d,%d)`, jsFile, pct, downloaded, total))
+			mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlProgress('%s',%d,%d,%d)`, jsFile, pct, downloaded, total)))
 		}
 		if paused {
-			_ = sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlPaused('%s')`, jsFile))
+			mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlPaused('%s')`, jsFile)))
 		}
 	}
 }

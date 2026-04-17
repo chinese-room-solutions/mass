@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	_ "modernc.org/sqlite"
 
-	"github.com/chinese-room-solutions/mass/rpc"
+	rpc "github.com/chinese-room-solutions/mass-proto/gen/go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,9 +41,11 @@ func TestQueue_SubmitAndReceive(t *testing.T) {
 	ctx := context.Background()
 
 	req := &rpc.ChatCompletionRequest{
-		Model: "test-model",
+		ModelConfig: &rpc.ChatModelConfig{
+			Config: &rpc.ChatModelConfig_Llama{Llama: &rpc.LlamaChatConfig{Model: "test-model"}},
+		},
 		Messages: []*rpc.ChatMessage{
-			{Role: "user", Content: "hello"},
+			{Role: rpc.Role_ROLE_USER, Content: "hello"},
 		},
 	}
 
@@ -80,17 +82,18 @@ func TestQueue_PriorityOrdering(t *testing.T) {
 	q := New(db)
 	ctx := context.Background()
 
-	// Submit all 4 priority levels in scrambled order.
-	_, err := q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Model: "low", Input: "a"}, PriorityLow)
+	// Submit all 4 priority levels in scrambled order. The Input field
+	// doubles as a tag so we can verify the receive order.
+	_, err := q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Input: "low"}, PriorityLow)
 	require.NoError(t, err)
 
-	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Model: "critical", Input: "b"}, PriorityCritical)
+	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Input: "critical"}, PriorityCritical)
 	require.NoError(t, err)
 
-	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Model: "medium", Input: "c"}, PriorityMedium)
+	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Input: "medium"}, PriorityMedium)
 	require.NoError(t, err)
 
-	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Model: "high", Input: "d"}, PriorityHigh)
+	_, err = q.SubmitEmbedding(ctx, &rpc.EmbeddingRequest{Input: "high"}, PriorityHigh)
 	require.NoError(t, err)
 
 	// Receive should return highest priority first: critical, high, medium, low.
@@ -102,7 +105,7 @@ func TestQueue_PriorityOrdering(t *testing.T) {
 		env, _ := UnmarshalEnvelope(msg.Body)
 		req := &rpc.EmbeddingRequest{}
 		require.NoError(t, proto.Unmarshal(env.Payload, req))
-		require.Equal(t, want, req.Model, "expected priority order")
+		require.Equal(t, want, req.Input, "expected priority order")
 		require.NoError(t, q.Delete(ctx, msg.ID))
 	}
 }
@@ -128,12 +131,13 @@ func TestEnvelope_MarshalRoundtrip(t *testing.T) {
 	}{
 		{"chat", Envelope{Type: RequestTypeChatCompletion, Source: "direct", Payload: []byte("chat-data")}},
 		{"with_fingerprint", Envelope{Type: RequestTypeChatCompletion, Priority: PriorityHigh, Source: "direct", Fingerprint: "abc123def45678", Payload: []byte("chat-data")}},
-		{"embedding", Envelope{Type: RequestTypeEmbedding, Priority: PriorityCritical, Retries: 2, Source: "module:playground", Fingerprint: "fp1234", RequestID: "req-99", Payload: []byte("embed-data")}},
+		{"embedding", Envelope{Type: RequestTypeEmbedding, Priority: PriorityCritical, Retries: 2, Source: "app:playground", Fingerprint: "fp1234", RequestID: "req-99", Payload: []byte("embed-data")}},
 		{"with_global_msg_id", Envelope{Type: RequestTypeChatCompletion, Priority: PriorityHigh, Source: "direct", Fingerprint: "fp1234", RequestID: "req-1", GlobalMsgID: "global-msg-abc123", Payload: []byte("data")}},
-		{"all_fields", Envelope{Type: RequestTypeBatchChatCompletion, Priority: PriorityCritical, Retries: 3, Source: "module:embed", Fingerprint: "fp9999", RequestID: "req-42", GlobalMsgID: "gm-xyz-789", Payload: []byte("full")}},
+		{"all_fields", Envelope{Type: RequestTypeBatchChatCompletion, Priority: PriorityCritical, Retries: 3, ModelSizeBytes: 4_000_000_000, Source: "app:embed", Fingerprint: "fp9999", RequestID: "req-42", GlobalMsgID: "gm-xyz-789", Payload: []byte("full")}},
 		{"empty_payload", Envelope{Type: RequestTypeTokenize, Payload: []byte{}}},
 		{"empty_source", Envelope{Type: RequestTypeChatCompletion, Payload: []byte("data")}},
 		{"max_retries", Envelope{Type: RequestTypeChatCompletion, Retries: 255, Source: "direct", Payload: []byte("x")}},
+		{"large_model_size", Envelope{Type: RequestTypeChatCompletion, ModelSizeBytes: 70_000_000_000, Source: "direct", Fingerprint: "fp", Payload: []byte("p")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,6 +147,7 @@ func TestEnvelope_MarshalRoundtrip(t *testing.T) {
 			require.Equal(t, tt.env.Type, got.Type)
 			require.Equal(t, tt.env.Priority, got.Priority)
 			require.Equal(t, tt.env.Retries, got.Retries)
+			require.Equal(t, tt.env.ModelSizeBytes, got.ModelSizeBytes)
 			require.Equal(t, tt.env.Source, got.Source)
 			require.Equal(t, tt.env.Fingerprint, got.Fingerprint)
 			require.Equal(t, tt.env.RequestID, got.RequestID)
@@ -157,14 +162,16 @@ func TestUnmarshalEnvelope_TooShort(t *testing.T) {
 	require.Error(t, err)
 	_, err = UnmarshalEnvelope([]byte{})
 	require.Error(t, err)
-	// Single byte is also too short (need at least type + source_len).
-	_, err = UnmarshalEnvelope([]byte{0x00})
+	// Header alone (11 bytes) is the minimum; anything shorter must error.
+	_, err = UnmarshalEnvelope(make([]byte, 10))
 	require.Error(t, err)
 }
 
 func TestUnmarshalEnvelope_SourceTruncated(t *testing.T) {
-	// source_len says 5 but only 2 bytes of source follow.
-	_, err := UnmarshalEnvelope([]byte{0x00, 0x05, 'a', 'b'})
+	// header (11 bytes) + source_len=5 but only 2 bytes of source follow.
+	buf := make([]byte, 11)
+	buf = append(buf, 0x05, 'a', 'b')
+	_, err := UnmarshalEnvelope(buf)
 	require.Error(t, err)
 }
 
@@ -174,7 +181,7 @@ func TestQueue_MessageRedeliveryAfterTimeout(t *testing.T) {
 	q := NewNamed(db, "redelivery-test", 3, 200*time.Millisecond)
 	ctx := context.Background()
 
-	_, err := q.SubmitRaw(ctx, RequestTypeChatCompletion, []byte("durable"), "direct", "fp1", PriorityMedium)
+	_, err := q.SubmitRaw(ctx, RequestTypeChatCompletion, []byte("durable"), "direct", "fp1", 0, PriorityMedium)
 	require.NoError(t, err)
 
 	// Receive the message (makes it invisible for 200ms).
@@ -209,7 +216,7 @@ func TestQueue_ExtendPreventsRedelivery(t *testing.T) {
 	q := NewNamed(db, "extend-test", 3, 200*time.Millisecond)
 	ctx := context.Background()
 
-	_, err := q.SubmitRaw(ctx, RequestTypeChatCompletion, []byte("extended"), "direct", "", PriorityMedium)
+	_, err := q.SubmitRaw(ctx, RequestTypeChatCompletion, []byte("extended"), "direct", "", 0, PriorityMedium)
 	require.NoError(t, err)
 
 	msg, err := q.Receive(ctx)

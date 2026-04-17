@@ -2,7 +2,6 @@ package web
 
 import (
 	"net/http"
-	"path/filepath"
 
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
@@ -22,7 +21,7 @@ func (h *Handler) handlePageDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modules := buildModuleList(h.cfg, h.orch.GetAllModules())
+	apps := buildAppList(h.cfg, h.orch.GetAllApps())
 
 	active := ""
 
@@ -35,23 +34,24 @@ func (h *Handler) handlePageDashboard(w http.ResponseWriter, r *http.Request) {
 	hasToken := len(h.authHash) > 0
 	h.authHashMu.RUnlock()
 
-	cfgPath, _ := config.DefaultPath()
+	cfgDir, _ := config.DefaultDir()
 	data := templates.DashboardData{
-		Modules:           modules,
-		ActiveModule:      active,
-		ListenAddr:        h.cfg.ListenAddr,
-		DataDir:           h.cfg.DataDir,
-		AuthTokenSet:      hasToken,
-		ModelIdleTimeout:  h.cfg.ModelIdleTimeout,
-		ModuleIdleTimeout: h.cfg.ModuleIdleTimeout,
-		LogLevel:          logLevelString(h.cfg.Logger.Level),
-		Theme:             theme,
-		DevMode:           h.cfg.DevMode,
-		ConfigDir:         filepath.Dir(cfgPath),
-		LogsDir:           config.LogsDir(cfgPath),
-		AgentsHTML:        templates.RenderAgentsList(h.buildAgentViews()),
-		TLSEnabled:        h.cfg.TLS.Enabled,
-		TLSCertFile:       h.cfg.TLS.CertFile,
+		Apps:             apps,
+		ActiveApp:        active,
+		ListenAddr:       h.cfg.ListenAddr,
+		DataDir:          h.cfg.DataDir,
+		AuthTokenSet:     hasToken,
+		ModelIdleTimeout: h.cfg.ModelIdleTimeout,
+		AppIdleTimeout:   h.cfg.AppIdleTimeout,
+		ResultTTL:        h.cfg.ResultTTL,
+		LogLevel:         logLevelString(h.cfg.Logger.Level),
+		Theme:            theme,
+		DevMode:          h.cfg.DevMode,
+		ConfigDir:        cfgDir,
+		LogsDir:          config.LogsDir(cfgDir),
+		AgentsHTML:       templates.RenderAgentsList(h.buildWorkerViews()),
+		TLSEnabled:       h.cfg.TLS.Enabled,
+		TLSCertFile:      h.cfg.TLS.CertFile,
 	}
 
 	page := templates.DashboardPage(data)
@@ -102,7 +102,7 @@ func (h *Handler) handlePostLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func infoVersion(mp *scheduler.ManagedModule) string {
+func infoVersion(mp *scheduler.ManagedApp) string {
 	if mp.Info != nil {
 		return mp.Info.Version
 	}
@@ -112,6 +112,6 @@ func infoVersion(mp *scheduler.ManagedModule) string {
 	return ""
 }
 
-func moduleHasIcon(mp *scheduler.ManagedModule) bool {
+func appHasIcon(mp *scheduler.ManagedApp) bool {
 	return mp != nil && mp.DiskMeta != nil && mp.DiskMeta.Icon != ""
 }

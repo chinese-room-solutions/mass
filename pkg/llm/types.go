@@ -1,5 +1,15 @@
 package llm
 
+// ModelKind identifies what an inference model is used for. It controls which
+// pool/loader path a model goes through and which inference verbs are valid
+// against it. Lowercase to match wire / config / proto serialization.
+type ModelKind string
+
+const (
+	ModelKindChat      ModelKind = "chat"
+	ModelKindEmbedding ModelKind = "embedding"
+)
+
 // CompletionRequest represents a single chat completion request.
 type CompletionRequest struct {
 	Messages         []ChatMessage

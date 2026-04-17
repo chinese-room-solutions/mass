@@ -2,6 +2,8 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
 	"os"
@@ -18,7 +20,41 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func (h *Handler) handleInstallModule(w http.ResponseWriter, r *http.Request) {
+// installAppFromPackage installs (or upgrades) an app from a .mass
+// package on disk, registers it with the scheduler, and persists the
+// updated app list. Returns the installed app's name and version.
+func (h *Handler) installAppFromPackage(packagePath string) (string, string, error) {
+	command, meta, err := h.installer.InstallFromArchive(packagePath)
+	if err != nil {
+		return "", "", fmt.Errorf("install failed: %w", err)
+	}
+	appDir := filepath.Dir(command)
+	configPath := ""
+	if _, statErr := os.Stat(filepath.Join(appDir, "config.yml")); statErr == nil {
+		configPath = "${APP_DIR}/config.yml"
+	}
+	if existing := h.cfg.FindApp(meta.Name); existing != nil {
+		existing.Command = command
+		existing.Version = meta.Version
+		existing.Source = "package"
+		existing.Config = configPath
+	} else {
+		h.cfg.Apps = append(h.cfg.Apps, config.AppConfig{
+			Name:    meta.Name,
+			Command: command,
+			Version: meta.Version,
+			Source:  "package",
+			Config:  configPath,
+		})
+	}
+	h.saveFn()
+	if err := h.orch.Register(h.cfg.FindApp(meta.Name)); err != nil {
+		return meta.Name, meta.Version, fmt.Errorf("installed but registration failed: %w", err)
+	}
+	return meta.Name, meta.Version, nil
+}
+
+func (h *Handler) handleInstallApp(w http.ResponseWriter, r *http.Request) {
 	var signals struct {
 		PackagePath string `json:"packagePath"`
 	}
@@ -35,64 +71,30 @@ func (h *Handler) handleInstallModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	command, meta, err := h.installer.InstallFromArchive(signals.PackagePath)
+	name, _, err := h.installAppFromPackage(signals.PackagePath)
 	if err != nil {
-		patchInstallError(sse, "Install failed: "+err.Error())
-		return
-	}
-
-	// Auto-detect config.yml next to the installed binary.
-	moduleDir := filepath.Dir(command)
-	configPath := ""
-	if _, err := os.Stat(filepath.Join(moduleDir, "config.yml")); err == nil {
-		configPath = "${MODULE_DIR}/config.yml"
-	}
-
-	// Check for existing module with same name.
-	if existing := h.cfg.FindModule(meta.Name); existing != nil {
-		// Update existing entry (upgrade).
-		existing.Command = command
-		existing.Version = meta.Version
-		existing.Source = "package"
-		existing.Config = configPath
-	} else {
-		// Create new module config entry.
-		moduleCfg := config.ModuleConfig{
-			Name:    meta.Name,
-			Command: command,
-			Version: meta.Version,
-			Source:  "package",
-			Config:  configPath,
-		}
-		h.cfg.Modules = append(h.cfg.Modules, moduleCfg)
-	}
-	h.saveFn()
-
-	// Register the newly installed module (no subprocess started).
-	moduleCfg := h.cfg.FindModule(meta.Name)
-	if err := h.orch.Register(moduleCfg); err != nil {
-		patchInstallError(sse, "Installed but registration failed: "+err.Error())
+		patchInstallError(sse, err.Error())
 		return
 	}
 
 	// Re-render sidebar.
-	allModules := h.orch.GetAllModules()
-	modules := buildModuleList(h.cfg, allModules)
-	_ = sse.PatchElements(templates.RenderModuleList(modules, meta.Name),
-		datastar.WithSelector("#module-list"),
+	allApps := h.orch.GetAllApps()
+	apps := buildAppList(h.cfg, allApps)
+	mustSSE(sse.PatchElements(templates.RenderAppList(apps, name),
+		datastar.WithSelector("#app-list"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
+	))
 
-	patchContent(sse, `<div class="flex flex-col items-center justify-center h-64 text-center"><h2 class="text-lg font-semibold mb-2">Module installed</h2><p class="text-neutral-400 text-sm">Press play to start.</p></div>`)
+	patchAppContent(sse, `<div class="flex flex-col items-center justify-center h-64 text-center"><h2 class="text-lg font-semibold mb-2">App installed</h2><p class="text-neutral-400 text-sm">Press play to start.</p></div>`)
 
-	if b, err := json.Marshal(map[string]any{"addModuleOpen": false, "installing": false, "packagePath": ""}); err == nil {
-		_ = sse.PatchSignals(b)
+	if b, err := json.Marshal(map[string]any{"addAppOpen": false, "installing": false, "packagePath": ""}); err == nil {
+		mustSSE(sse.PatchSignals(b))
 	}
 }
 
-func (h *Handler) handleModuleIcon(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleAppIcon(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	mp := h.orch.GetModule(name)
+	mp := h.orch.GetApp(name)
 	if mp == nil || mp.DiskMeta == nil || mp.DiskMeta.Icon == "" {
 		http.NotFound(w, r)
 		return
@@ -106,79 +108,76 @@ func (h *Handler) handleModuleIcon(w http.ResponseWriter, r *http.Request) {
 	if mp.Config != nil {
 		version = mp.Config.Version
 	}
-	iconPath := filepath.Join(config.ModuleVersionDir(dataDir, name, version), mp.DiskMeta.Icon)
+	iconPath := filepath.Join(config.AppVersionDir(dataDir, name, version), mp.DiskMeta.Icon)
 	http.ServeFile(w, r, iconPath)
 }
 
-func (h *Handler) handleStartModule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleStartApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	h.logger.Info().Str("module", name).Msg("starting module")
+	h.logger.Info().Str("app", name).Msg("starting app")
 	sse := datastar.NewSSE(w, r)
 
 	if err := h.orch.Start(name); err != nil {
-		h.logger.Error().Err(err).Str("module", name).Msg("failed to start module")
-		_ = sse.PatchElements(templates.RenderError(err.Error()))
+		h.logger.Error().Err(err).Str("app", name).Msg("failed to start app")
+		mustSSE(sse.PatchElements(templates.RenderError(err.Error())))
 		return
 	}
+	mustSSE(
 
-	// Immediate feedback — status updates come via /api/events SSE.
-	_ = sse.PatchElements(templates.RenderModuleStatus(name, scheduler.StateStarting, nil, ""))
+		// Immediate feedback — status updates come via /internal/events SSE.
+		sse.PatchElements(templates.RenderAppStatus(name, scheduler.StateStarting, nil, "")))
 }
 
-func (h *Handler) handleStopModule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	sse := datastar.NewSSE(w, r)
 
 	if err := h.orch.Stop(name); err != nil {
-		_ = sse.PatchElements(templates.RenderError(err.Error()))
+		mustSSE(sse.PatchElements(templates.RenderError(err.Error())))
 		return
 	}
-
-	_ = sse.PatchElements(templates.RenderModuleStatus(name, scheduler.StateStopped, nil, ""))
+	mustSSE(sse.PatchElements(templates.RenderAppStatus(name, scheduler.StateStopped, nil, "")))
 }
 
-func (h *Handler) handleDeselectModule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleDeselectApp(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
-	if b, err := json.Marshal(map[string]any{"activeModule": ""}); err == nil {
-		_ = sse.PatchSignals(b)
+	if b, err := json.Marshal(map[string]any{"activeApp": ""}); err == nil {
+		mustSSE(sse.PatchSignals(b))
 	}
-	modules := buildModuleList(h.cfg, h.orch.GetAllModules())
-	patchContent(sse, templates.RenderWelcomeState(len(modules) == 0))
+	apps := buildAppList(h.cfg, h.orch.GetAllApps())
+	patchAppContent(sse, templates.RenderWelcomeState(len(apps) == 0))
 }
 
-func (h *Handler) handleRemoveModule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleRemoveApp(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	sse := datastar.NewSSE(w, r)
 
 	h.orch.Remove(name)
-	h.cfg.RemoveModule(name)
+	h.cfg.RemoveApp(name)
 	h.saveFn()
 
-	// Delete the module's data directory and its models.
+	// Delete the app's data directory only. Models are kept and must be
+	// removed explicitly from the models page — uninstalling an app never
+	// destroys downloads.
 	// On Windows, file locks from the just-killed subprocess may linger briefly.
 	if dataDir, err := h.cfg.EffectiveDataDir(); err == nil {
-		if err := removeWithRetry(filepath.Join(dataDir, "modules", name), 5, 500*time.Millisecond); err != nil {
-			h.logger.Warn().Err(err).Str("module", name).Msg("failed to remove module directory")
-		}
-		if err := removeWithRetry(filepath.Join(dataDir, "models", name), 5, 500*time.Millisecond); err != nil {
-			h.logger.Warn().Err(err).Str("module", name).Msg("failed to remove module models directory")
+		if err := removeWithRetry(filepath.Join(dataDir, "apps", name), 5, 500*time.Millisecond); err != nil {
+			h.logger.Warn().Err(err).Str("app", name).Msg("failed to remove app directory")
 		}
 	}
 
-	// Re-render the sidebar module list and clear main content.
-	allModules := h.orch.GetAllModules()
-	modules := buildModuleList(h.cfg, allModules)
-	_ = sse.PatchElements(templates.RenderModuleList(modules, ""),
-		datastar.WithSelector("#module-list"),
+	// Re-render the sidebar app list and clear main content.
+	allApps := h.orch.GetAllApps()
+	apps := buildAppList(h.cfg, allApps)
+	mustSSE(sse.PatchElements(templates.RenderAppList(apps, ""),
+		datastar.WithSelector("#app-list"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
-	// Remove module-specific signals (e.g. modelPath, contextSize) from the
-	// Datastar store BEFORE patching content. When Datastar processes new
-	if b, err := json.Marshal(map[string]any{"activeModule": ""}); err == nil {
-		_ = sse.PatchSignals(b)
+	))
+	if b, err := json.Marshal(map[string]any{"activeApp": ""}); err == nil {
+		mustSSE(sse.PatchSignals(b))
 	}
 
-	patchContent(sse, templates.RenderWelcomeState(len(modules) == 0))
+	patchAppContent(sse, templates.RenderWelcomeState(len(apps) == 0))
 }
 
 func (h *Handler) handleToggleTheme(w http.ResponseWriter, r *http.Request) {
@@ -195,13 +194,13 @@ func (h *Handler) handleToggleTheme(w http.ResponseWriter, r *http.Request) {
 
 	sse := datastar.NewSSE(w, r)
 	if b, err := json.Marshal(map[string]any{"theme": h.cfg.Theme}); err == nil {
-		_ = sse.PatchSignals(b)
+		mustSSE(sse.PatchSignals(b))
 	}
 }
 
 func (h *Handler) handleSetLaunchMode(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	pc := h.cfg.FindModule(name)
+	pc := h.cfg.FindApp(name)
 	if pc == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -218,23 +217,23 @@ func (h *Handler) handleSetLaunchMode(w http.ResponseWriter, r *http.Request) {
 
 	h.saveFn()
 
-	// If switching to on-demand and the module is already running, arm the
+	// If switching to on-demand and the app is already running, arm the
 	// idle timer so it will stop after the configured timeout.
 	if mode == config.LaunchModeOnDemand {
 		h.orch.ArmIdleTimer(name)
 	}
 
 	sse := datastar.NewSSE(w, r)
-	_ = sse.PatchElements(
+	mustSSE(sse.PatchElements(
 		templates.RenderLaunchModeDropdown(name, mode),
 		datastar.WithSelector("#launch-mode-"+name),
 		datastar.WithModeOuter(),
-	)
+	))
 }
 
 func (h *Handler) handleToggleAutoStart(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	pc := h.cfg.FindModule(name)
+	pc := h.cfg.FindApp(name)
 	if pc == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -245,13 +244,13 @@ func (h *Handler) handleToggleAutoStart(w http.ResponseWriter, r *http.Request) 
 
 	// Re-render the sidebar so the auto-start icon updates.
 	sse := datastar.NewSSE(w, r)
-	modules := buildModuleList(h.cfg, h.orch.GetAllModules())
-	_ = sse.PatchElements(templates.RenderModuleList(modules, name))
+	apps := buildAppList(h.cfg, h.orch.GetAllApps())
+	mustSSE(sse.PatchElements(templates.RenderAppList(apps, name)))
 }
 
 func (h *Handler) handleToggleDebug(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	pc := h.cfg.FindModule(name)
+	pc := h.cfg.FindApp(name)
 	if pc == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -262,44 +261,46 @@ func (h *Handler) handleToggleDebug(w http.ResponseWriter, r *http.Request) {
 
 	// Switching modes requires re-registration: stop current process and
 	// re-register with the new debug setting.
-	mp := h.orch.GetModule(name)
+	mp := h.orch.GetApp(name)
 	if mp != nil && mp.State != scheduler.StateRunning {
 		h.orch.Remove(name)
 		if err := h.orch.Register(pc); err != nil {
-			h.logger.Error().Err(err).Str("module", name).Msg("re-register after debug toggle failed")
+			h.logger.Error().Err(err).Str("app", name).Msg("re-register after debug toggle failed")
 		}
 		h.saveFn()
 	}
 
 	// Re-render the sidebar so the bug icon color updates.
 	sse := datastar.NewSSE(w, r)
-	modules := buildModuleList(h.cfg, h.orch.GetAllModules())
-	_ = sse.PatchElements(templates.RenderModuleList(modules, name))
+	apps := buildAppList(h.cfg, h.orch.GetAllApps())
+	mustSSE(sse.PatchElements(templates.RenderAppList(apps, name)))
 }
 
 func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var signals struct {
-		ListenAddr        string `json:"listenAddr"`
-		DataDir           string `json:"dataDir"`
-		AuthToken         string `json:"authToken"`
-		AuthTokenEdited   bool   `json:"authTokenEdited"`
-		ModelIdleTimeout  string `json:"modelIdleTimeout"`
-		ModuleIdleTimeout string `json:"moduleIdleTimeout"`
-		LogLevel          string `json:"logLevel"`
-		DevMode           bool   `json:"devMode"`
-		TLSEnabled        bool   `json:"tlsEnabled"`
-		TLSCertFile       string `json:"tlsCertFile"`
+		ListenAddr       string `json:"listenAddr"`
+		DataDir          string `json:"dataDir"`
+		AuthToken        string `json:"authToken"`
+		AuthTokenEdited  bool   `json:"authTokenEdited"`
+		ModelIdleTimeout string `json:"modelIdleTimeout"`
+		AppIdleTimeout   string `json:"appIdleTimeout"`
+		ResultTTL        string `json:"resultTtl"`
+		LogLevel         string `json:"logLevel"`
+		DevMode          bool   `json:"devMode"`
+		TLSEnabled       bool   `json:"tlsEnabled"`
+		TLSCertFile      string `json:"tlsCertFile"`
 	}
 	if err := datastar.ReadSignals(r, &signals); err != nil {
 		sse := datastar.NewSSE(w, r)
-		_ = sse.PatchElements(templates.RenderError("Invalid request"))
+		mustSSE(sse.PatchElements(templates.RenderError("Invalid request")))
 		return
 	}
 
 	h.cfg.ListenAddr = signals.ListenAddr
 	h.cfg.DataDir = signals.DataDir
 	h.cfg.ModelIdleTimeout = signals.ModelIdleTimeout
-	h.cfg.ModuleIdleTimeout = signals.ModuleIdleTimeout
+	h.cfg.AppIdleTimeout = signals.AppIdleTimeout
+	h.cfg.ResultTTL = signals.ResultTTL
 	h.cfg.DevMode = signals.DevMode
 	h.cfg.TLS.Enabled = signals.TLSEnabled
 	h.cfg.TLS.CertFile = signals.TLSCertFile
@@ -319,8 +320,6 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Handle auth token update.
 	// Only process when the user actually interacted with the field (authTokenEdited).
-	// This prevents auto-saves triggered by other setting changes from deleting
-	// the token (empty authToken signal sent when token wasn't touched).
 	if signals.AuthTokenEdited {
 		if signals.AuthToken == "" {
 			// User cleared the field — remove token.
@@ -441,36 +440,36 @@ func (h *Handler) handlePing(w http.ResponseWriter, r *http.Request) {
 	h.orch.ServeHTTP(w, r)
 }
 
-func buildModuleList(cfg *config.Config, allModules map[string]*scheduler.ManagedModule) []templates.ModuleViewData {
-	modules := make([]templates.ModuleViewData, 0, len(cfg.Modules))
+func buildAppList(cfg *config.Config, allApps map[string]*scheduler.ManagedApp) []templates.AppViewData {
+	apps := make([]templates.AppViewData, 0, len(cfg.Apps))
 	seen := make(map[string]bool)
 
-	for _, pc := range cfg.Modules {
+	for _, pc := range cfg.Apps {
 		seen[pc.Name] = true
-		mp := allModules[pc.Name]
-		pvd := templates.ModuleViewData{Name: pc.Name, LaunchMode: pc.EffectiveLaunchMode(), AutoStart: pc.AutoStart, Debug: pc.Debug, HasIcon: moduleHasIcon(mp)}
+		mp := allApps[pc.Name]
+		pvd := templates.AppViewData{Name: pc.Name, LaunchMode: pc.EffectiveLaunchMode(), AutoStart: pc.AutoStart, Debug: pc.Debug, HasIcon: appHasIcon(mp)}
 		if mp != nil {
 			pvd.State = mp.State
 			pvd.Error = mp.Error
 			pvd.Version = infoVersion(mp)
 		}
-		modules = append(modules, pvd)
+		apps = append(apps, pvd)
 	}
 
-	for name, mp := range allModules {
+	for name, mp := range allApps {
 		if !seen[name] {
-			pvd := templates.ModuleViewData{
+			pvd := templates.AppViewData{
 				Name:    name,
 				State:   mp.State,
 				Error:   mp.Error,
 				Version: infoVersion(mp),
-				HasIcon: moduleHasIcon(mp),
+				HasIcon: appHasIcon(mp),
 			}
-			modules = append(modules, pvd)
+			apps = append(apps, pvd)
 		}
 	}
 
-	return modules
+	return apps
 }
 
 // removeWithRetry attempts os.RemoveAll up to maxAttempts times, waiting delay
@@ -487,4 +486,22 @@ func removeWithRetry(path string, maxAttempts int, delay time.Duration) error {
 		}
 	}
 	return err
+}
+
+// patchAppContent patches #app-content with inner mode via Datastar SSE.
+func patchAppContent(sse *datastar.ServerSentEventGenerator, htmlStr string) {
+	mustSSE(sse.PatchElements(htmlStr,
+		datastar.WithSelector("#app-content"),
+		datastar.WithMode(datastar.ElementPatchModeInner),
+	))
+}
+
+// patchInstallError resets the installing state and shows an error inside the install dialog.
+func patchInstallError(sse *datastar.ServerSentEventGenerator, msg string) {
+	mustSSE(sse.PatchSignals([]byte(`{"installing":false}`)))
+	mustSSE(sse.PatchElements(
+		fmt.Sprintf(`<div id="install-error"><sl-alert variant="danger" open>%s</sl-alert></div>`, html.EscapeString(msg)),
+		datastar.WithSelector("#install-error"),
+		datastar.WithMode(datastar.ElementPatchModeOuter),
+	))
 }

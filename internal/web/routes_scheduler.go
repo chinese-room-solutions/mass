@@ -9,6 +9,7 @@ import (
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/web/templates"
+	"github.com/chinese-room-solutions/mass/pkg/llm"
 	"github.com/starfederation/datastar-go/datastar"
 )
 
@@ -19,16 +20,18 @@ func (h *Handler) handleSchedulerEvict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.orch.PoolEvict(fp) {
+		h.logger.Warn().Str("fingerprint", fp).Msg("evict request for unknown or loading instance")
 		return
 	}
-	// Clear the properties panel and deselect — the pool change callback
-	// will also push an updated instance list to all SSE clients.
-	_ = sse.PatchElements(
-		`<div id="scheduler-props-content"></div>`,
-		datastar.WithSelector("#scheduler-props-content"),
-		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
-	_ = sse.PatchSignals([]byte(`{"selectedSchedulerFp":""}`))
+	mustSSE(
+		// Clear the properties panel and deselect — the pool change callback
+		// will also push an updated instance list to all SSE clients.
+		sse.PatchElements(
+			`<div id="scheduler-props-content"></div>`,
+			datastar.WithSelector("#scheduler-props-content"),
+			datastar.WithMode(datastar.ElementPatchModeOuter),
+		))
+	mustSSE(sse.PatchSignals([]byte(`{"selectedSchedulerFp":""}`)))
 }
 
 func (h *Handler) handleSchedulerInstanceInfo(w http.ResponseWriter, r *http.Request) {
@@ -36,19 +39,19 @@ func (h *Handler) handleSchedulerInstanceInfo(w http.ResponseWriter, r *http.Req
 	sse := datastar.NewSSE(w, r)
 
 	if fp == "" {
-		_ = sse.PatchElements(`<div id="scheduler-props-content"></div>`,
+		mustSSE(sse.PatchElements(`<div id="scheduler-props-content"></div>`,
 			datastar.WithSelector("#scheduler-props-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
 	inst, ok := h.orch.PoolSnapshotInstance(fp)
 	if !ok {
-		_ = sse.PatchElements(`<div id="scheduler-props-content"><p class="text-neutral-500 text-sm p-4">Instance not found (may have been evicted).</p></div>`,
+		mustSSE(sse.PatchElements(`<div id="scheduler-props-content"><p class="text-neutral-500 text-sm p-4">Instance not found (may have been evicted).</p></div>`,
 			datastar.WithSelector("#scheduler-props-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
@@ -58,29 +61,28 @@ func (h *Handler) handleSchedulerInstanceInfo(w http.ResponseWriter, r *http.Req
 		h.logger.Error().Err(err).Msg("failed to render scheduler instance props")
 		return
 	}
-
-	_ = sse.PatchElements(buf.String(),
+	mustSSE(sse.PatchElements(buf.String(),
 		datastar.WithSelector("#scheduler-props-content"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
+	))
 }
 
 func (h *Handler) handleSchedulerInstances(w http.ResponseWriter, r *http.Request) {
 	html := h.renderSchedulerContent(r.Context())
 	sse := datastar.NewSSE(w, r)
-	_ = sse.PatchElements(html,
+	mustSSE(sse.PatchElements(html,
 		datastar.WithSelector("#scheduler-content"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
+	))
 }
 
 // pushSchedulerContent renders and pushes the scheduler instance list via an existing SSE connection.
 func (h *Handler) pushSchedulerContent(sse *datastar.ServerSentEventGenerator) {
 	html := h.renderSchedulerContent(sse.Context())
-	_ = sse.PatchElements(html,
+	mustSSE(sse.PatchElements(html,
 		datastar.WithSelector("#scheduler-content"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
+	))
 }
 
 // pushSchedulerInstanceStatus renders and pushes only the status elements
@@ -104,55 +106,55 @@ func (h *Handler) pushSchedulerInstanceStatus(sse *datastar.ServerSentEventGener
 
 	// Update list row elements.
 	if err := templates.SchedulerInstanceDot(fp, status).Render(ctx, &buf); err == nil {
-		_ = sse.PatchElements(buf.String(),
+		mustSSE(sse.PatchElements(buf.String(),
 			datastar.WithSelector("#sched-dot-"+fp),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 	}
 
 	buf.Reset()
 	if err := templates.SchedulerInstanceStatusBadge(fp, status).Render(ctx, &buf); err == nil {
-		_ = sse.PatchElements(buf.String(),
+		mustSSE(sse.PatchElements(buf.String(),
 			datastar.WithSelector("#sched-status-"+fp),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 	}
 
 	buf.Reset()
 	if err := templates.SchedulerInstanceReqs(fp, inst.ActiveReqs).Render(ctx, &buf); err == nil {
-		_ = sse.PatchElements(buf.String(),
+		mustSSE(sse.PatchElements(buf.String(),
 			datastar.WithSelector("#sched-reqs-"+fp),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 	}
 
 	// Update properties panel elements (only patched if the panel is showing this instance).
 	buf.Reset()
 	if err := templates.SchedulerPropsStatus(fp, status).Render(ctx, &buf); err == nil {
-		_ = sse.PatchElements(buf.String(),
+		mustSSE(sse.PatchElements(buf.String(),
 			datastar.WithSelector("#sched-props-status-"+fp),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 	}
 
 	buf.Reset()
 	if err := templates.SchedulerPropsReqs(fp, inst.ActiveReqs).Render(ctx, &buf); err == nil {
-		_ = sse.PatchElements(buf.String(),
+		mustSSE(sse.PatchElements(buf.String(),
 			datastar.WithSelector("#sched-props-reqs-"+fp),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 	}
 }
 
 // closeSchedulerPropsIfGone clears the properties panel selection if the
 // currently selected instance no longer exists in the pool after a list change.
 func (h *Handler) closeSchedulerPropsIfGone(sse *datastar.ServerSentEventGenerator) {
-	_ = sse.PatchElements(
+	mustSSE(sse.PatchElements(
 		`<div id="scheduler-props-content"></div>`,
 		datastar.WithSelector("#scheduler-props-content"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
-	_ = sse.PatchSignals([]byte(`{"selectedSchedulerFp":""}`))
+	))
+	mustSSE(sse.PatchSignals([]byte(`{"selectedSchedulerFp":""}`)))
 }
 
 // renderSchedulerContent renders the scheduler instance list to an HTML string.
@@ -168,7 +170,7 @@ func (h *Handler) renderSchedulerContent(ctx context.Context) string {
 
 func instanceInfoToPropsView(inst scheduler.ModelInstanceInfo, modelsDir string) templates.SchedulerInstancePropsView {
 	typ := "Chat"
-	if inst.Type == "embedding" {
+	if inst.Type == llm.ModelKindEmbedding {
 		typ = "Embedding"
 	}
 	status := "Idle"
@@ -178,8 +180,8 @@ func instanceInfoToPropsView(inst scheduler.ModelInstanceInfo, modelsDir string)
 		status = "Active"
 	}
 	source := inst.Source
-	if strings.HasPrefix(source, "module:") {
-		source = "module: " + source[7:]
+	if strings.HasPrefix(source, "app:") {
+		source = "app: " + source[7:]
 	}
 	cfg := make([]templates.SchedulerConfigEntry, len(inst.Config))
 	for i, e := range inst.Config {
@@ -192,8 +194,8 @@ func instanceInfoToPropsView(inst scheduler.ModelInstanceInfo, modelsDir string)
 		Type:        typ,
 		Source:      source,
 		Mode:        inst.Mode.String(),
-		AgentID:     inst.AgentID,
-		AgentName:   inst.AgentName,
+		WorkerID:    inst.WorkerID,
+		WorkerName:  inst.WorkerName,
 		DeviceIDs:   inst.DeviceIDs,
 		Status:      status,
 		ActiveReqs:  inst.ActiveReqs,
@@ -205,7 +207,7 @@ func snapshotToViews(snapshot []scheduler.ModelInstanceInfo, modelsDir string) [
 	views := make([]templates.SchedulerInstanceView, len(snapshot))
 	for i, inst := range snapshot {
 		typ := "Chat"
-		if inst.Type == "embedding" {
+		if inst.Type == llm.ModelKindEmbedding {
 			typ = "Embedding"
 		}
 
@@ -217,8 +219,8 @@ func snapshotToViews(snapshot []scheduler.ModelInstanceInfo, modelsDir string) [
 		}
 
 		source := inst.Source
-		if strings.HasPrefix(source, "module:") {
-			source = "module: " + source[7:]
+		if strings.HasPrefix(source, "app:") {
+			source = "app: " + strings.TrimPrefix(source, "app:")
 		}
 
 		views[i] = templates.SchedulerInstanceView{
@@ -228,8 +230,8 @@ func snapshotToViews(snapshot []scheduler.ModelInstanceInfo, modelsDir string) [
 			Type:        typ,
 			Source:      source,
 			Mode:        inst.Mode.String(),
-			AgentID:     inst.AgentID,
-			AgentName:   inst.AgentName,
+			WorkerID:    inst.WorkerID,
+			WorkerName:  inst.WorkerName,
 			DeviceIDs:   inst.DeviceIDs,
 			ActiveReqs:  inst.ActiveReqs,
 			Status:      status,

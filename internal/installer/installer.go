@@ -21,14 +21,14 @@ import (
 	"github.com/chinese-room-solutions/mass/pkg/download"
 )
 
-// ModuleInfo mirrors the registry API response for a single module.
-type ModuleInfo struct {
+// AppInfo mirrors the registry API response for a single app.
+type AppInfo struct {
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
 	Versions    []VersionInfo `json:"versions"`
 }
 
-// VersionInfo mirrors the registry API response for a module version.
+// VersionInfo mirrors the registry API response for a app version.
 type VersionInfo struct {
 	Version   string         `json:"version"`
 	Platforms []PlatformInfo `json:"platforms"`
@@ -40,7 +40,7 @@ type PlatformInfo struct {
 	Arch string `json:"arch"`
 }
 
-// Installer downloads and extracts modules from a registry.
+// Installer downloads and extracts apps from a registry.
 type Installer struct {
 	RegistryURL string
 	InstallDir  string
@@ -49,7 +49,7 @@ type Installer struct {
 }
 
 // NewInstaller creates an Installer. If installDir is empty, it defaults to
-// ~/.config/mass/modules.
+// ~/.config/mass/apps.
 func NewInstaller(registryURL, installDir string, logger zerolog.Logger) *Installer {
 	if installDir == "" {
 		cacheDir, err := os.UserCacheDir()
@@ -60,7 +60,7 @@ func NewInstaller(registryURL, installDir string, logger zerolog.Logger) *Instal
 			}
 			cacheDir = home
 		}
-		installDir = filepath.Join(cacheDir, "mass", "modules")
+		installDir = filepath.Join(cacheDir, "mass", "apps")
 	}
 	return &Installer{
 		RegistryURL: strings.TrimRight(registryURL, "/"),
@@ -70,29 +70,29 @@ func NewInstaller(registryURL, installDir string, logger zerolog.Logger) *Instal
 	}
 }
 
-// Resolve returns the command for the module, installing it first if needed.
+// Resolve returns the command for the app, installing it first if needed.
 func (inst *Installer) Resolve(ctx context.Context, name, version string) (string, error) {
 	// Check if already installed.
 	dir := filepath.Join(inst.InstallDir, name, version)
 	meta, err := ReadMetadataFromDir(dir)
 	if err == nil && meta.Command != "" {
 		inst.Logger.Debug().
-			Str("module", name).Str("version", version).Str("command", meta.Command).
-			Msg("module already installed")
+			Str("app", name).Str("version", version).Str("command", meta.Command).
+			Msg("app already installed")
 		return meta.Command, nil
 	}
 
 	return inst.Install(ctx, name, version)
 }
 
-// Install downloads and extracts a module, returning its command.
+// Install downloads and extracts a app, returning its command.
 func (inst *Installer) Install(ctx context.Context, name, version string) (string, error) {
 	inst.Logger.Info().
-		Str("module", name).Str("version", version).
+		Str("app", name).Str("version", version).
 		Str("os", runtime.GOOS).Str("arch", runtime.GOARCH).
-		Msg("downloading module from registry")
+		Msg("downloading app from registry")
 
-	dlURL := fmt.Sprintf("%s/api/v1/modules/%s/%s/download?os=%s&arch=%s",
+	dlURL := fmt.Sprintf("%s/api/v1/apps/%s/%s/download?os=%s&arch=%s",
 		inst.RegistryURL, name, version, runtime.GOOS, runtime.GOARCH)
 
 	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("mass-module-%s-%s.zip", name, version))
@@ -100,7 +100,7 @@ func (inst *Installer) Install(ctx context.Context, name, version string) (strin
 
 	mgr := download.NewManager(inst.Client)
 	if err := mgr.Download(ctx, dlURL, tmpPath, download.WithMaxRetries(3)); err != nil {
-		return "", ctxerr.With(fmt.Errorf("downloading module %s@%s: %w", name, version, err), map[string]any{"module": name, "version": version, "url": dlURL})
+		return "", ctxerr.With(fmt.Errorf("downloading app %s@%s: %w", name, version, err), map[string]any{"app": name, "version": version, "url": dlURL})
 	}
 
 	// Extract to install directory.
@@ -110,25 +110,27 @@ func (inst *Installer) Install(ctx context.Context, name, version string) (strin
 	}
 
 	if err := ExtractZip(tmpPath, destDir); err != nil {
-		_ = os.RemoveAll(destDir) // best-effort cleanup
-		return "", ctxerr.With(fmt.Errorf("extracting module: %w", err), map[string]any{"module": name, "version": version, "dest": destDir})
+		if rmErr := os.RemoveAll(destDir); rmErr != nil {
+			inst.Logger.Warn().Err(rmErr).Str("dest", destDir).Msg("cleaning up after failed extract")
+		}
+		return "", ctxerr.With(fmt.Errorf("extracting app: %w", err), map[string]any{"app": name, "version": version, "dest": destDir})
 	}
 
 	meta, err := ReadMetadataFromDir(destDir)
 	if err != nil {
-		return "", ctxerr.With(fmt.Errorf("reading metadata after extraction: %w", err), map[string]any{"module": name, "version": version, "dest": destDir})
+		return "", ctxerr.With(fmt.Errorf("reading metadata after extraction: %w", err), map[string]any{"app": name, "version": version, "dest": destDir})
 	}
 
 	inst.Logger.Info().
-		Str("module", name).Str("version", version).Str("command", meta.Command).
-		Msg("module installed")
+		Str("app", name).Str("version", version).Str("command", meta.Command).
+		Msg("app installed")
 
 	return meta.Command, nil
 }
 
-// List queries the registry for all available modules.
-func (inst *Installer) List(ctx context.Context) ([]ModuleInfo, error) {
-	url := inst.RegistryURL + "/api/v1/modules"
+// List queries the registry for all available apps.
+func (inst *Installer) List(ctx context.Context) ([]AppInfo, error) {
+	url := inst.RegistryURL + "/api/v1/apps"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -145,12 +147,12 @@ func (inst *Installer) List(ctx context.Context) ([]ModuleInfo, error) {
 		return nil, fmt.Errorf("registry returned %d", resp.StatusCode)
 	}
 
-	var modules []ModuleInfo
-	if err := json.NewDecoder(resp.Body).Decode(&modules); err != nil {
+	var apps []AppInfo
+	if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	return modules, nil
+	return apps, nil
 }
 
 // modelExtensions lists file extensions treated as model files during installation.
@@ -158,7 +160,7 @@ var modelExtensions = []string{".gguf"}
 
 // relocateModels moves model files from srcDir to destDir.
 // Returns the number of files moved.
-func relocateModels(srcDir, destDir string) (int, error) {
+func relocateModels(srcDir, destDir string, logger zerolog.Logger) (int, error) {
 	var moved int
 	err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -192,9 +194,12 @@ func relocateModels(srcDir, destDir string) (int, error) {
 	}
 
 	// Remove empty models subdirectories left behind after relocation.
+	// Failure is expected when the dir still has content — that's fine, leave it.
 	modelsSubDir := filepath.Join(srcDir, "models")
 	if info, err := os.Stat(modelsSubDir); err == nil && info.IsDir() {
-		_ = os.Remove(modelsSubDir) // best-effort, fails if non-empty (which is fine)
+		if rmErr := os.Remove(modelsSubDir); rmErr != nil {
+			logger.Debug().Err(rmErr).Str("path", modelsSubDir).Msg("models subdir not empty, leaving in place")
+		}
 	}
 
 	return moved, nil
@@ -251,7 +256,9 @@ func ExtractZip(src, dest string) error {
 		}
 
 		_, copyErr := io.Copy(outFile, rc)
-		_ = rc.Close() // read-only close, best-effort
+		if rcErr := rc.Close(); rcErr != nil && copyErr == nil {
+			copyErr = rcErr
+		}
 		if closeErr := outFile.Close(); closeErr != nil && copyErr == nil {
 			copyErr = closeErr
 		}
@@ -312,16 +319,16 @@ func ExtractTar(src, dest string) error {
 	return nil
 }
 
-// InstallFromArchive installs a module from a local .mass archive (zip or tar).
+// InstallFromArchive installs a app from a local .mass archive (zip or tar).
 // Returns the resolved command and parsed metadata.
-func (inst *Installer) InstallFromArchive(archivePath string) (string, *ModuleMetadata, error) {
+func (inst *Installer) InstallFromArchive(archivePath string) (string, *AppMetadata, error) {
 	// Read and validate metadata.
 	meta, err := ReadMetadataFromArchive(archivePath)
 	if err != nil {
 		return "", nil, ctxerr.With(fmt.Errorf("reading metadata: %w", err), map[string]any{"archive": archivePath})
 	}
 	if err := ValidateMetadata(meta); err != nil {
-		return "", nil, ctxerr.With(fmt.Errorf("invalid package: %w", err), map[string]any{"archive": archivePath, "module": meta.Name})
+		return "", nil, ctxerr.With(fmt.Errorf("invalid package: %w", err), map[string]any{"archive": archivePath, "app": meta.Name})
 	}
 	if err := ExecutableExistsInArchive(archivePath, meta.Command); err != nil {
 		return "", nil, err
@@ -334,16 +341,16 @@ func (inst *Installer) InstallFromArchive(archivePath string) (string, *ModuleMe
 		}
 	}
 
-	// Extract to install directory: modules/{name}/{version}/
+	// Extract to install directory: apps/{name}/{version}/
 	destDir := filepath.Join(inst.InstallDir, meta.Name, meta.Version)
 
 	// Remove existing installation of the same version if upgrading.
 	// On Windows, file locks from recently killed processes may linger briefly,
 	// so we retry a few times before giving up.
 	if _, err := os.Stat(destDir); err == nil {
-		inst.Logger.Info().Str("module", meta.Name).Str("version", meta.Version).Msg("removing existing version for upgrade")
+		inst.Logger.Info().Str("app", meta.Name).Str("version", meta.Version).Msg("removing existing version for upgrade")
 		if err := removeWithRetry(destDir, 5, 500*time.Millisecond); err != nil {
-			return "", nil, ctxerr.With(fmt.Errorf("removing existing installation: %w", err), map[string]any{"module": meta.Name, "version": meta.Version, "dest": destDir})
+			return "", nil, ctxerr.With(fmt.Errorf("removing existing installation: %w", err), map[string]any{"app": meta.Name, "version": meta.Version, "dest": destDir})
 		}
 	}
 
@@ -352,25 +359,27 @@ func (inst *Installer) InstallFromArchive(archivePath string) (string, *ModuleMe
 	}
 
 	if err := ExtractArchive(archivePath, destDir); err != nil {
-		_ = os.RemoveAll(destDir) // best-effort cleanup
-		return "", nil, ctxerr.With(fmt.Errorf("extracting archive: %w", err), map[string]any{"archive": archivePath, "module": meta.Name, "dest": destDir})
+		if rmErr := os.RemoveAll(destDir); rmErr != nil {
+			inst.Logger.Warn().Err(rmErr).Str("dest", destDir).Msg("cleaning up after failed archive extract")
+		}
+		return "", nil, ctxerr.With(fmt.Errorf("extracting archive: %w", err), map[string]any{"archive": archivePath, "app": meta.Name, "dest": destDir})
 	}
 
 	// Move model files (.gguf) to the centralized models directory.
-	// InstallDir is {dataDir}/modules, so models dir is {dataDir}/models/{name}.
+	// InstallDir is {dataDir}/apps, so models dir is {dataDir}/models/{name}.
 	dataDir := filepath.Dir(inst.InstallDir)
 	modelsDir := filepath.Join(dataDir, "models", meta.Name)
-	if n, err := relocateModels(destDir, modelsDir); err != nil {
+	if n, err := relocateModels(destDir, modelsDir, inst.Logger); err != nil {
 		inst.Logger.Warn().Err(err).Msg("failed to relocate model files")
 	} else if n > 0 {
 		inst.Logger.Info().Int("count", n).Str("dest", modelsDir).Msg("relocated model files")
 	}
 
 	inst.Logger.Info().
-		Str("module", meta.Name).
+		Str("app", meta.Name).
 		Str("version", meta.Version).
 		Str("command", meta.Command).
-		Msg("module installed from archive")
+		Msg("app installed from archive")
 
 	return meta.Command, meta, nil
 }
@@ -392,14 +401,20 @@ func removeWithRetry(path string, maxAttempts int, delay time.Duration) error {
 }
 
 // InstallFromURL downloads a .mass archive from a URL and installs it.
-func (inst *Installer) InstallFromURL(ctx context.Context, dlURL string) (string, *ModuleMetadata, error) {
-	inst.Logger.Info().Str("url", dlURL).Msg("downloading module archive")
+func (inst *Installer) InstallFromURL(ctx context.Context, dlURL string) (string, *AppMetadata, error) {
+	inst.Logger.Info().Str("url", dlURL).Msg("downloading app archive")
 
 	tmpPath := filepath.Join(os.TempDir(), "mass-module-url.mass")
-	defer os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
+	defer func() {
+		if rmErr := os.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			inst.Logger.Debug().Err(rmErr).Str("path", tmpPath).Msg("cleaning up temp archive")
+		}
+	}()
 
 	// Remove stale temp from a previous attempt so the manager doesn't skip it.
-	_ = os.Remove(tmpPath)
+	if rmErr := os.Remove(tmpPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		inst.Logger.Debug().Err(rmErr).Str("path", tmpPath).Msg("removing stale temp archive")
+	}
 
 	mgr := download.NewManager(inst.Client)
 	if err := mgr.Download(ctx, dlURL, tmpPath, download.WithMaxRetries(3)); err != nil {
@@ -409,9 +424,9 @@ func (inst *Installer) InstallFromURL(ctx context.Context, dlURL string) (string
 	return inst.InstallFromArchive(tmpPath)
 }
 
-// InstallFromGitHub installs a module from a GitHub release.
+// InstallFromGitHub installs a app from a GitHub release.
 // ref is "owner/repo" or "owner/repo@version".
-func (inst *Installer) InstallFromGitHub(ctx context.Context, ref string) (string, *ModuleMetadata, error) {
+func (inst *Installer) InstallFromGitHub(ctx context.Context, ref string) (string, *AppMetadata, error) {
 	owner, repo, version, err := parseGitHubRef(ref)
 	if err != nil {
 		return "", nil, err
@@ -477,12 +492,12 @@ func (inst *Installer) resolveGitHubAssetURL(ctx context.Context, owner, repo, v
 	return "", ctxerr.With(fmt.Errorf("no compatible asset found for %s/%s (looking for %s)", runtime.GOOS, runtime.GOARCH, suffix), map[string]any{"owner": owner, "repo": repo, "os": runtime.GOOS, "arch": runtime.GOARCH})
 }
 
-// ListInstalled returns metadata for all installed modules.
-// Scans the two-level directory layout: modules/{name}/{version}/.
-func (inst *Installer) ListInstalled() ([]ModuleMetadata, error) {
-	var result []ModuleMetadata
+// ListInstalled returns metadata for all installed apps.
+// Scans the two-level directory layout: apps/{name}/{version}/.
+func (inst *Installer) ListInstalled() ([]AppMetadata, error) {
+	var result []AppMetadata
 
-	moduleNames, err := os.ReadDir(inst.InstallDir)
+	appNames, err := os.ReadDir(inst.InstallDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -490,13 +505,13 @@ func (inst *Installer) ListInstalled() ([]ModuleMetadata, error) {
 		return nil, fmt.Errorf("reading install dir: %w", err)
 	}
 
-	for _, nameEntry := range moduleNames {
+	for _, nameEntry := range appNames {
 		if !nameEntry.IsDir() {
 			continue
 		}
 		nameDir := filepath.Join(inst.InstallDir, nameEntry.Name())
 
-		// Try two-level layout first: modules/{name}/{version}/module.yml
+		// Try two-level layout first: apps/{name}/{version}/app.yml
 		versionEntries, err := os.ReadDir(nameDir)
 		if err != nil {
 			continue
@@ -515,7 +530,7 @@ func (inst *Installer) ListInstalled() ([]ModuleMetadata, error) {
 			foundVersioned = true
 		}
 
-		// Fallback: legacy flat layout modules/{name}/module.yml
+		// Fallback: legacy flat layout apps/{name}/app.yml
 		if !foundVersioned {
 			meta, err := ReadMetadataFromDir(nameDir)
 			if err != nil {
@@ -528,12 +543,12 @@ func (inst *Installer) ListInstalled() ([]ModuleMetadata, error) {
 	return result, nil
 }
 
-// CheckDependencies verifies that all required modules are installed and
+// CheckDependencies verifies that all required apps are installed and
 // satisfy their semver constraints.
 func (inst *Installer) CheckDependencies(deps []Dependency) error {
 	installed, err := inst.ListInstalled()
 	if err != nil {
-		return fmt.Errorf("checking installed modules: %w", err)
+		return fmt.Errorf("checking installed apps: %w", err)
 	}
 
 	// Build map of name -> list of installed versions.

@@ -58,7 +58,9 @@ func MigrateModelDirs(modelsDir string, logger zerolog.Logger) {
 		}
 
 		if allMoved {
-			_ = os.Remove(oldDir)
+			if rmErr := os.Remove(oldDir); rmErr != nil {
+				logger.Warn().Err(rmErr).Str("dir", oldDir).Msg("model migration: removing empty source dir")
+			}
 			logger.Info().Str("from", name).Str("to", owner+"/"+repo).Msg("model migration: migrated directory")
 		}
 	}

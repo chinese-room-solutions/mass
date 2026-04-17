@@ -11,24 +11,23 @@ import (
 	"strings"
 
 	"github.com/KernelPryanic/ctxerr"
-	massmodule "github.com/chinese-room-solutions/mass-module"
+	massapp "github.com/chinese-room-solutions/mass-sdk/app"
 	"gopkg.in/yaml.v3"
 )
 
-// ModuleMetadata is the schema for module.yml inside a .mass package.
-type ModuleMetadata struct {
+// AppMetadata is the schema for app.yml inside a .mass package.
+type AppMetadata struct {
 	Name         string       `yaml:"name"`
 	Version      string       `yaml:"version"`
 	Description  string       `yaml:"description,omitempty"`
 	SDKVersion   string       `yaml:"sdk_version"`
 	Command      string       `yaml:"command"`
-	UIPath       string       `yaml:"ui_path,omitempty"`       // root path the module's UI serves (e.g. "/"); empty = no UI
 	Icon         string       `yaml:"icon,omitempty"`          // path to icon image (e.g. "icon.png")
 	ServiceProto string       `yaml:"service_proto,omitempty"` // path to compiled service.pb (FileDescriptorSet)
 	Dependencies []Dependency `yaml:"dependencies,omitempty"`
 }
 
-// Dependency declares a required module with a semver constraint.
+// Dependency declares a required app with a semver constraint.
 type Dependency struct {
 	Name    string `yaml:"name"`
 	Version string `yaml:"version"`          // semver constraint, e.g. ">=0.5.0", "^1.2.0"
@@ -36,7 +35,7 @@ type Dependency struct {
 }
 
 // metadataFileNames lists accepted metadata filenames in priority order.
-var metadataFileNames = []string{"module.yml", "module.yaml", "module.json"}
+var metadataFileNames = []string{"app.yml", "app.yaml", "app.json"}
 
 // archiveFormat represents the type of archive.
 type archiveFormat int
@@ -65,8 +64,8 @@ func detectFormat(path string) (archiveFormat, error) {
 	return formatTar, nil
 }
 
-// ReadMetadataFromArchive opens a .mass archive (zip or tar) and reads module.yml.
-func ReadMetadataFromArchive(archivePath string) (*ModuleMetadata, error) {
+// ReadMetadataFromArchive opens a .mass archive (zip or tar) and reads app.yml.
+func ReadMetadataFromArchive(archivePath string) (*AppMetadata, error) {
 	format, err := detectFormat(archivePath)
 	if err != nil {
 		return nil, ctxerr.With(fmt.Errorf("detecting format: %w", err), map[string]any{"archive": archivePath})
@@ -77,7 +76,7 @@ func ReadMetadataFromArchive(archivePath string) (*ModuleMetadata, error) {
 	return readMetadataFromZip(archivePath)
 }
 
-func readMetadataFromZip(archivePath string) (*ModuleMetadata, error) {
+func readMetadataFromZip(archivePath string) (*AppMetadata, error) {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return nil, ctxerr.With(fmt.Errorf("opening archive: %w", err), map[string]any{"archive": archivePath})
@@ -99,7 +98,7 @@ func readMetadataFromZip(archivePath string) (*ModuleMetadata, error) {
 					return nil, ctxerr.With(fmt.Errorf("reading %s: %w", candidate, err), map[string]any{"archive": archivePath})
 				}
 
-				var meta ModuleMetadata
+				var meta AppMetadata
 				if err := yaml.Unmarshal(data, &meta); err != nil {
 					return nil, ctxerr.With(fmt.Errorf("parsing %s: %w", candidate, err), map[string]any{"archive": archivePath})
 				}
@@ -108,10 +107,10 @@ func readMetadataFromZip(archivePath string) (*ModuleMetadata, error) {
 		}
 	}
 
-	return nil, ctxerr.With(fmt.Errorf("module.yml not found in archive"), map[string]any{"archive": archivePath})
+	return nil, ctxerr.With(fmt.Errorf("app.yml not found in archive"), map[string]any{"archive": archivePath})
 }
 
-func readMetadataFromTar(archivePath string) (*ModuleMetadata, error) {
+func readMetadataFromTar(archivePath string) (*AppMetadata, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return nil, ctxerr.With(fmt.Errorf("opening archive: %w", err), map[string]any{"archive": archivePath})
@@ -141,23 +140,23 @@ func readMetadataFromTar(archivePath string) (*ModuleMetadata, error) {
 		if err != nil {
 			return nil, ctxerr.With(fmt.Errorf("reading %s: %w", base, err), map[string]any{"archive": archivePath})
 		}
-		var meta ModuleMetadata
+		var meta AppMetadata
 		if err := yaml.Unmarshal(data, &meta); err != nil {
 			return nil, ctxerr.With(fmt.Errorf("parsing %s: %w", base, err), map[string]any{"archive": archivePath})
 		}
 		return &meta, nil
 	}
 
-	return nil, ctxerr.With(fmt.Errorf("module.yml not found in archive"), map[string]any{"archive": archivePath})
+	return nil, ctxerr.With(fmt.Errorf("app.yml not found in archive"), map[string]any{"archive": archivePath})
 }
 
 // ValidateMetadata checks that the metadata is complete and compatible.
-func ValidateMetadata(meta *ModuleMetadata) error {
+func ValidateMetadata(meta *AppMetadata) error {
 	if meta.Name == "" {
-		return fmt.Errorf("module name is required")
+		return fmt.Errorf("app name is required")
 	}
 	if meta.Version == "" {
-		return fmt.Errorf("module version is required")
+		return fmt.Errorf("app version is required")
 	}
 	if meta.Command == "" {
 		return fmt.Errorf("command is required")
@@ -167,9 +166,9 @@ func ValidateMetadata(meta *ModuleMetadata) error {
 	}
 
 	// Check SDK compatibility.
-	expected := strconv.Itoa(int(massmodule.Handshake.ProtocolVersion))
+	expected := strconv.Itoa(int(massapp.Handshake.ProtocolVersion))
 	if meta.SDKVersion != expected {
-		return fmt.Errorf("module requires SDK version %s, but MASS supports version %s", meta.SDKVersion, expected)
+		return fmt.Errorf("app requires SDK version %s, but MASS supports version %s", meta.SDKVersion, expected)
 	}
 
 	return nil
@@ -240,19 +239,19 @@ func execExistsInTar(archivePath string, command string) error {
 	return ctxerr.With(fmt.Errorf("executable %q not found in archive", execName), map[string]any{"archive": archivePath, "executable": execName})
 }
 
-// ReadMetadataFromDir reads module.yml from an installed module directory.
-func ReadMetadataFromDir(dir string) (*ModuleMetadata, error) {
+// ReadMetadataFromDir reads app.yml from an installed app directory.
+func ReadMetadataFromDir(dir string) (*AppMetadata, error) {
 	for _, candidate := range metadataFileNames {
 		path := filepath.Join(dir, candidate)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		var meta ModuleMetadata
+		var meta AppMetadata
 		if err := yaml.Unmarshal(data, &meta); err != nil {
 			continue
 		}
 		return &meta, nil
 	}
-	return nil, ctxerr.With(fmt.Errorf("no module metadata found in %s", dir), map[string]any{"dir": dir})
+	return nil, ctxerr.With(fmt.Errorf("no app metadata found in %s", dir), map[string]any{"dir": dir})
 }

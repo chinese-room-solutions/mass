@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/chinese-room-solutions/mass-module/uikit"
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 )
@@ -75,7 +75,7 @@ func (h *Handler) handleAPIListModels(w http.ResponseWriter, r *http.Request) {
 	// Filter out mmproj files (they are dependencies, not standalone models).
 	var models []LocalModelInfo
 	for _, m := range all {
-		if m.ModelType != "Mmproj" {
+		if m.ModelType != ModelFileKindMmproj {
 			models = append(models, m)
 		}
 	}
@@ -85,7 +85,7 @@ func (h *Handler) handleAPIListModels(w http.ResponseWriter, r *http.Request) {
 		typeFilter = strings.ToLower(typeFilter)
 		var filtered []LocalModelInfo
 		for _, m := range models {
-			if strings.ToLower(m.ModelType) == typeFilter {
+			if string(m.ModelType) == typeFilter {
 				filtered = append(filtered, m)
 			}
 		}
@@ -97,7 +97,7 @@ func (h *Handler) handleAPIListModels(w http.ResponseWriter, r *http.Request) {
 		terms := strings.Fields(strings.ToLower(search))
 		var filtered []LocalModelInfo
 		for _, m := range models {
-			haystack := strings.ToLower(m.ModelID + " " + m.Filename + " " + m.ModelType)
+			haystack := strings.ToLower(m.ModelID + " " + m.Filename + " " + string(m.ModelType))
 			match := true
 			for _, term := range terms {
 				if !strings.Contains(haystack, term) {
@@ -124,7 +124,7 @@ func (h *Handler) handleAPIListModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		item := APIModel{
 			ID:           m.ModelID,
-			Type:         strings.ToLower(m.ModelType),
+			Type:         string(m.ModelType),
 			SizeBytes:    m.SizeBytes,
 			Size:         uikit.FormatBytes(m.SizeBytes),
 			Quantization: m.Quantization,
@@ -158,7 +158,7 @@ func (h *Handler) handleAPIGetModel(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	relPath, _ := strings.CutPrefix(strings.ReplaceAll(absPath, "\\", "/"), strings.ReplaceAll(dir, "\\", "/")+"/")
-	modelType := strings.ToLower(inferModelType(info.Filename, relPath))
+	modelType := string(inferModelType(info.Filename, relPath))
 	modelID := strings.TrimSuffix(relPath, ".gguf")
 
 	hasVision := config.DetectMmproj(absPath) != ""

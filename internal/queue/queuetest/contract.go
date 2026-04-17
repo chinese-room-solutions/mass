@@ -12,10 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// QueueFactory creates a fresh QueueInterface for each test.
+// QueueFactory creates a fresh QueueInterface for each test. The contract
+// suite is backend-agnostic: any SQL implementation of QueueInterface
+// should pass it. To wire a new backend (e.g. Postgres), add a sibling
+// test file that calls [RunQueueTests] with a factory for that backend.
+// See goqite_test.go for the SQLite reference.
 type QueueFactory func(t *testing.T) queue.QueueInterface
 
 // ResultStoreFactory creates a fresh ResultStoreInterface for each test.
+// Same backend-agnostic intent as [QueueFactory].
 type ResultStoreFactory func(t *testing.T) queue.ResultStoreInterface
 
 // RunQueueTests validates QueueInterface behavior.
@@ -27,7 +32,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		ctx := context.Background()
 
 		payload := []byte("test-payload")
-		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, payload, "direct", "", queue.PriorityMedium)
+		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, payload, "direct", "", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 		require.NotEmpty(t, sub.ID)
 		require.NotEmpty(t, sub.RequestHash)
@@ -57,7 +62,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		ctx := context.Background()
 
 		payload := []byte("test-payload")
-		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, payload, "direct", "abc123def456", queue.PriorityMedium)
+		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, payload, "direct", "abc123def456", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 		require.NotEmpty(t, sub.ID)
 
@@ -76,11 +81,11 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		q := factory(t)
 		ctx := context.Background()
 
-		_, err := q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("low"), "direct", "", queue.PriorityLow)
+		_, err := q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("low"), "direct", "", 0, queue.PriorityLow)
 		require.NoError(t, err)
-		_, err = q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("critical"), "direct", "", queue.PriorityCritical)
+		_, err = q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("critical"), "direct", "", 0, queue.PriorityCritical)
 		require.NoError(t, err)
-		_, err = q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("medium"), "direct", "", queue.PriorityMedium)
+		_, err = q.SubmitRaw(ctx, queue.RequestTypeEmbedding, []byte("medium"), "direct", "", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 
 		// Highest priority first.
@@ -110,35 +115,11 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		require.Nil(t, msg)
 	})
 
-	t.Run("receive batch", func(t *testing.T) {
-		q := factory(t)
-		ctx := context.Background()
-
-		for i := range 5 {
-			_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte{byte(i)}, "direct", "", queue.PriorityMedium)
-			require.NoError(t, err)
-		}
-
-		msgs, err := q.ReceiveBatch(ctx, 3)
-		require.NoError(t, err)
-		require.Len(t, msgs, 3)
-
-		// Clean up received messages.
-		for _, m := range msgs {
-			require.NoError(t, q.Delete(ctx, m.ID))
-		}
-
-		// 2 remaining.
-		msgs2, err := q.ReceiveBatch(ctx, 10)
-		require.NoError(t, err)
-		require.Len(t, msgs2, 2)
-	})
-
 	t.Run("peek does not consume", func(t *testing.T) {
 		q := factory(t)
 		ctx := context.Background()
 
-		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("peek-me"), "direct", "fp1", queue.PriorityMedium)
+		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("peek-me"), "direct", "fp1", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 
 		peeked, err := q.Peek(ctx, 10)
@@ -156,7 +137,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		q := factory(t)
 		ctx := context.Background()
 
-		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("by-id"), "direct", "", queue.PriorityMedium)
+		sub, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("by-id"), "direct", "", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 
 		msg, err := q.ReceiveByID(ctx, queue.MessageID(sub.ID))
@@ -174,7 +155,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		q := factory(t)
 		ctx := context.Background()
 
-		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("requeue-me"), "direct", "fp1", queue.PriorityHigh)
+		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("requeue-me"), "direct", "fp1", 0, queue.PriorityHigh)
 		require.NoError(t, err)
 
 		msg, err := q.Receive(ctx)
@@ -201,7 +182,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		q := factory(t)
 		ctx := context.Background()
 
-		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("extend-me"), "direct", "", queue.PriorityMedium)
+		_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("extend-me"), "direct", "", 0, queue.PriorityMedium)
 		require.NoError(t, err)
 
 		// Receive the message (makes it invisible).
@@ -258,7 +239,7 @@ func RunQueueTests(t *testing.T, factory QueueFactory) {
 		require.Equal(t, 0, d)
 
 		for range 3 {
-			_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("x"), "direct", "", queue.PriorityMedium)
+			_, err := q.SubmitRaw(ctx, queue.RequestTypeChatCompletion, []byte("x"), "direct", "", 0, queue.PriorityMedium)
 			require.NoError(t, err)
 		}
 

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/chinese-room-solutions/mass/internal/config"
-	"github.com/chinese-room-solutions/mass/internal/llm"
+	"github.com/chinese-room-solutions/mass/pkg/llm"
 	"github.com/rs/zerolog"
 )
 
@@ -22,7 +22,7 @@ const (
 	// ModeDynamic means the model was loaded on-demand by an inference request.
 	// It is subject to idle timeout eviction.
 	ModeDynamic InstanceMode = iota
-	// ModeStatic means the model was explicitly loaded by a user or module.
+	// ModeStatic means the model was explicitly loaded by a user or app.
 	// It persists until explicitly evicted.
 	ModeStatic
 )
@@ -42,13 +42,13 @@ func (m InstanceMode) String() string {
 type chatInstance struct {
 	fingerprint string
 	name        string // model requirement name (e.g. "chat"); empty for dynamic loads
-	config      config.ChatModelConfig
+	config      config.LlamaChatConfig
 	placement   config.PlacementConfig // placement used at load time
 	model       llm.ChatModelInterface
-	source      string       // who loaded it: "direct", "module:<name>"
+	source      string       // who loaded it: "direct", "app:<name>"
 	mode        InstanceMode // how it was loaded
-	agentID     string       // ID of the agent running this model
-	agentName   string       // human-readable name of the agent
+	workerID    string       // ID of the agent running this model
+	workerName  string       // human-readable name of the agent
 	deviceIDs   []string     // device(s) the model is loaded on
 	activeReqs  int64
 	idleTimer   *time.Timer
@@ -56,19 +56,23 @@ type chatInstance struct {
 	loading     bool
 	loadDone    chan struct{} // closed when loading finishes
 	loadErr     error         // non-nil if loading failed
+	// draining is set true under p.mu before Evict releases the lock to call
+	// model.Close(). Subsequent Acquire calls must observe this and refuse —
+	// closes the TOCTOU window between CanEvict and Evict.
+	draining bool
 }
 
 // embeddingInstance holds a loaded embedding model and its metadata.
 type embeddingInstance struct {
 	fingerprint string
 	name        string // model requirement name (e.g. "embedding"); empty for dynamic loads
-	config      config.EmbeddingModelConfig
+	config      config.LlamaEmbeddingConfig
 	placement   config.PlacementConfig // placement used at load time
 	model       llm.EmbeddingModelInterface
-	source      string       // who loaded it: "direct", "module:<name>"
+	source      string       // who loaded it: "direct", "app:<name>"
 	mode        InstanceMode // how it was loaded
-	agentID     string       // ID of the agent running this model
-	agentName   string       // human-readable name of the agent
+	workerID    string       // ID of the agent running this model
+	workerName  string       // human-readable name of the agent
 	deviceIDs   []string     // device(s) the model is loaded on
 	activeReqs  int64
 	idleTimer   *time.Timer
@@ -76,6 +80,8 @@ type embeddingInstance struct {
 	loading     bool
 	loadDone    chan struct{} // closed when loading finishes
 	loadErr     error         // non-nil if loading failed
+	// draining — see chatInstance.draining.
+	draining bool
 }
 
 // modelPool manages loaded model instances keyed by config fingerprint.
@@ -147,17 +153,20 @@ func (p *modelPool) notifyChange(evt PoolChangeEvent) {
 // with the same fingerprint exists, it is reused. Otherwise a new model is
 // loaded and registered. The instance's active request count is incremented;
 // the caller must call Release(fp) when done.
-func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.PlacementConfig, source string) (llm.PredictorInterface, string, error) {
-	fp := config.ChatModelFingerprint(cfg)
+func (p *modelPool) GetOrLoadChat(cfg config.LlamaChatConfig, placement config.PlacementConfig, source string) (llm.PredictorInterface, string, error) {
+	fp := cfg.Fingerprint()
 
 	for {
 		p.mu.RLock()
 		inst, ok := p.chatModels[fp]
 		if ok && !inst.loading {
 			p.mu.RUnlock()
-			p.acquireChat(inst)
-			p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
-			return inst.model.Pool(), fp, nil
+			if p.acquireChat(inst) {
+				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
+				return inst.model.Pool(), fp, nil
+			}
+			// Instance was draining — treat as gone and loop to create fresh.
+			continue
 		}
 		if ok && inst.loading {
 			done := inst.loadDone
@@ -168,9 +177,11 @@ func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.P
 			inst, ok = p.chatModels[fp]
 			p.mu.RUnlock()
 			if ok && !inst.loading {
-				p.acquireChat(inst)
-				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
-				return inst.model.Pool(), fp, nil
+				if p.acquireChat(inst) {
+					p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
+					return inst.model.Pool(), fp, nil
+				}
+				continue
 			}
 			if ok && inst.loadErr != nil {
 				return nil, "", inst.loadErr
@@ -185,7 +196,11 @@ func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.P
 		// Double-check after acquiring write lock.
 		if inst, ok := p.chatModels[fp]; ok {
 			if !inst.loading {
-				p.acquireChatLocked(inst)
+				if !p.acquireChatLocked(inst) {
+					// Draining — drop the lock and loop.
+					p.mu.Unlock()
+					continue
+				}
 				p.mu.Unlock()
 				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
 				return inst.model.Pool(), fp, nil
@@ -204,8 +219,8 @@ func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.P
 			placement:   placement,
 			source:      source,
 			mode:        ModeDynamic,
-			agentID:     p.loaderID,
-			agentName:   p.loaderName,
+			workerID:    p.loaderID,
+			workerName:  p.loaderName,
 			loading:     true,
 			loadDone:    make(chan struct{}),
 		}
@@ -231,6 +246,16 @@ func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.P
 		inst.model = model
 		inst.loading = false
 		inst.activeReqs = 1 // born with one active request
+		// Worker may have allocated fewer slots than requested (VRAM ran
+		// out mid-pool-init). Trust its reported size over our heuristic
+		// so dispatcher concurrency math matches reality.
+		if actual := model.PoolSize(); actual > 0 && actual != inst.placement.MaxConcurrent {
+			p.logger.Info().Str("fingerprint", fp).
+				Int32("requested", inst.placement.MaxConcurrent).
+				Int32("actual", actual).
+				Msg("worker capped pool size — updating placement")
+			inst.placement.MaxConcurrent = actual
+		}
 		close(inst.loadDone)
 		p.logger.Info().Str("fingerprint", fp).Str("path", cfg.Path).Msg("chat model loaded dynamically")
 		p.mu.Unlock()
@@ -244,17 +269,19 @@ func (p *modelPool) GetOrLoadChat(cfg config.ChatModelConfig, placement config.P
 // with the same fingerprint exists, it is reused. Otherwise a new model is
 // loaded and registered. The instance's active request count is incremented;
 // the caller must call Release(fp) when done.
-func (p *modelPool) GetOrLoadEmbedding(cfg config.EmbeddingModelConfig, placement config.PlacementConfig, source string) (llm.EmbedderInterface, string, error) {
-	fp := config.EmbeddingModelFingerprint(cfg)
+func (p *modelPool) GetOrLoadEmbedding(cfg config.LlamaEmbeddingConfig, placement config.PlacementConfig, source string) (llm.EmbedderInterface, string, error) {
+	fp := cfg.Fingerprint()
 
 	for {
 		p.mu.RLock()
 		inst, ok := p.embedModels[fp]
 		if ok && !inst.loading {
 			p.mu.RUnlock()
-			p.acquireEmbedding(inst)
-			p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
-			return inst.model.Pool(), fp, nil
+			if p.acquireEmbedding(inst) {
+				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
+				return inst.model.Pool(), fp, nil
+			}
+			continue
 		}
 		if ok && inst.loading {
 			done := inst.loadDone
@@ -264,9 +291,11 @@ func (p *modelPool) GetOrLoadEmbedding(cfg config.EmbeddingModelConfig, placemen
 			inst, ok = p.embedModels[fp]
 			p.mu.RUnlock()
 			if ok && !inst.loading {
-				p.acquireEmbedding(inst)
-				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
-				return inst.model.Pool(), fp, nil
+				if p.acquireEmbedding(inst) {
+					p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
+					return inst.model.Pool(), fp, nil
+				}
+				continue
 			}
 			if ok && inst.loadErr != nil {
 				return nil, "", inst.loadErr
@@ -278,7 +307,10 @@ func (p *modelPool) GetOrLoadEmbedding(cfg config.EmbeddingModelConfig, placemen
 		p.mu.Lock()
 		if inst, ok := p.embedModels[fp]; ok {
 			if !inst.loading {
-				p.acquireEmbeddingLocked(inst)
+				if !p.acquireEmbeddingLocked(inst) {
+					p.mu.Unlock()
+					continue
+				}
 				p.mu.Unlock()
 				p.notifyChange(PoolChangeEvent{Kind: PoolChangeStatus, Fingerprint: fp})
 				return inst.model.Pool(), fp, nil
@@ -295,8 +327,8 @@ func (p *modelPool) GetOrLoadEmbedding(cfg config.EmbeddingModelConfig, placemen
 			placement:   placement,
 			source:      source,
 			mode:        ModeDynamic,
-			agentID:     p.loaderID,
-			agentName:   p.loaderName,
+			workerID:    p.loaderID,
+			workerName:  p.loaderName,
 			loading:     true,
 			loadDone:    make(chan struct{}),
 		}
@@ -321,6 +353,13 @@ func (p *modelPool) GetOrLoadEmbedding(cfg config.EmbeddingModelConfig, placemen
 		inst.model = model
 		inst.loading = false
 		inst.activeReqs = 1
+		if actual := model.PoolSize(); actual > 0 && actual != inst.placement.MaxConcurrent {
+			p.logger.Info().Str("fingerprint", fp).
+				Int32("requested", inst.placement.MaxConcurrent).
+				Int32("actual", actual).
+				Msg("worker capped embedding pool size — updating placement")
+			inst.placement.MaxConcurrent = actual
+		}
 		close(inst.loadDone)
 		p.logger.Info().Str("fingerprint", fp).Str("path", cfg.Path).Msg("embedding model loaded dynamically")
 		p.mu.Unlock()
@@ -388,112 +427,257 @@ func (p *modelPool) Release(fp string) {
 	p.mu.Unlock()
 }
 
-// Evict forcefully removes a loaded instance by fingerprint.
-// Returns true if the instance was found and evicted.
-// Instances that are still loading cannot be evicted (returns false).
-// Evict forcefully removes a loaded model instance by fingerprint.
-// Loading instances cannot be evicted. Returns true if the instance was found and evicted.
+// CanEvict reports whether the instance with the given fingerprint can safely
+// be evicted right now (loaded, idle, no in-flight requests, not already
+// draining). This is a snapshot — a concurrent Acquire could land between
+// CanEvict and TryEvict; callers must use TryEvict to commit.
+func (p *modelPool) CanEvict(fp string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if inst, ok := p.chatModels[fp]; ok {
+		return !inst.loading && !inst.draining && inst.activeReqs <= 0
+	}
+	if inst, ok := p.embedModels[fp]; ok {
+		return !inst.loading && !inst.draining && inst.activeReqs <= 0
+	}
+	return false
+}
+
+// TryEvict atomically evicts an idle instance. Returns false if it's busy,
+// loading, already draining, or unknown — caller backs off and retries.
+//
+// Used during model swaps: closes the TOCTOU window between CanEvict and
+// Evict by re-checking activeReqs under the same lock that flips draining,
+// so a redelivered Acquire can't slip in between.
+func (p *modelPool) TryEvict(fp string) bool {
+	// See Evict for why model.Close() runs outside the lock.
+	var toClose interface{ Close() }
+	var path string
+	var kind string
+
+	p.mu.Lock()
+	if inst, ok := p.chatModels[fp]; ok {
+		if !inst.loading && !inst.draining && inst.activeReqs <= 0 {
+			inst.draining = true
+			if inst.idleTimer != nil {
+				inst.idleTimer.Stop()
+			}
+			delete(p.chatModels, fp)
+			toClose, path, kind = inst.model, inst.config.Path, "chat"
+		}
+	} else if inst, ok := p.embedModels[fp]; ok {
+		if !inst.loading && !inst.draining && inst.activeReqs <= 0 {
+			inst.draining = true
+			if inst.idleTimer != nil {
+				inst.idleTimer.Stop()
+			}
+			delete(p.embedModels, fp)
+			toClose, path, kind = inst.model, inst.config.Path, "embedding"
+		}
+	}
+	p.mu.Unlock()
+
+	if toClose == nil {
+		return false
+	}
+
+	p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	go p.safeClose(toClose, fp, path, kind, "evicted for model swap")
+	return true
+}
+
+// Evict forcefully removes a loaded instance, interrupting any in-flight
+// requests. Used by the UI "Evict" button. Loading instances are skipped
+// (the loading goroutine owns the slot). Returns true if evicted.
 func (p *modelPool) Evict(fp string) bool {
-	evicted := false
+	// Remove the map entry under the lock so eviction is immediately visible
+	// to Snapshot/Acquire; run model.Close() outside the lock, since the
+	// worker UnloadModel round-trip can take seconds for a large model and
+	// would otherwise stall every other pool op.
+	var toClose interface{ Close() }
+	var path string
+	var kind string
 
 	p.mu.Lock()
 	if inst, ok := p.chatModels[fp]; ok {
 		if !inst.loading {
+			inst.draining = true
 			if inst.idleTimer != nil {
 				inst.idleTimer.Stop()
 			}
-			inst.model.Close()
 			delete(p.chatModels, fp)
-			p.logger.Info().Str("fingerprint", fp).Str("path", inst.config.Path).Msg("chat model evicted by user")
-			evicted = true
+			toClose, path, kind = inst.model, inst.config.Path, "chat"
 		}
 	} else if inst, ok := p.embedModels[fp]; ok {
 		if !inst.loading {
+			inst.draining = true
 			if inst.idleTimer != nil {
 				inst.idleTimer.Stop()
 			}
-			inst.model.Close()
 			delete(p.embedModels, fp)
-			p.logger.Info().Str("fingerprint", fp).Str("path", inst.config.Path).Msg("embedding model evicted by user")
-			evicted = true
+			toClose, path, kind = inst.model, inst.config.Path, "embedding"
 		}
 	}
 	p.mu.Unlock()
 
-	if evicted {
-		p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	if toClose == nil {
+		return false
 	}
-	return evicted
+
+	p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	go p.safeClose(toClose, fp, path, kind, "evicted by user")
+	return true
 }
 
-// evict closes and removes an idle instance.
+// evict closes and removes an idle instance after the idle timer fires.
+// Like TryEvict, sets draining first so a request that arrived in the same
+// instant doesn't grab a stale instance.
 func (p *modelPool) evict(fp string) {
-	evicted := false
+	// See Evict for why model.Close() runs outside the lock.
+	var toClose interface{ Close() }
+	var path string
+	var kind string
 
 	p.mu.Lock()
 	if inst, ok := p.chatModels[fp]; ok {
-		if inst.activeReqs <= 0 && inst.mode == ModeDynamic && !inst.loading {
-			inst.model.Close()
+		if inst.activeReqs <= 0 && inst.mode == ModeDynamic && !inst.loading && !inst.draining {
+			inst.draining = true
 			delete(p.chatModels, fp)
-			p.logger.Info().Str("fingerprint", fp).Str("path", inst.config.Path).Msg("chat model evicted after idle timeout")
-			evicted = true
+			toClose, path, kind = inst.model, inst.config.Path, "chat"
 		}
 	} else if inst, ok := p.embedModels[fp]; ok {
-		if inst.activeReqs <= 0 && inst.mode == ModeDynamic && !inst.loading {
-			inst.model.Close()
+		if inst.activeReqs <= 0 && inst.mode == ModeDynamic && !inst.loading && !inst.draining {
+			inst.draining = true
 			delete(p.embedModels, fp)
-			p.logger.Info().Str("fingerprint", fp).Str("path", inst.config.Path).Msg("embedding model evicted after idle timeout")
-			evicted = true
+			toClose, path, kind = inst.model, inst.config.Path, "embedding"
 		}
 	}
 	p.mu.Unlock()
 
-	if evicted {
-		p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	if toClose == nil {
+		return
 	}
+
+	p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	go p.safeClose(toClose, fp, path, kind, "evicted after idle timeout")
 }
 
-// acquireChat increments activeReqs and cancels any idle timer (caller holds no lock).
-func (p *modelPool) acquireChat(inst *chatInstance) {
+// EvictByWorker drops every instance hosted on the given worker after it
+// disconnects. The inference state died with the worker, so stale pool
+// entries pointing at a dead stream would just fail (or crash) on future
+// Acquire/Evict. Close() is still called on each (best-effort; safeClose
+// swallows the inevitable "worker offline" error). Returns drop count.
+func (p *modelPool) EvictByWorker(workerID string) int {
+	type victim struct {
+		toClose interface{ Close() }
+		fp      string
+		path    string
+		kind    string
+	}
+	var victims []victim
+
 	p.mu.Lock()
-	p.acquireChatLocked(inst)
+	for fp, inst := range p.chatModels {
+		if inst.workerID != workerID || inst.draining {
+			continue
+		}
+		inst.draining = true
+		if inst.idleTimer != nil {
+			inst.idleTimer.Stop()
+		}
+		victims = append(victims, victim{inst.model, fp, inst.config.Path, "chat"})
+		delete(p.chatModels, fp)
+	}
+	for fp, inst := range p.embedModels {
+		if inst.workerID != workerID || inst.draining {
+			continue
+		}
+		inst.draining = true
+		if inst.idleTimer != nil {
+			inst.idleTimer.Stop()
+		}
+		victims = append(victims, victim{inst.model, fp, inst.config.Path, "embedding"})
+		delete(p.embedModels, fp)
+	}
 	p.mu.Unlock()
+
+	if len(victims) == 0 {
+		return 0
+	}
+
+	p.notifyChange(PoolChangeEvent{Kind: PoolChangeList})
+	for _, v := range victims {
+		go p.safeClose(v.toClose, v.fp, v.path, v.kind, "evicted on worker disconnect")
+	}
+	return len(victims)
 }
 
-// acquireChatLocked increments activeReqs and cancels any idle timer (caller holds write lock).
-func (p *modelPool) acquireChatLocked(inst *chatInstance) {
+// safeClose runs model.Close() with a panic recovery and logs the result.
+// Close() round-trips to a worker, which may be offline, slow, or buggy;
+// without a recover here, any panic would kill the entire MASS process.
+func (p *modelPool) safeClose(m interface{ Close() }, fp, path, kind, reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Warn().Str("fingerprint", fp).Str("path", path).Interface("panic", r).Msgf("%s model close panicked (%s)", kind, reason)
+		}
+	}()
+	m.Close()
+	p.logger.Info().Str("fingerprint", fp).Str("path", path).Msgf("%s model %s", kind, reason)
+}
+
+// acquireChat increments activeReqs and cancels any idle timer (caller holds
+// no lock). Returns false if the instance is draining (eviction in progress).
+func (p *modelPool) acquireChat(inst *chatInstance) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.acquireChatLocked(inst)
+}
+
+// acquireChatLocked increments activeReqs and cancels any idle timer (caller
+// holds write lock). Returns false if the instance is draining.
+func (p *modelPool) acquireChatLocked(inst *chatInstance) bool {
+	if inst.draining {
+		return false
+	}
 	if inst.idleTimer != nil {
 		inst.idleTimer.Stop()
 		inst.idleTimer = nil
 	}
 	inst.idleSince = time.Time{}
 	inst.activeReqs++
+	return true
 }
 
-// acquireEmbedding increments activeReqs and cancels any idle timer (caller holds no lock).
-func (p *modelPool) acquireEmbedding(inst *embeddingInstance) {
+// acquireEmbedding increments activeReqs and cancels any idle timer (caller
+// holds no lock). Returns false if the instance is draining.
+func (p *modelPool) acquireEmbedding(inst *embeddingInstance) bool {
 	p.mu.Lock()
-	p.acquireEmbeddingLocked(inst)
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	return p.acquireEmbeddingLocked(inst)
 }
 
-// acquireEmbeddingLocked increments activeReqs and cancels any idle timer (caller holds write lock).
-func (p *modelPool) acquireEmbeddingLocked(inst *embeddingInstance) {
+// acquireEmbeddingLocked increments activeReqs and cancels any idle timer
+// (caller holds write lock). Returns false if the instance is draining.
+func (p *modelPool) acquireEmbeddingLocked(inst *embeddingInstance) bool {
+	if inst.draining {
+		return false
+	}
 	if inst.idleTimer != nil {
 		inst.idleTimer.Stop()
 		inst.idleTimer = nil
 	}
 	inst.idleSince = time.Time{}
 	inst.activeReqs++
+	return true
 }
 
 // AcquireChat looks up a loaded chat model by fingerprint, increments its
 // active request count, and returns its predictor. Returns false if the
-// fingerprint is not found or is still loading.
+// fingerprint is not found, still loading, or being evicted (draining).
 func (p *modelPool) AcquireChat(fp string) (llm.PredictorInterface, string, bool) {
 	p.mu.Lock()
 	inst, ok := p.chatModels[fp]
-	if !ok || inst.loading {
+	if !ok || inst.loading || inst.draining {
 		p.mu.Unlock()
 		return nil, "", false
 	}
@@ -505,11 +689,11 @@ func (p *modelPool) AcquireChat(fp string) (llm.PredictorInterface, string, bool
 
 // AcquireEmbedding looks up a loaded embedding model by fingerprint, increments
 // its active request count, and returns its embedder. Returns false if the
-// fingerprint is not found or is still loading.
+// fingerprint is not found, still loading, or being evicted (draining).
 func (p *modelPool) AcquireEmbedding(fp string) (llm.EmbedderInterface, string, bool) {
 	p.mu.Lock()
 	inst, ok := p.embedModels[fp]
-	if !ok || inst.loading {
+	if !ok || inst.loading || inst.draining {
 		p.mu.Unlock()
 		return nil, "", false
 	}
@@ -523,14 +707,22 @@ func (p *modelPool) AcquireEmbedding(fp string) (llm.EmbedderInterface, string, 
 type IdleInstanceInfo struct {
 	Fingerprint string
 	ModelPath   string
-	AgentID     string
+	WorkerID    string
 	IdleSince   time.Time
 }
 
-// IdleInstancesOnDevice returns idle (activeReqs == 0, not loading) instances
-// running on the specified agent and device(s). Used by the dispatcher to find
-// eviction candidates for a specific device queue.
-func (p *modelPool) IdleInstancesOnDevice(agentID string, deviceIDs []string) []IdleInstanceInfo {
+// evictionGracePeriod is the minimum time at activeReqs==0 before another
+// request can evict a model. Much shorter than the cleanup idle-timeout —
+// just smooths over brief inter-request gaps within a session (e.g.
+// pdf2doc's per-page calls), not a shutdown timer.
+const evictionGracePeriod = 2 * time.Second
+
+// IdleInstancesOnDevice returns instances on the given worker+devices that
+// have been at activeReqs==0 for at least evictionGracePeriod. Used by the
+// dispatcher to find eviction candidates. The grace period prevents
+// back-to-back calls from the same app (per-page, multi-turn) being
+// interrupted by another request stealing the device in a millisecond gap.
+func (p *modelPool) IdleInstancesOnDevice(workerID string, deviceIDs []string) []IdleInstanceInfo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -552,42 +744,40 @@ func (p *modelPool) IdleInstancesOnDevice(agentID string, deviceIDs []string) []
 		return false
 	}
 
+	now := time.Now()
+	// Zero idleSince means the instance has never had a request finish (either
+	// freshly loaded and unused, or registered as static) — always evictable.
+	// Otherwise require evictionGracePeriod to have elapsed since the last
+	// request finished.
+	idleEnough := func(idleSince time.Time) bool {
+		if idleSince.IsZero() {
+			return true
+		}
+		return now.Sub(idleSince) >= evictionGracePeriod
+	}
+
 	var out []IdleInstanceInfo
 	for _, inst := range p.chatModels {
-		if inst.agentID == agentID && inst.activeReqs <= 0 && !inst.loading && matchesDevice(inst.deviceIDs) {
+		if inst.workerID == workerID && inst.activeReqs <= 0 && !inst.loading && matchesDevice(inst.deviceIDs) && idleEnough(inst.idleSince) {
 			out = append(out, IdleInstanceInfo{
 				Fingerprint: inst.fingerprint,
 				ModelPath:   inst.config.Path,
-				AgentID:     inst.agentID,
+				WorkerID:    inst.workerID,
 				IdleSince:   inst.idleSince,
 			})
 		}
 	}
 	for _, inst := range p.embedModels {
-		if inst.agentID == agentID && inst.activeReqs <= 0 && !inst.loading && matchesDevice(inst.deviceIDs) {
+		if inst.workerID == workerID && inst.activeReqs <= 0 && !inst.loading && matchesDevice(inst.deviceIDs) && idleEnough(inst.idleSince) {
 			out = append(out, IdleInstanceInfo{
 				Fingerprint: inst.fingerprint,
 				ModelPath:   inst.config.Path,
-				AgentID:     inst.agentID,
+				WorkerID:    inst.workerID,
 				IdleSince:   inst.idleSince,
 			})
 		}
 	}
 	return out
-}
-
-// modelPath returns the file path for a model by fingerprint, or empty string if not found.
-// It checks both chat and embedding models.
-func (p *modelPool) modelPath(fp string) string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if inst, ok := p.chatModels[fp]; ok {
-		return inst.config.Path
-	}
-	if inst, ok := p.embedModels[fp]; ok {
-		return inst.config.Path
-	}
-	return ""
 }
 
 // modelMaxConcurrent returns the max_concurrent placement value for a model by fingerprint.
@@ -604,42 +794,15 @@ func (p *modelPool) modelMaxConcurrent(fp string) int32 {
 	return 0
 }
 
-// modelContextSize returns the context size for a model by fingerprint, or 0 if not found.
-func (p *modelPool) modelContextSize(fp string) int32 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if inst, ok := p.chatModels[fp]; ok {
-		return inst.config.ContextSize
+// RegisterChat registers a chat model. mode controls auto-eviction:
+//   - ModeStatic: pinned by user action (UI Load Model) — never evicted.
+//   - ModeDynamic: loaded by an inference request — eligible for idle-
+//     timeout eviction once activeReqs returns to zero.
+func (p *modelPool) RegisterChat(mode InstanceMode, source, modelName string, cfg config.LlamaChatConfig, placement config.PlacementConfig, model llm.ChatModelInterface, workerID, workerName string, deviceIDs ...string) string {
+	fp := cfg.Fingerprint()
+	if actual := model.PoolSize(); actual > 0 {
+		placement.MaxConcurrent = actual
 	}
-	if inst, ok := p.embedModels[fp]; ok {
-		return inst.config.ContextSize
-	}
-	return 0
-}
-
-// modelCacheType returns the KV cache type for a model by fingerprint, or "" if not found.
-func (p *modelPool) modelCacheType(fp string) string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if inst, ok := p.chatModels[fp]; ok {
-		return inst.config.CacheType
-	}
-	return "" // embedding models don't have KV cache type
-}
-
-// modelMmprojPath returns the vision projector path for a chat model, or "" if none.
-func (p *modelPool) modelMmprojPath(fp string) string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if inst, ok := p.chatModels[fp]; ok {
-		return inst.config.MmprojPath
-	}
-	return ""
-}
-
-// RegisterChat registers a user-loaded static chat model in the pool.
-func (p *modelPool) RegisterChat(source, modelName string, cfg config.ChatModelConfig, placement config.PlacementConfig, model llm.ChatModelInterface, agentID, agentName string, deviceIDs ...string) string {
-	fp := config.ChatModelFingerprint(cfg)
 	p.mu.Lock()
 	p.chatModels[fp] = &chatInstance{
 		fingerprint: fp,
@@ -648,9 +811,9 @@ func (p *modelPool) RegisterChat(source, modelName string, cfg config.ChatModelC
 		placement:   placement,
 		model:       model,
 		source:      source,
-		mode:        ModeStatic,
-		agentID:     agentID,
-		agentName:   agentName,
+		mode:        mode,
+		workerID:    workerID,
+		workerName:  workerName,
 		deviceIDs:   deviceIDs,
 	}
 	p.mu.Unlock()
@@ -658,9 +821,13 @@ func (p *modelPool) RegisterChat(source, modelName string, cfg config.ChatModelC
 	return fp
 }
 
-// RegisterEmbedding registers a user-loaded static embedding model in the pool.
-func (p *modelPool) RegisterEmbedding(source, modelName string, cfg config.EmbeddingModelConfig, placement config.PlacementConfig, model llm.EmbeddingModelInterface, agentID, agentName string, deviceIDs ...string) string {
-	fp := config.EmbeddingModelFingerprint(cfg)
+// RegisterEmbedding registers an embedding model in the pool. See RegisterChat
+// for the meaning of mode.
+func (p *modelPool) RegisterEmbedding(mode InstanceMode, source, modelName string, cfg config.LlamaEmbeddingConfig, placement config.PlacementConfig, model llm.EmbeddingModelInterface, workerID, workerName string, deviceIDs ...string) string {
+	fp := cfg.Fingerprint()
+	if actual := model.PoolSize(); actual > 0 {
+		placement.MaxConcurrent = actual
+	}
 	p.mu.Lock()
 	p.embedModels[fp] = &embeddingInstance{
 		fingerprint: fp,
@@ -669,9 +836,9 @@ func (p *modelPool) RegisterEmbedding(source, modelName string, cfg config.Embed
 		placement:   placement,
 		model:       model,
 		source:      source,
-		mode:        ModeStatic,
-		agentID:     agentID,
-		agentName:   agentName,
+		mode:        mode,
+		workerID:    workerID,
+		workerName:  workerName,
 		deviceIDs:   deviceIDs,
 	}
 	p.mu.Unlock()
@@ -693,36 +860,6 @@ func (p *modelPool) HasEmbedding(fp string) bool {
 	defer p.mu.RUnlock()
 	_, ok := p.embedModels[fp]
 	return ok
-}
-
-// LookupChatByName finds a chat model by its model requirement name.
-func (p *modelPool) LookupChatByName(name string) (llm.PredictorInterface, string, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, inst := range p.chatModels {
-		if inst.loading {
-			continue
-		}
-		if inst.name == name {
-			return inst.model.Pool(), inst.fingerprint, true
-		}
-	}
-	return nil, "", false
-}
-
-// LookupEmbeddingByName finds an embedding model by its model requirement name.
-func (p *modelPool) LookupEmbeddingByName(name string) (llm.EmbedderInterface, string, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, inst := range p.embedModels {
-		if inst.loading {
-			continue
-		}
-		if inst.name == name {
-			return inst.model.Pool(), inst.fingerprint, true
-		}
-	}
-	return nil, "", false
 }
 
 // AllChatPredictors returns all loaded chat predictors.
@@ -753,15 +890,78 @@ func (p *modelPool) AllEmbedders() map[string]llm.EmbedderInterface {
 	return result
 }
 
+// LoadedInstanceInfo holds raw metadata + config for a loaded model
+// instance, suitable for emitting to API callers who need to address the
+// instance from outside MASS (echo the config back in inference requests).
+// Unlike [ModelInstanceInfo], the configs are typed structs rather than
+// display strings.
+type LoadedInstanceInfo struct {
+	Fingerprint     string
+	Type            llm.ModelKind
+	Source          string
+	WorkerID        string
+	WorkerName      string
+	DeviceIDs       []string
+	ActiveReqs      int64
+	ChatConfig      *config.LlamaChatConfig
+	EmbeddingConfig *config.LlamaEmbeddingConfig
+	Placement       config.PlacementConfig
+}
+
+// LoadedSnapshot returns raw config snapshots for every fully-loaded
+// instance. Loading instances are skipped because their config isn't
+// finalized yet (placement may not have been computed).
+func (p *modelPool) LoadedSnapshot() []LoadedInstanceInfo {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]LoadedInstanceInfo, 0, len(p.chatModels)+len(p.embedModels))
+	for _, inst := range p.chatModels {
+		if inst.loading {
+			continue
+		}
+		cfg := inst.config
+		out = append(out, LoadedInstanceInfo{
+			Fingerprint: inst.fingerprint,
+			Type:        llm.ModelKindChat,
+			Source:      inst.source,
+			WorkerID:    inst.workerID,
+			WorkerName:  inst.workerName,
+			DeviceIDs:   inst.deviceIDs,
+			ActiveReqs:  inst.activeReqs,
+			ChatConfig:  &cfg,
+			Placement:   inst.placement,
+		})
+	}
+	for _, inst := range p.embedModels {
+		if inst.loading {
+			continue
+		}
+		cfg := inst.config
+		out = append(out, LoadedInstanceInfo{
+			Fingerprint:     inst.fingerprint,
+			Type:            llm.ModelKindEmbedding,
+			Source:          inst.source,
+			WorkerID:        inst.workerID,
+			WorkerName:      inst.workerName,
+			DeviceIDs:       inst.deviceIDs,
+			ActiveReqs:      inst.activeReqs,
+			EmbeddingConfig: &cfg,
+			Placement:       inst.placement,
+		})
+	}
+	return out
+}
+
 // ModelInstanceInfo holds display-ready metadata about a loaded model instance.
 type ModelInstanceInfo struct {
 	Fingerprint string
 	Path        string
-	Type        string       // "chat" or "embedding"
-	Source      string       // who loaded it: "direct", "module:<name>"
+	Type        llm.ModelKind
+	Source      string       // who loaded it: "direct", "app:<name>"
 	Mode        InstanceMode // how it was loaded
-	AgentID     string       // ID of the agent running this model
-	AgentName   string       // human-readable name of the agent
+	WorkerID    string       // ID of the agent running this model
+	WorkerName  string       // human-readable name of the agent
 	DeviceIDs   []string     // device(s) the model is loaded on
 	ActiveReqs  int64
 	Active      bool // true if processing requests or within activeStickyDuration
@@ -776,7 +976,7 @@ type ConfigEntry struct {
 	Value string
 }
 
-func chatConfigEntries(c config.ChatModelConfig, p config.PlacementConfig) []ConfigEntry {
+func chatConfigEntries(c config.LlamaChatConfig, p config.PlacementConfig) []ConfigEntry {
 	var entries []ConfigEntry
 	if c.ContextSize > 0 {
 		entries = append(entries, ConfigEntry{"Context Size", fmt.Sprintf("%d", c.ContextSize)})
@@ -820,7 +1020,7 @@ func chatConfigEntries(c config.ChatModelConfig, p config.PlacementConfig) []Con
 	return entries
 }
 
-func embeddingConfigEntries(c config.EmbeddingModelConfig, p config.PlacementConfig) []ConfigEntry {
+func embeddingConfigEntries(c config.LlamaEmbeddingConfig, p config.PlacementConfig) []ConfigEntry {
 	var entries []ConfigEntry
 	if c.ContextSize > 0 {
 		entries = append(entries, ConfigEntry{"Context Size", fmt.Sprintf("%d", c.ContextSize)})
@@ -856,11 +1056,11 @@ func (p *modelPool) Snapshot() []ModelInstanceInfo {
 		out = append(out, ModelInstanceInfo{
 			Fingerprint: inst.fingerprint,
 			Path:        inst.config.Path,
-			Type:        "chat",
+			Type:        llm.ModelKindChat,
 			Source:      inst.source,
 			Mode:        inst.mode,
-			AgentID:     inst.agentID,
-			AgentName:   inst.agentName,
+			WorkerID:    inst.workerID,
+			WorkerName:  inst.workerName,
 			DeviceIDs:   inst.deviceIDs,
 			ActiveReqs:  reqs,
 			Active:      active,
@@ -873,11 +1073,11 @@ func (p *modelPool) Snapshot() []ModelInstanceInfo {
 		out = append(out, ModelInstanceInfo{
 			Fingerprint: inst.fingerprint,
 			Path:        inst.config.Path,
-			Type:        "embedding",
+			Type:        llm.ModelKindEmbedding,
 			Source:      inst.source,
 			Mode:        inst.mode,
-			AgentID:     inst.agentID,
-			AgentName:   inst.agentName,
+			WorkerID:    inst.workerID,
+			WorkerName:  inst.workerName,
 			DeviceIDs:   inst.deviceIDs,
 			ActiveReqs:  reqs,
 			Active:      active,
@@ -900,11 +1100,11 @@ func (p *modelPool) SnapshotInstance(fp string) (ModelInstanceInfo, bool) {
 		info := ModelInstanceInfo{
 			Fingerprint: inst.fingerprint,
 			Path:        inst.config.Path,
-			Type:        "chat",
+			Type:        llm.ModelKindChat,
 			Source:      inst.source,
 			Mode:        inst.mode,
-			AgentID:     inst.agentID,
-			AgentName:   inst.agentName,
+			WorkerID:    inst.workerID,
+			WorkerName:  inst.workerName,
 			DeviceIDs:   inst.deviceIDs,
 			ActiveReqs:  reqs,
 			Active:      active,
@@ -921,11 +1121,11 @@ func (p *modelPool) SnapshotInstance(fp string) (ModelInstanceInfo, bool) {
 		info := ModelInstanceInfo{
 			Fingerprint: inst.fingerprint,
 			Path:        inst.config.Path,
-			Type:        "embedding",
+			Type:        llm.ModelKindEmbedding,
 			Source:      inst.source,
 			Mode:        inst.mode,
-			AgentID:     inst.agentID,
-			AgentName:   inst.agentName,
+			WorkerID:    inst.workerID,
+			WorkerName:  inst.workerName,
 			DeviceIDs:   inst.deviceIDs,
 			ActiveReqs:  reqs,
 			Active:      active,

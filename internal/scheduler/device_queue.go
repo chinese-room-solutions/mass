@@ -14,11 +14,16 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// DeviceQueueManager manages a per-device queue and processes inference tasks.
-// It ensures the correct model is loaded before executing, handles batch processing
-// up to max_concurrent, and re-queues failed tasks to the global queue.
+// DeviceQueueManager processes inference tasks on a per-device queue:
+// ensures the right model is loaded, runs up to max_concurrent at a time,
+// re-queues failures to global.
+//
+// Event-driven: Peeks the head only on reason to act (new submit, worker
+// done, pool change, safety fallback). Waiting messages are never
+// Receive'd — they sit untouched in goqite, immune to MaxReceive
+// accounting and visibility timeouts.
 type DeviceQueueManager struct {
-	agentID   string
+	workerID  string
 	deviceIDs []string
 	queueName string
 
@@ -27,39 +32,47 @@ type DeviceQueueManager struct {
 	results     queue.ResultStoreInterface
 	pool        *modelPool
 	stateStore  store.DeviceQueueStateStoreInterface
-	benchStore  store.BenchmarkStoreInterface
 	dispatcher  *Dispatcher   // set after construction, used for work stealing
 	loadModelFn loadModelFunc // set after construction, full scheduler load path
 
-	logger       zerolog.Logger
-	pollInterval time.Duration
-	modelsDir    func() string // returns the centralized models directory path
+	logger    zerolog.Logger
+	modelsDir func() string // returns the centralized models directory path
+
+	// workerDone is signalled (non-blocking, capacity 1) whenever a worker
+	// finishes executeOne. The Run loop selects on it to re-check the head
+	// of the queue without polling.
+	workerDone chan struct{}
 
 	mu            sync.Mutex
 	loadedHash    string                 // fingerprint of currently loaded model
 	maxConcurrent int32                  // calculated when model is loaded
 	wp            *workerpool.WorkerPool // persistent worker pool, resized on model change
+	activeWorkers int                    // number of in-flight executeOne goroutines
 }
+
+// fallbackInterval is the safety-net wake-up. Real wake-ups come from
+// NotifyCh and workerDone; this only matters if a notification is missed
+// (tests, out-of-process submitters, future worker integration).
+const fallbackInterval = 5 * time.Second
 
 // NewDeviceQueueManager creates a new device queue manager.
 func NewDeviceQueueManager(
-	agentID string,
+	workerID string,
 	deviceIDs []string,
 	deviceQueue queue.QueueInterface,
 	globalQueue queue.QueueInterface,
 	results queue.ResultStoreInterface,
 	pool *modelPool,
 	stateStore store.DeviceQueueStateStoreInterface,
-	benchStore store.BenchmarkStoreInterface,
 	modelsDir func() string,
 	logger zerolog.Logger,
 ) *DeviceQueueManager {
-	qn := DeviceQueueName(agentID, deviceIDs[0])
+	qn := DeviceQueueName(workerID, deviceIDs[0])
 	if len(deviceIDs) > 1 {
-		qn = DeviceGroupQueueName(agentID, deviceIDs)
+		qn = DeviceGroupQueueName(workerID, deviceIDs)
 	}
 	return &DeviceQueueManager{
-		agentID:       agentID,
+		workerID:      workerID,
 		deviceIDs:     deviceIDs,
 		queueName:     qn,
 		queue:         deviceQueue,
@@ -67,11 +80,19 @@ func NewDeviceQueueManager(
 		results:       results,
 		pool:          pool,
 		stateStore:    stateStore,
-		benchStore:    benchStore,
 		modelsDir:     modelsDir,
 		logger:        logger.With().Str("device_queue", qn).Logger(),
-		pollInterval:  100 * time.Millisecond,
+		workerDone:    make(chan struct{}, 1),
 		maxConcurrent: 1,
+	}
+}
+
+// signalWorkerDone is a non-blocking wake. Idempotent — multiple
+// completions while the loop is busy collapse to one.
+func (dq *DeviceQueueManager) signalWorkerDone() {
+	select {
+	case dq.workerDone <- struct{}{}:
+	default:
 	}
 }
 
@@ -85,12 +106,24 @@ func (dq *DeviceQueueManager) LoadedHash() string {
 	return dq.loadedHash
 }
 
-// Run starts the device queue processor loop. Blocks until ctx is cancelled.
+// ClearLoadedHash resets the in-memory loaded fingerprint after an
+// external eviction (e.g. PoolEvict) so the next task triggers ensureModel.
+func (dq *DeviceQueueManager) ClearLoadedHash() {
+	dq.mu.Lock()
+	dq.loadedHash = ""
+	if dq.wp != nil {
+		dq.wp.Close()
+		dq.wp = nil
+	}
+	dq.mu.Unlock()
+}
+
+// Run starts the processor loop. Blocks until ctx is cancelled.
 //
-// Each tick it pulls all available same-fingerprint messages and submits them to
-// the persistent worker pool (created/resized by ensureModel). Workers from
-// previous ticks may still be running — new messages start immediately if a
-// slot is free, giving true continuous concurrency across ticks.
+// Wakes on: new submit (NotifyCh), worker done (workerDone), pool change
+// (a model evicted elsewhere may free us to load ours), or safety
+// fallback. Peek doesn't consume — Receive only fires when we decide to
+// execute, so waiting tasks never burn MaxReceive or visibility timers.
 func (dq *DeviceQueueManager) Run(ctx context.Context) {
 	dq.logger.Info().Msg("device queue processor started")
 	defer func() {
@@ -103,90 +136,168 @@ func (dq *DeviceQueueManager) Run(ctx context.Context) {
 		dq.logger.Info().Msg("device queue processor stopped")
 	}()
 
-	ticker := time.NewTicker(dq.pollInterval)
-	defer ticker.Stop()
+	// Subscribe to pool changes so we can react when a model elsewhere is
+	// evicted (frees us to load our own next-up fingerprint, etc.).
+	poolCh := make(chan struct{}, 1)
+	dq.pool.AddChangeCallback(func(PoolChangeEvent) {
+		select {
+		case poolCh <- struct{}{}:
+		default:
+		}
+	})
+
+	fallback := time.NewTicker(fallbackInterval)
+	defer fallback.Stop()
 
 	for {
+		// Drain everything we can right now, then wait.
+		dq.processReady(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			dq.drainQueue(ctx)
+		case <-dq.queue.NotifyCh():
+		case <-dq.workerDone:
+		case <-poolCh:
+		case <-fallback.C:
 		}
 	}
 }
 
-// drainQueue pulls all available same-fingerprint messages from the device
-// queue and submits them to the persistent worker pool. Does NOT wait for
-// workers to finish — they keep running across ticks. Messages arriving
-// between ticks are picked up on the next tick while workers are still busy.
-func (dq *DeviceQueueManager) drainQueue(ctx context.Context) {
+// processReady inspects the head of the queue and dispatches as many
+// messages as possible without violating model-switch rules or worker pool
+// capacity. Returns when no further progress can be made.
+func (dq *DeviceQueueManager) processReady(ctx context.Context) {
 	processed := 0
 
 	for ctx.Err() == nil {
-		msg, err := dq.queue.Receive(ctx)
+		// Peek the next visible message — this does NOT mark it received.
+		peeked, err := dq.queue.Peek(ctx, 1)
 		if err != nil {
-			dq.logger.Error().Err(err).Msg("receiving from device queue")
-			break
+			dq.logger.Error().Err(err).Msg("peeking device queue")
+			return
 		}
-		if msg == nil {
+		if len(peeked) == 0 {
 			if processed == 0 {
 				dq.trySteal(ctx)
 			}
-			break
+			return
 		}
 
-		env, err := queue.UnmarshalEnvelope(msg.Body)
+		head := peeked[0]
+		env, err := queue.UnmarshalEnvelope(head.Body)
 		if err != nil {
-			dq.logger.Error().Err(err).Str("msg_id", string(msg.ID)).Msg("unmarshalling envelope")
-			_ = dq.results.Fail(string(msg.ID), "invalid envelope: "+err.Error())
-			_ = dq.queue.Delete(ctx, msg.ID)
+			// Bad envelope: consume and fail it so it doesn't block the queue.
+			dq.logger.Error().Err(err).Str("msg_id", string(head.ID)).Msg("unmarshalling envelope at head")
+			if got, _ := dq.queue.ReceiveByID(ctx, head.ID); got != nil {
+				if fErr := dq.results.Fail(string(got.ID), "invalid envelope: "+err.Error()); fErr != nil {
+					dq.logger.Error().Err(fErr).Str("msg_id", string(got.ID)).Msg("failing result for invalid envelope")
+				}
+				if dErr := dq.queue.Delete(ctx, got.ID); dErr != nil {
+					dq.logger.Error().Err(dErr).Str("msg_id", string(got.ID)).Msg("deleting invalid envelope")
+				}
+			}
 			continue
+		}
+
+		// Idempotency: if the result for this request is already done or
+		// errored, the work was completed by some other path (a prior
+		// execution that crashed after Complete() but before deleting this
+		// device row, a concurrent steal-back, etc.). Drop the device row
+		// without re-running inference. The dispatcher already does the same
+		// check on the global side.
+		if env.RequestID != "" {
+			if r, _ := dq.results.Get(env.RequestID); r != nil &&
+				(r.Status == queue.ResultStatusDone || r.Status == queue.ResultStatusError) {
+				dq.logger.Debug().Str("request_id", env.RequestID).Msg("dropping device row: result already completed")
+				if got, _ := dq.queue.ReceiveByID(ctx, head.ID); got != nil {
+					if dErr := dq.queue.Delete(ctx, got.ID); dErr != nil {
+						dq.logger.Error().Err(dErr).Str("msg_id", string(got.ID)).Msg("deleting completed device row")
+					}
+				}
+				continue
+			}
 		}
 
 		fp := env.Fingerprint
 
-		// If fingerprint changed, put message back and stop — the dispatcher
-		// will route it to the correct device queue.
+		// Decide model state.
 		dq.mu.Lock()
 		currentFP := dq.loadedHash
+		wp := dq.wp
+		active := dq.activeWorkers
 		dq.mu.Unlock()
-		if currentFP != "" && fp != currentFP {
-			_ = dq.queue.Delete(ctx, msg.ID)
-			_ = dq.queue.Requeue(ctx, msg, env.Priority)
-			break
+
+		switch {
+		case currentFP == "":
+			if !dq.ensureModel(fp) {
+				return
+			}
+		case currentFP != fp:
+			// Different model needed. Wait for current workers to drain;
+			// then try to evict and load the new one.
+			if active > 0 {
+				return
+			}
+			if !dq.ensureModel(fp) {
+				return
+			}
+		case wp == nil:
+			// Same fingerprint but no worker pool yet (e.g. pre-warmed loadedHash
+			// without an explicit ensureModel call). Initialize via ensureModel.
+			if !dq.ensureModel(fp) {
+				return
+			}
 		}
 
-		// Ensure model is loaded (creates/resizes the persistent worker pool).
-		if currentFP == "" || currentFP != fp {
-			dq.ensureModel(fp)
+		// Re-read after possible ensureModel.
+		dq.mu.Lock()
+		wp = dq.wp
+		dq.mu.Unlock()
+		if wp == nil {
+			dq.logger.Error().Msg("worker pool not initialized")
+			return
+		}
+
+		// Now consume the message — we're committed to executing it.
+		msg, err := dq.queue.ReceiveByID(ctx, head.ID)
+		if err != nil {
+			dq.logger.Error().Err(err).Str("msg_id", string(head.ID)).Msg("receiving by id at head")
+			return
+		}
+		if msg == nil {
+			// Someone else (work stealer) consumed it between our Peek and Receive.
+			continue
 		}
 
 		dq.mu.Lock()
-		wp := dq.wp
+		dq.activeWorkers++
 		dq.mu.Unlock()
-		if wp == nil {
-			// Should not happen, but guard against it.
-			dq.logger.Error().Msg("worker pool not initialized")
-			break
-		}
 
 		item := &batchItem{msg: msg, env: env}
 		if err := wp.Do(ctx, func(ctx context.Context) {
+			defer func() {
+				dq.mu.Lock()
+				dq.activeWorkers--
+				dq.mu.Unlock()
+				dq.signalWorkerDone()
+			}()
 			dq.executeOne(ctx, item)
 		}); err != nil {
-			break
+			// Submission failed (ctx cancelled). Roll back the active count
+			// and re-queue the message at the head so we don't lose it.
+			dq.mu.Lock()
+			dq.activeWorkers--
+			dq.mu.Unlock()
+			if rqErr := dq.queue.Requeue(ctx, msg, env.Priority); rqErr != nil {
+				dq.logger.Error().Err(rqErr).Msg("requeueing message after worker submit failure")
+			}
+			return
 		}
 		processed++
-	}
-
-	if processed > 0 {
-		dq.mu.Lock()
-		fp := dq.loadedHash
-		dq.mu.Unlock()
-		if fp != "" {
-			dq.updateTailState(fp, processed)
-		}
 	}
 }
 
@@ -205,17 +316,20 @@ func (dq *DeviceQueueManager) executeOne(ctx context.Context, item *batchItem) {
 		id = string(item.msg.ID)
 	}
 
-	// Start a heartbeat goroutine that periodically extends the global queue
-	// message's visibility timeout. This prevents the global queue from
-	// redelivering the message while we're still processing it.
-	// On completion (success or failure), we stop the heartbeat and either
-	// delete the global message (success) or let it expire (transient failure).
-	var heartbeatCancel context.CancelFunc
+	// Heartbeat both leases (global + this device queue's own) for the
+	// duration of the inference call — without it, goqite redelivers and
+	// we process the same request twice. On completion the heartbeats are
+	// cancelled and the messages either deleted or allowed to expire.
+	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
+	defer heartbeatCancel()
+
+	// Always extend this device queue's own lease — the worker holds it
+	// until executeOne returns, which may be minutes for inference.
+	go dq.heartbeatLease(heartbeatCtx, dq.queue, item.msg.ID, deviceExtendDuration, id, dq.queueName)
+
 	globalMsgID := item.env.GlobalMsgID
 	if globalMsgID != "" {
-		var heartbeatCtx context.Context
-		heartbeatCtx, heartbeatCancel = context.WithCancel(ctx)
-		go dq.heartbeatGlobalMsg(heartbeatCtx, queue.MessageID(globalMsgID), id)
+		go dq.heartbeatLease(heartbeatCtx, dq.globalQueue, queue.MessageID(globalMsgID), globalExtendDuration, id, "global")
 	}
 
 	if err := dq.results.MarkProcessing(id); err != nil {
@@ -255,10 +369,14 @@ func (dq *DeviceQueueManager) executeOne(ctx context.Context, item *batchItem) {
 
 	if execErr != nil {
 		dq.logger.Error().Err(execErr).Str("request_id", id).Msg("execution failed")
-		_ = dq.results.Fail(id, execErr.Error())
+		if fErr := dq.results.Fail(id, execErr.Error()); fErr != nil {
+			dq.logger.Error().Err(fErr).Str("request_id", id).Msg("storing failed result")
+		}
 		// Ack the global message — the error is recorded in results, no need for redelivery.
 		if globalMsgID != "" {
-			_ = dq.globalQueue.Delete(ctx, queue.MessageID(globalMsgID))
+			if dErr := dq.globalQueue.Delete(ctx, queue.MessageID(globalMsgID)); dErr != nil {
+				dq.logger.Error().Err(dErr).Str("msg_id", globalMsgID).Msg("acking failed-execution global msg")
+			}
 		}
 	} else {
 		if storeErr := dq.results.Complete(id, body); storeErr != nil {
@@ -276,11 +394,27 @@ func (dq *DeviceQueueManager) executeOne(ctx context.Context, item *batchItem) {
 	if delErr := dq.queue.Delete(ctx, item.msg.ID); delErr != nil {
 		dq.logger.Error().Err(delErr).Str("request_id", id).Msg("deleting device queue message")
 	}
+
+	// Subtract this task's difficulty from the queue's running sum, mirroring
+	// the increment the dispatcher made on submit. Tail_hash is intentionally
+	// left alone — the next enqueue overwrites it, and a stale value in an
+	// emptied queue is harmless because [ScoreCost] only consults it when
+	// TailDifficulty > 0 in practice (an empty tail collapses to LoadedHash).
+	bs := batchSize(item.env.Type, item.env.Payload)
+	slots := int(dq.pool.modelMaxConcurrent(item.env.Fingerprint))
+	if diff := envelopeDifficulty(len(item.env.Payload), item.env.ModelSizeBytes, bs, slots, isEmbeddingBatch(item.env.Type)); diff > 0 {
+		if err := dq.stateStore.AddTailDifficulty(dq.queueName, -diff); err != nil {
+			dq.logger.Warn().Err(err).Msg("decrementing tail_difficulty after execute")
+		}
+	}
 }
 
-// heartbeatGlobalMsg periodically extends the global queue message's visibility
-// timeout to prevent redelivery while the task is being processed.
-func (dq *DeviceQueueManager) heartbeatGlobalMsg(ctx context.Context, globalMsgID queue.MessageID, requestID string) {
+// heartbeatLease periodically extends a queue message's visibility timeout to
+// prevent redelivery while the task is being processed. Used for both the
+// global queue message (ack deferred until execution completes) and the
+// device queue message (its own lease must also outlive the inference call,
+// otherwise goqite redelivers and processReady would dispatch a duplicate).
+func (dq *DeviceQueueManager) heartbeatLease(ctx context.Context, q queue.QueueInterface, msgID queue.MessageID, dur time.Duration, requestID, queueName string) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -289,33 +423,51 @@ func (dq *DeviceQueueManager) heartbeatGlobalMsg(ctx context.Context, globalMsgI
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := dq.globalQueue.Extend(ctx, globalMsgID, globalExtendDuration); err != nil {
+			if err := q.Extend(ctx, msgID, dur); err != nil {
 				// Message may have been deleted (success) or expired — either way, stop.
-				dq.logger.Trace().Err(err).Str("request_id", requestID).Msg("heartbeat extend failed, stopping")
+				dq.logger.Trace().Err(err).Str("request_id", requestID).Str("queue", queueName).Msg("heartbeat extend failed, stopping")
 				return
 			}
-			dq.logger.Trace().Str("request_id", requestID).Msg("heartbeat: extended global message visibility")
+			dq.logger.Trace().Str("request_id", requestID).Str("queue", queueName).Msg("heartbeat: extended message visibility")
 		}
 	}
 }
 
-// ensureModel verifies the required model is loaded on this device. If a different
-// model is currently loaded, it evicts the old one. The actual model load happens
-// lazily in the resolver during executeOne — this method tracks which fingerprint
-// this device queue considers "current" and updates concurrency limits accordingly.
-func (dq *DeviceQueueManager) ensureModel(fingerprint string) {
+// ensureModel verifies the required model is loaded on this device. If a
+// different model is currently loaded, it evicts the old one. Returns false if
+// the previous model couldn't be evicted right now (still has in-flight
+// requests or is otherwise busy) — caller must defer the new request.
+//
+// The actual model load happens lazily in the resolver during executeOne —
+// this method tracks which fingerprint this device queue considers "current"
+// and updates concurrency limits accordingly.
+func (dq *DeviceQueueManager) ensureModel(fingerprint string) bool {
 	dq.mu.Lock()
 	if dq.loadedHash == fingerprint && dq.wp != nil {
 		dq.mu.Unlock()
-		return
+		return true
 	}
 	prevHash := dq.loadedHash
 	dq.mu.Unlock()
 
-	// Evict the previous model if one was loaded. This frees VRAM so the
-	// resolver's GetOrLoadChat/GetOrLoadEmbedding can load the new model.
-	if prevHash != "" {
-		if dq.pool.Evict(prevHash) {
+	// Evict the previous model if one was loaded *and* it's a different
+	// fingerprint. TryEvict atomically checks activeReqs==0 and flips
+	// draining under the same lock, closing the TOCTOU window where a
+	// duplicate-redelivered request could acquire the model between a prior
+	// CanEvict check and this call. If prevHash matches the new fingerprint,
+	// we are only here because wp was nil — no eviction is needed.
+	if prevHash != "" && prevHash != fingerprint {
+		// HasChat/HasEmbedding tell us whether the pool actually holds an
+		// instance to evict — if not, the loadedHash was a stale label and
+		// we can proceed straight to (re)building the worker pool.
+		if dq.pool.HasChat(prevHash) || dq.pool.HasEmbedding(prevHash) {
+			if !dq.pool.TryEvict(prevHash) {
+				dq.logger.Debug().
+					Str("prev_fingerprint", prevHash).
+					Str("new_fingerprint", fingerprint).
+					Msg("could not evict previous model — busy; deferring request")
+				return false
+			}
 			dq.logger.Info().
 				Str("prev_fingerprint", prevHash).
 				Str("new_fingerprint", fingerprint).
@@ -323,29 +475,12 @@ func (dq *DeviceQueueManager) ensureModel(fingerprint string) {
 		}
 	}
 
-	// Determine max_concurrent: prefer the value from the pool's placement
-	// (set by computePlacement during LoadModel), fall back to benchmark calculation.
+	// max_concurrent comes from the pool's placement, which is overwritten
+	// at load time with the value the worker reports back via its
+	// LoadModelResult. A loaded model always has a known concurrency.
 	newMaxConcurrent := dq.pool.modelMaxConcurrent(fingerprint)
-	if newMaxConcurrent <= 0 && dq.modelsDir != nil {
+	if newMaxConcurrent <= 0 {
 		newMaxConcurrent = 1
-		modelPath := dq.pool.modelPath(fingerprint)
-		if modelPath != "" {
-			modelSize, _ := ModelFileSize(modelPath)
-			// Include auxiliary files (e.g. mmproj) in VRAM estimate.
-			if mmproj := dq.pool.modelMmprojPath(fingerprint); mmproj != "" {
-				if s, err := ModelFileSize(mmproj); err == nil {
-					modelSize += s
-				}
-			}
-			if modelSize > 0 {
-				modelSizeGB := float64(modelSize) / (1024 * 1024 * 1024)
-				modelSizeMB := int(modelSize / (1024 * 1024))
-				gflops := dq.benchGFlops()
-				totalMB := dq.benchTotalMemoryMB()
-				kvCacheMB := int(EstimateKVCacheMB(modelSize, dq.pool.modelContextSize(fingerprint), dq.pool.modelCacheType(fingerprint)))
-				newMaxConcurrent = CalcMaxConcurrent(gflops, modelSizeGB, totalMB, modelSizeMB, kvCacheMB)
-			}
-		}
 	}
 
 	dq.mu.Lock()
@@ -367,128 +502,86 @@ func (dq *DeviceQueueManager) ensureModel(fingerprint string) {
 		Str("fingerprint", fingerprint).
 		Int32("max_concurrent", newMaxConcurrent).
 		Msg("device queue model switched")
+	return true
 }
 
-// benchGFlops returns the minimum GFlops across this device queue's devices.
-func (dq *DeviceQueueManager) benchGFlops() float64 {
-	minGFlops := 0.0
-	for i, did := range dq.deviceIDs {
-		row, err := dq.benchStore.GetBenchmark(dq.agentID, did)
-		if err != nil {
-			continue
-		}
-		if i == 0 || row.ComputeGFlops < minGFlops {
-			minGFlops = row.ComputeGFlops
-		}
-	}
-	return minGFlops
-}
-
-// benchTotalMemoryMB returns the total memory across this device queue's devices.
-// Falls back to benchmark memory if available.
-func (dq *DeviceQueueManager) benchTotalMemoryMB() int {
-	total := 0
-	for _, did := range dq.deviceIDs {
-		row, err := dq.benchStore.GetBenchmark(dq.agentID, did)
-		if err != nil {
-			continue
-		}
-		// MemoryGBs is stored as float64 GB in benchmarks; convert to MB.
-		total += int(row.MemoryGBs * 1024)
-	}
-	return total
-}
-
-// updateTailState updates the tail hash and length in the DB.
-func (dq *DeviceQueueManager) updateTailState(fingerprint string, batchSize int) {
-	// Read current tail state.
-	st, err := dq.stateStore.GetDeviceQueueState(dq.queueName)
-	if err != nil {
-		dq.logger.Warn().Err(err).Msg("reading tail state")
-		return
-	}
-
-	var newLength int
-	if st.TailHash == fingerprint {
-		newLength = st.TailLength + batchSize
-	} else {
-		newLength = batchSize
-	}
-
-	if err := dq.stateStore.UpdateTail(dq.queueName, fingerprint, newLength); err != nil {
-		dq.logger.Warn().Err(err).Msg("updating tail state")
-	}
-}
-
-// DrainToGlobal moves all pending messages from this device queue back to the
-// global queue. Used when disabling a device — tasks must be redistributed.
+// DrainToGlobal releases every assigned task back to the global queue at
+// its original position. Used on intentional disable or worker crash.
+//
+// The global row already exists (left invisible-leased by the dispatcher),
+// so per message: shorten its lease to zero (dispatcher sees it next tick)
+// + drop the device row, atomically. No window where the task is in
+// neither queue, no fresh `created` timestamp sending it to the back.
+//
 // Returns the number of drained messages.
 func (dq *DeviceQueueManager) DrainToGlobal(ctx context.Context) (int, error) {
 	drained := 0
 	for {
-		msg, err := dq.queue.Receive(ctx)
+		// Peek inspects without consuming, so the row stays put if anything
+		// below this point fails partway through.
+		peeked, err := dq.queue.Peek(ctx, 1)
 		if err != nil {
-			return drained, fmt.Errorf("receiving from device queue %s: %w", dq.queueName, err)
+			return drained, fmt.Errorf("peeking device queue %s: %w", dq.queueName, err)
 		}
-		if msg == nil {
+		if len(peeked) == 0 {
 			break
 		}
+		msg := peeked[0]
 
 		env, err := queue.UnmarshalEnvelope(msg.Body)
 		if err != nil {
+			// Bad envelope — there is no recoverable global counterpart.
+			// Consume the device row so the loop makes progress.
 			dq.logger.Error().Err(err).Str("msg_id", string(msg.ID)).Msg("unmarshalling envelope during drain")
-			_ = dq.queue.Delete(ctx, msg.ID)
+			if dErr := dq.queue.Delete(ctx, msg.ID); dErr != nil {
+				dq.logger.Error().Err(dErr).Str("msg_id", string(msg.ID)).Msg("deleting bad envelope during drain")
+			}
 			continue
 		}
 
-		// Delete the old global message if present — the re-submit creates a fresh one.
-		if env.GlobalMsgID != "" {
-			_ = dq.globalQueue.Delete(ctx, queue.MessageID(env.GlobalMsgID))
-			env.GlobalMsgID = ""
+		if env.GlobalMsgID == "" {
+			// Legacy or test path: no global counterpart, just drop the row.
+			if dErr := dq.queue.Delete(ctx, msg.ID); dErr != nil {
+				return drained, fmt.Errorf("deleting orphan device row %s: %w", msg.ID, dErr)
+			}
+			drained++
+			continue
 		}
 
-		if _, err := dq.globalQueue.SubmitEnvelope(ctx, env, env.Priority); err != nil {
-			return drained, fmt.Errorf("re-submitting to global queue: %w", err)
-		}
-		if err := dq.queue.Delete(ctx, msg.ID); err != nil {
-			dq.logger.Error().Err(err).Msg("deleting drained message from device queue")
+		if err := dq.queue.ReleaseLeaseAndDelete(ctx, msg.ID, dq.globalQueue, queue.MessageID(env.GlobalMsgID)); err != nil {
+			return drained, fmt.Errorf("releasing global lease for %s: %w", env.GlobalMsgID, err)
 		}
 		drained++
 	}
 
 	if drained > 0 {
-		dq.logger.Info().Int("drained", drained).Msg("drained tasks to global queue")
+		// Every task that was queued here is now on the global queue. The
+		// device queue's tail accounting is stale by exactly that amount;
+		// reset rather than try to track decrements per-message during the
+		// drain (the global queue side has no per-queue tail tracking, so
+		// there's no symmetric +N to make).
+		if err := dq.stateStore.UpdateTail(dq.queueName, "", 0); err != nil {
+			dq.logger.Warn().Err(err).Msg("resetting tail state after drain")
+		}
+		dq.logger.Info().Int("drained", drained).Msg("released tasks back to global queue")
 	}
 	return drained, nil
 }
 
-// trySteal attempts work stealing when the device queue and global queue are both empty.
+// trySteal attempts work stealing when the device queue and global queue are
+// both empty. The actual donor→thief move happens transactionally inside
+// Dispatcher.TrySteal — by the time it returns, stolen rows are already in
+// this queue (and removed from the donor) and the queue's NotifyCh has been
+// signalled, so the next Run-loop iteration will pick them up.
 func (dq *DeviceQueueManager) trySteal(ctx context.Context) {
 	if dq.dispatcher == nil {
 		return
 	}
-
-	// Only steal if global queue is also empty.
+	// Only steal if global queue is also empty — otherwise the dispatcher
+	// will route something to us soon and stealing would be wasted work.
 	globalDepth, err := dq.globalQueue.Depth(ctx)
 	if err != nil || globalDepth > 0 {
-		return // global queue has work — dispatcher will handle it
-	}
-
-	result := dq.dispatcher.TrySteal(ctx, dq, dq.logger)
-	if result == nil {
 		return
 	}
-
-	// Submit stolen messages to our device queue for processing.
-	for _, msg := range result.Messages {
-		env, err := queue.UnmarshalEnvelope(msg.Body)
-		if err != nil {
-			dq.logger.Error().Err(err).Msg("unmarshalling stolen message")
-			continue
-		}
-		_, err = dq.queue.SubmitEnvelope(ctx, env, env.Priority)
-		if err != nil {
-			dq.logger.Error().Err(err).Msg("re-submitting stolen message to device queue")
-		}
-	}
+	dq.dispatcher.TrySteal(ctx, dq, dq.logger)
 }

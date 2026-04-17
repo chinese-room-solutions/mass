@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -12,11 +13,12 @@ import (
 	"strings"
 	"time"
 
-	sdkhf "github.com/chinese-room-solutions/mass-module/huggingface"
-	"github.com/chinese-room-solutions/mass-module/uikit"
+	sdkhf "github.com/chinese-room-solutions/mass-sdk/huggingface"
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/huggingface"
 	"github.com/chinese-room-solutions/mass/internal/model"
+	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/web/templates"
 	"github.com/starfederation/datastar-go/datastar"
 )
@@ -48,11 +50,11 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	dir := h.modelsDir()
 	if dir == "" {
-		_ = sse.PatchElements(
+		mustSSE(sse.PatchElements(
 			`<div id="models-content"><p class="text-neutral-500 text-sm">Data directory not configured.</p></div>`,
 			datastar.WithSelector("#models-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
@@ -63,11 +65,11 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	models, err := ScanModels(dir)
 	if err != nil {
-		_ = sse.PatchElements(
+		mustSSE(sse.PatchElements(
 			templates.RenderError("Failed to scan models: "+err.Error()),
 			datastar.WithSelector("#models-content"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
 
@@ -77,7 +79,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 		terms := strings.Fields(strings.ToLower(filter))
 		var filtered []LocalModelInfo
 		for _, m := range models {
-			haystack := strings.ToLower(m.Filename + " " + m.RelPath + " " + m.ModelType)
+			haystack := strings.ToLower(m.Filename + " " + m.RelPath + " " + string(m.ModelType))
 			match := true
 			for _, t := range terms {
 				if !strings.Contains(haystack, t) {
@@ -108,7 +110,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 				Path:          v.Path,
 				Quantization:  v.Quantization,
 				SizeFormatted: uikit.FormatBytes(v.SizeBytes),
-				IsMmproj:      v.ModelType == "Mmproj",
+				IsMmproj:      v.ModelType == ModelFileKindMmproj,
 			}
 		}
 		hasVision := false
@@ -123,7 +125,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		viewGroups[i] = templates.ModelGroupView{
 			BaseName:    g.BaseName,
-			ModelType:   g.ModelType,
+			ModelType:   g.ModelType.Title(),
 			HasVision:   hasVision,
 			HasThinking: hasThinking,
 			Variants:    variants,
@@ -155,10 +157,10 @@ func (h *Handler) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 
 	if modelPath == "" {
-		_ = sse.PatchElements(`<div id="models-props-content"><p class="text-neutral-500 text-sm">No model selected.</p></div>`,
+		mustSSE(sse.PatchElements(`<div id="models-props-content"><p class="text-neutral-500 text-sm">No model selected.</p></div>`,
 			datastar.WithSelector("#models-props-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
@@ -166,21 +168,21 @@ func (h *Handler) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	dir := h.modelsDir()
 	absPath, ok := isPathUnder(modelPath, dir)
 	if !ok {
-		_ = sse.PatchElements(`<div id="models-props-content"><p class="text-red-400 text-sm">Invalid model path.</p></div>`,
+		mustSSE(sse.PatchElements(`<div id="models-props-content"><p class="text-red-400 text-sm">Invalid model path.</p></div>`,
 			datastar.WithSelector("#models-props-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
 	info, err := ReadGGUFModelInfo(absPath)
 	if err != nil {
 		h.logger.Error().Err(err).Str("path", absPath).Msg("failed to read GGUF metadata")
-		_ = sse.PatchElements(fmt.Sprintf(`<div id="models-props-content"><p class="text-red-400 text-sm">Failed to read model metadata: %s</p></div>`,
+		mustSSE(sse.PatchElements(fmt.Sprintf(`<div id="models-props-content"><p class="text-red-400 text-sm">Failed to read model metadata: %s</p></div>`,
 			strings.ReplaceAll(err.Error(), `"`, `&quot;`)),
 			datastar.WithSelector("#models-props-content"),
 			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		))
 		return
 	}
 
@@ -200,7 +202,7 @@ func (h *Handler) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	if rel, relErr := filepath.Rel(dir, absPath); relErr == nil {
 		relPath = rel
 	}
-	modelType := strings.ToLower(inferModelType(info.Filename, relPath))
+	modelType := string(inferModelType(info.Filename, relPath))
 
 	// Detect vision projector once.
 	var mmprojPath, mmprojRel string
@@ -260,11 +262,10 @@ func (h *Handler) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error().Err(err).Msg("failed to render model props template")
 		return
 	}
-
-	_ = sse.PatchElements(buf.String(),
+	mustSSE(sse.PatchElements(buf.String(),
 		datastar.WithSelector("#models-props-content"),
 		datastar.WithMode(datastar.ElementPatchModeOuter),
-	)
+	))
 }
 
 // detectChatTemplateName identifies a chat template name from the raw Jinja
@@ -327,55 +328,42 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 
 	if modelPath == "" {
-		_ = sse.PatchElements(templates.RenderError("Missing model path"),
+		mustSSE(sse.PatchElements(templates.RenderError("Missing model path"),
 			datastar.WithSelector("#models-content"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
 
-	// Security: ensure the path is inside the models directory.
-	dir := h.modelsDir()
-	absPath, ok := isPathUnder(modelPath, dir)
+	// Resolve to an absolute path before delegating, so the rest of this
+	// handler (which manipulates the DOM by absolute path) works.
+	absPath, ok := isPathUnder(modelPath, h.modelsDir())
 	if !ok {
-		_ = sse.PatchElements(templates.RenderError("Invalid model path"),
+		mustSSE(sse.PatchElements(templates.RenderError("Invalid model path"),
 			datastar.WithSelector("#models-content"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
 
-	if err := os.Remove(absPath); err != nil {
-		_ = sse.PatchElements(templates.RenderError("Failed to delete: "+err.Error()),
+	if err := h.deleteModelFile(absPath); err != nil {
+		msg := "Failed to delete: " + err.Error()
+		if errors.Is(err, errModelNotFound) {
+			msg = "Model not found"
+		} else if errors.Is(err, errInvalidModelPath) {
+			msg = "Invalid model path"
+		}
+		mustSSE(sse.PatchElements(templates.RenderError(msg),
 			datastar.WithSelector("#models-content"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
-
-	// Invalidate GGUF metadata cache for the deleted model.
-	InvalidateGGUFCache(absPath)
-
-	// Clean up empty parent directories up to the models root.
-	parent := filepath.Dir(absPath)
-	for parent != dir && parent != filepath.Dir(parent) {
-		entries, err := os.ReadDir(parent)
-		if err != nil || len(entries) > 0 {
-			break
-		}
-		if err := os.Remove(parent); err != nil {
-			h.logger.Warn().Err(err).Str("dir", parent).Msg("failed to remove empty parent directory")
-			break
-		}
-		parent = filepath.Dir(parent)
-	}
-
-	h.logger.Info().Str("path", absPath).Msg("model deleted")
 
 	// Restore the "Get" button in HF search results so the file no longer shows as downloaded.
 	filename := filepath.Base(absPath)
 	jsFilename := jsStringEscape(filename)
-	_ = sse.ExecuteScript(fmt.Sprintf(
+	mustSSE(sse.ExecuteScript(fmt.Sprintf(
 		`(function(){if(!window.__hfDlID)return;var id=window.__hfDlID('%s');`+
 			`function restore(el){`+
 			`var repo=el.getAttribute('data-repo'),file=el.getAttribute('data-file');`+
@@ -386,11 +374,11 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 			`document.querySelectorAll('[id="'+id+'"]').forEach(restore);`+
 			`document.querySelectorAll('template').forEach(function(t){`+
 			`var e=t.content.querySelector('[id="'+id+'"]');if(e)restore(e);`+
-			`});})()`, jsFilename))
+			`});})()`, jsFilename)))
 
 	// Remove the deleted variant from the DOM without re-rendering (preserves <details> open state).
 	jsPath := jsStringEscape(absPath)
-	_ = sse.ExecuteScript(fmt.Sprintf(
+	mustSSE(sse.ExecuteScript(fmt.Sprintf(
 		`(function(){`+
 			`var p='%s';`+
 			`var row=null;`+
@@ -411,7 +399,7 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 			`content.innerHTML='<p class=\"text-neutral-500 text-sm py-4\">No models found. Click \\\"Install New Model\\\" to download from Hugging Face.</p>';`+
 			`}`+
 			`})()`,
-		jsPath))
+		jsPath)))
 }
 
 // handleSearchHF performs a HuggingFace search and renders results.
@@ -428,12 +416,13 @@ func (h *Handler) handleSearchHF(w http.ResponseWriter, r *http.Request) {
 
 	query := strings.TrimSpace(signals.ModelsHfQuery)
 	if query == "" {
-		// Clear search results when query is empty.
-		_ = sse.PatchElements(
-			`<div id="models-hf-results"></div>`,
-			datastar.WithSelector("#models-hf-results"),
-			datastar.WithMode(datastar.ElementPatchModeOuter),
-		)
+		mustSSE(
+			// Clear search results when query is empty.
+			sse.PatchElements(
+				`<div id="models-hf-results"></div>`,
+				datastar.WithSelector("#models-hf-results"),
+				datastar.WithMode(datastar.ElementPatchModeOuter),
+			))
 		return
 	}
 
@@ -442,11 +431,11 @@ func (h *Handler) handleSearchHF(w http.ResponseWriter, r *http.Request) {
 		Limit:    hfPageSize,
 	})
 	if err != nil {
-		_ = sse.PatchElements(
+		mustSSE(sse.PatchElements(
 			uikit.RenderHFStatus("Search failed: "+err.Error(), true),
 			datastar.WithSelector("#models-hf-results"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
 
@@ -468,17 +457,16 @@ func (h *Handler) handleSearchHF(w http.ResponseWriter, r *http.Request) {
 
 	downloaded := downloadedFilesMap(h.modelsDir())
 
-	// __mass__ is used as the module name for Show More URL routing.
+	// __mass__ is used as the app name for Show More URL routing.
 	htmlResult := uikit.RenderHFResults("__mass__", uiModels, uikit.HFResultsOpts{
 		HasMore:         result.HasMore,
 		DownloadedFiles: downloaded,
-		MoreURL:         "/api/models/search/more",
+		MoreURL:         "/api/v1/models/search/more",
 	})
-
-	_ = sse.PatchElements(htmlResult,
+	mustSSE(sse.PatchElements(htmlResult,
 		datastar.WithSelector("#models-hf-results"),
 		datastar.WithMode(datastar.ElementPatchModeInner),
-	)
+	))
 }
 
 // handleSearchHFMore continues pagination for HF search results.
@@ -490,11 +478,11 @@ func (h *Handler) handleSearchHFMore(w http.ResponseWriter, r *http.Request) {
 	h.hfMu.Unlock()
 
 	if state == nil {
-		_ = sse.PatchElements(
+		mustSSE(sse.PatchElements(
 			uikit.RenderHFStatus("No active search.", true),
 			datastar.WithSelector("#models-hf-results"),
 			datastar.WithMode(datastar.ElementPatchModeInner),
-		)
+		))
 		return
 	}
 
@@ -515,11 +503,11 @@ func (h *Handler) handleSearchHFMore(w http.ResponseWriter, r *http.Request) {
 			ExcludeIDs: excludeIDs,
 		})
 		if err != nil {
-			_ = sse.PatchElements(
+			mustSSE(sse.PatchElements(
 				uikit.RenderHFStatus("Search failed: "+err.Error(), true),
 				datastar.WithSelector("#models-hf-results"),
 				datastar.WithMode(datastar.ElementPatchModeInner),
-			)
+			))
 			return
 		}
 
@@ -534,9 +522,9 @@ func (h *Handler) handleSearchHFMore(w http.ResponseWriter, r *http.Request) {
 
 	if len(state.buffer) == 0 {
 		h.hfMu.Unlock()
-		_ = sse.PatchElements(
-			uikit.RenderHFFooter("__mass__", false, "/api/models/search/more"),
-		)
+		mustSSE(sse.PatchElements(
+			uikit.RenderHFFooter("__mass__", false, "/api/v1/models/search/more"),
+		))
 		return
 	}
 
@@ -553,13 +541,12 @@ func (h *Handler) handleSearchHFMore(w http.ResponseWriter, r *http.Request) {
 
 	downloaded := downloadedFilesMap(h.modelsDir())
 	rowsHTML := uikit.RenderHFResultRows(page, downloaded)
-	footerHTML := uikit.RenderHFFooter("__mass__", hasMore, "/api/models/search/more")
-
-	_ = sse.PatchElements(rowsHTML,
+	footerHTML := uikit.RenderHFFooter("__mass__", hasMore, "/api/v1/models/search/more")
+	mustSSE(sse.PatchElements(rowsHTML,
 		datastar.WithSelector("#pe-hf-list"),
 		datastar.WithMode(datastar.ElementPatchModeAppend),
-	)
-	_ = sse.PatchElements(footerHTML)
+	))
+	mustSSE(sse.PatchElements(footerHTML))
 }
 
 // handleDownloadModel starts downloading a model file from HuggingFace (POST /api/models/download).
@@ -575,13 +562,13 @@ func (h *Handler) handleDownloadModel(w http.ResponseWriter, r *http.Request) {
 
 	if signals.DlRepoID == "" || signals.DlFilename == "" {
 		sse := datastar.NewSSE(w, r)
-		_ = sse.PatchElements(templates.RenderError("Missing download parameters"))
+		mustSSE(sse.PatchElements(templates.RenderError("Missing download parameters")))
 		return
 	}
 
 	if err := h.startModelDownload(signals.DlRepoID, signals.DlFilename); err != nil {
 		sse := datastar.NewSSE(w, r)
-		_ = sse.PatchElements(templates.RenderError(err.Error()))
+		mustSSE(sse.PatchElements(templates.RenderError(err.Error())))
 		return
 	}
 
@@ -630,7 +617,7 @@ func (h *Handler) startModelDownload(repoID, filename string) error {
 	// Broadcast start event so the UI inserts a downloading row.
 	h.broker.Broadcast(SSEEvent{
 		Type:        EventTypeDownload,
-		ModuleName:  "__mass__",
+		AppName:     "__mass__",
 		DlFilename:  filename,
 		DlRepoID:    repoID,
 		DlGroupName: groupName,
@@ -673,7 +660,7 @@ func (h *Handler) runDownload(ctx context.Context, ds *downloadState, destDir st
 				lastPct = pct
 				h.broker.Broadcast(SSEEvent{
 					Type:         EventTypeDownload,
-					ModuleName:   "__mass__",
+					AppName:      "__mass__",
 					DlFilename:   ds.Filename,
 					DlDownloaded: downloaded,
 					DlTotal:      total,
@@ -695,7 +682,7 @@ func (h *Handler) runDownload(ctx context.Context, ds *downloadState, destDir st
 		}
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
@@ -711,15 +698,112 @@ func (h *Handler) runDownload(ctx context.Context, ds *downloadState, destDir st
 	}
 	h.broker.Broadcast(SSEEvent{
 		Type:       EventTypeDownload,
-		ModuleName: "__mass__",
+		AppName:    "__mass__",
 		DlFilename: ds.Filename,
 		DlDone:     true,
 		DlPath:     localPath,
 	})
 }
 
-// handleDownloadPause pauses an active download by cancelling its context.
-// The partial temp file is preserved on disk for later resume.
+// errDownloadNotFound is returned when no active download exists for the
+// given filename. errDownloadNotPaused is returned by resumeDownload when
+// the download is currently active.
+var (
+	errDownloadNotFound  = errors.New("no active download")
+	errDownloadNotPaused = errors.New("download is not paused")
+)
+
+// pauseDownload halts the current download by cancelling its context;
+// the partial temp file is preserved on disk for later resume.
+func (h *Handler) pauseDownload(filename string) error {
+	ds := h.getDownload(filename)
+	if ds == nil {
+		return errDownloadNotFound
+	}
+	ds.mu.Lock()
+	ds.cancelFn()
+	ds.Paused = true
+	downloaded := ds.Downloaded
+	total := ds.Total
+	ds.mu.Unlock()
+
+	if h.store != nil {
+		if err := h.store.SetStatus(filename, "paused"); err != nil {
+			h.logger.Warn().Err(err).Str("file", filename).Msg("failed to set download status")
+		}
+		if err := h.store.UpdateProgress(filename, downloaded, total); err != nil {
+			h.logger.Warn().Err(err).Str("file", filename).Msg("failed to update download progress")
+		}
+	}
+	h.broker.Broadcast(SSEEvent{
+		Type:         EventTypeDownload,
+		AppName:      "__mass__",
+		DlFilename:   filename,
+		DlPaused:     true,
+		DlDownloaded: downloaded,
+		DlTotal:      total,
+	})
+	return nil
+}
+
+// resumeDownload restarts a paused download from its partial temp file.
+func (h *Handler) resumeDownload(filename string) error {
+	ds := h.getDownload(filename)
+	if ds == nil {
+		return errDownloadNotFound
+	}
+	ds.mu.Lock()
+	if !ds.Paused {
+		ds.mu.Unlock()
+		return errDownloadNotPaused
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ds.cancelFn = cancel
+	ds.Paused = false
+	ds.mu.Unlock()
+
+	if h.store != nil {
+		if err := h.store.SetStatus(filename, "active"); err != nil {
+			h.logger.Warn().Err(err).Str("file", filename).Msg("failed to set download status")
+		}
+	}
+	destDir := h.modelsDir()
+	go h.runDownload(ctx, ds, destDir)
+	return nil
+}
+
+// cancelDownload aborts a download and removes its temp file.
+func (h *Handler) cancelDownload(filename string) error {
+	ds := h.getDownload(filename)
+	if ds == nil {
+		return errDownloadNotFound
+	}
+	ds.mu.Lock()
+	ds.cancelFn()
+	ds.mu.Unlock()
+
+	h.removeDownload(filename)
+	if h.store != nil {
+		if err := h.store.DeleteDownload(filename); err != nil {
+			h.logger.Warn().Err(err).Str("file", filename).Msg("failed to delete download record")
+		}
+	}
+	destDir := h.modelsDir()
+	if destDir != "" {
+		if err := os.Remove(huggingface.TempFilePath(ds.RepoID, filename, destDir)); err != nil && !os.IsNotExist(err) {
+			h.logger.Warn().Err(err).Str("file", filename).Msg("failed to remove temp download file")
+		}
+	}
+	h.broker.Broadcast(SSEEvent{
+		Type:        EventTypeDownload,
+		AppName:     "__mass__",
+		DlFilename:  filename,
+		DlCancelled: true,
+	})
+	return nil
+}
+
+// handleDownloadPause is the UI wrapper for pauseDownload.
 func (h *Handler) handleDownloadPause(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Filename string `json:"filename"`
@@ -728,42 +812,18 @@ func (h *Handler) handleDownloadPause(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	ds := h.getDownload(req.Filename)
-	if ds == nil {
-		http.Error(w, "no active download", http.StatusNotFound)
+	if err := h.pauseDownload(req.Filename); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errDownloadNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-
-	ds.mu.Lock()
-	ds.cancelFn() // stops HTTP request, preserves temp file
-	ds.Paused = true
-	downloaded := ds.Downloaded
-	total := ds.Total
-	ds.mu.Unlock()
-
-	if h.store != nil {
-		if err := h.store.SetStatus(req.Filename, "paused"); err != nil {
-			h.logger.Warn().Err(err).Str("file", req.Filename).Msg("failed to set download status")
-		}
-		if err := h.store.UpdateProgress(req.Filename, downloaded, total); err != nil {
-			h.logger.Warn().Err(err).Str("file", req.Filename).Msg("failed to update download progress")
-		}
-	}
-
-	h.broker.Broadcast(SSEEvent{
-		Type:         EventTypeDownload,
-		ModuleName:   "__mass__",
-		DlFilename:   req.Filename,
-		DlPaused:     true,
-		DlDownloaded: downloaded,
-		DlTotal:      total,
-	})
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleDownloadResume resumes a paused download from the partial temp file.
+// handleDownloadResume is the UI wrapper for resumeDownload.
 func (h *Handler) handleDownloadResume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Filename string `json:"filename"`
@@ -772,38 +832,21 @@ func (h *Handler) handleDownloadResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	ds := h.getDownload(req.Filename)
-	if ds == nil {
-		http.Error(w, "no active download", http.StatusNotFound)
-		return
-	}
-
-	ds.mu.Lock()
-	if !ds.Paused {
-		ds.mu.Unlock()
-		http.Error(w, "download is not paused", http.StatusBadRequest)
-		return
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	ds.cancelFn = cancel
-	ds.Paused = false
-	ds.mu.Unlock()
-
-	if h.store != nil {
-		if err := h.store.SetStatus(req.Filename, "active"); err != nil {
-			h.logger.Warn().Err(err).Str("file", req.Filename).Msg("failed to set download status")
+	if err := h.resumeDownload(req.Filename); err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errDownloadNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, errDownloadNotPaused):
+			status = http.StatusBadRequest
 		}
+		http.Error(w, err.Error(), status)
+		return
 	}
-
-	destDir := h.modelsDir()
-	go h.runDownload(ctx, ds, destDir)
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleDownloadCancel cancels an active download and removes the temp file.
+// handleDownloadCancel is the UI wrapper for cancelDownload.
 func (h *Handler) handleDownloadCancel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Filename string `json:"filename"`
@@ -812,43 +855,69 @@ func (h *Handler) handleDownloadCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	ds := h.getDownload(req.Filename)
-	if ds == nil {
-		http.Error(w, "no active download", http.StatusNotFound)
+	if err := h.cancelDownload(req.Filename); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errDownloadNotFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-
-	ds.mu.Lock()
-	ds.cancelFn()
-	ds.mu.Unlock()
-
-	h.removeDownload(req.Filename)
-	if h.store != nil {
-		if err := h.store.DeleteDownload(req.Filename); err != nil {
-			h.logger.Warn().Err(err).Str("file", req.Filename).Msg("failed to delete download record")
-		}
-	}
-
-	// Delete the partial temp file.
-	destDir := h.modelsDir()
-	if destDir != "" {
-		if err := os.Remove(huggingface.TempFilePath(ds.RepoID, req.Filename, destDir)); err != nil && !os.IsNotExist(err) {
-			h.logger.Warn().Err(err).Str("file", req.Filename).Msg("failed to remove temp download file")
-		}
-	}
-
-	h.broker.Broadcast(SSEEvent{
-		Type:        EventTypeDownload,
-		ModuleName:  "__mass__",
-		DlFilename:  req.Filename,
-		DlCancelled: true,
-	})
-
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleImportModel copies a local model file into the models directory under "local/<filename>".
+// errAlreadyExists is returned by importModelFile when a destination
+// model with the same filename already exists.
+var errAlreadyExists = errors.New("model already exists")
+
+// importModelFile validates the source path, registers an in-progress
+// download record (so the UI's progress channel can mirror the copy), and
+// kicks off the asynchronous file copy. Returns the resulting model ID
+// (e.g. "local/<filename>") immediately; progress events flow through the
+// /internal/events SSE stream.
+func (h *Handler) importModelFile(srcPath string) (string, error) {
+	destDir := h.modelsDir()
+	if destDir == "" {
+		return "", errors.New("data directory not configured")
+	}
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		return "", errModelNotFound
+	}
+	if srcInfo.IsDir() {
+		return "", errInvalidModelPath
+	}
+
+	filename := filepath.Base(srcPath)
+	localDir := filepath.Join(destDir, "local")
+	destPath := filepath.Join(localDir, filename)
+	if _, err := os.Stat(destPath); err == nil {
+		return "", errAlreadyExists
+	}
+	if ds := h.getDownload(filename); ds != nil {
+		return "", errAlreadyExists
+	}
+
+	groupName := uikit.FormatModelName(stripQuant(filename))
+	ctx, cancel := context.WithCancel(context.Background())
+	ds := h.addDownload("local", filename, cancel)
+	ds.GroupName = groupName
+	ds.Total = srcInfo.Size()
+
+	h.logger.Info().Str("src", srcPath).Str("dest", destPath).Msg("starting model import")
+	h.broker.Broadcast(SSEEvent{
+		Type:        EventTypeDownload,
+		AppName:     "__mass__",
+		DlFilename:  filename,
+		DlRepoID:    "local",
+		DlGroupName: groupName,
+		DlStart:     true,
+	})
+	go h.runImport(ctx, ds, srcPath, localDir, destPath)
+	return "local/" + strings.TrimSuffix(filename, filepath.Ext(filename)), nil
+}
+
+// handleImportModel is the UI wrapper for importModelFile.
 func (h *Handler) handleImportModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -861,62 +930,20 @@ func (h *Handler) handleImportModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
-
-	destDir := h.modelsDir()
-	if destDir == "" {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "data directory not configured"})
+	if _, err := h.importModelFile(req.Path); err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errModelNotFound):
+			status = http.StatusBadRequest
+		case errors.Is(err, errInvalidModelPath):
+			status = http.StatusBadRequest
+		case errors.Is(err, errAlreadyExists):
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
-
-	// Validate source file exists and is a regular file.
-	srcInfo, err := os.Stat(req.Path)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file not found: " + req.Path})
-		return
-	}
-	if srcInfo.IsDir() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is a directory, not a file"})
-		return
-	}
-
-	filename := filepath.Base(req.Path)
-	localDir := filepath.Join(destDir, "local")
-
-	// Check if file already exists at destination.
-	destPath := filepath.Join(localDir, filename)
-	if _, err := os.Stat(destPath); err == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "model already exists: local/" + filename})
-		return
-	}
-
-	// Check for existing active import/download for this filename.
-	if ds := h.getDownload(filename); ds != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "import already in progress for " + filename})
-		return
-	}
-
-	groupName := uikit.FormatModelName(stripQuant(filename))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	ds := h.addDownload("local", filename, cancel)
-	ds.GroupName = groupName
-	ds.Total = srcInfo.Size()
-
-	h.logger.Info().Str("src", req.Path).Str("dest", destPath).Msg("starting model import")
-
-	// Broadcast start event so the UI inserts a progress row.
-	h.broker.Broadcast(SSEEvent{
-		Type:        EventTypeDownload,
-		ModuleName:  "__mass__",
-		DlFilename:  filename,
-		DlRepoID:    "local",
-		DlGroupName: groupName,
-		DlStart:     true,
-	})
-
-	go h.runImport(ctx, ds, req.Path, localDir, destPath)
-
-	writeJSON(w, http.StatusOK, map[string]string{"filename": filename})
+	writeJSON(w, http.StatusOK, map[string]string{"filename": filepath.Base(req.Path)})
 }
 
 // runImport copies a local file into the models directory with progress updates.
@@ -927,7 +954,7 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 		h.removeDownload(ds.Filename)
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
@@ -940,13 +967,17 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 		h.removeDownload(ds.Filename)
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
 		return
 	}
-	defer func() { _ = src.Close() }()
+	defer func() {
+		if cErr := src.Close(); cErr != nil {
+			h.logger.Warn().Err(cErr).Str("file", ds.Filename).Msg("closing import source")
+		}
+	}()
 
 	// Write to temp file then rename for atomicity.
 	tmpPath := destPath + ".importing"
@@ -956,7 +987,7 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 		h.removeDownload(ds.Filename)
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
@@ -972,12 +1003,16 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 		// Check for cancellation.
 		select {
 		case <-ctx.Done():
-			_ = dst.Close()
-			_ = os.Remove(tmpPath)
+			if cErr := dst.Close(); cErr != nil {
+				h.logger.Warn().Err(cErr).Str("file", tmpPath).Msg("closing import temp on cancel")
+			}
+			if rmErr := os.Remove(tmpPath); rmErr != nil {
+				h.logger.Warn().Err(rmErr).Str("file", tmpPath).Msg("removing import temp on cancel")
+			}
 			h.removeDownload(ds.Filename)
 			h.broker.Broadcast(SSEEvent{
 				Type:        EventTypeDownload,
-				ModuleName:  "__mass__",
+				AppName:     "__mass__",
 				DlFilename:  ds.Filename,
 				DlCancelled: true,
 			})
@@ -988,13 +1023,17 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
-				_ = dst.Close()
-				_ = os.Remove(tmpPath)
+				if cErr := dst.Close(); cErr != nil {
+					h.logger.Warn().Err(cErr).Str("file", tmpPath).Msg("closing import temp after write failure")
+				}
+				if rmErr := os.Remove(tmpPath); rmErr != nil {
+					h.logger.Warn().Err(rmErr).Str("file", tmpPath).Msg("removing import temp after write failure")
+				}
 				h.logger.Error().Err(writeErr).Str("file", ds.Filename).Msg("import write failed")
 				h.removeDownload(ds.Filename)
 				h.broker.Broadcast(SSEEvent{
 					Type:       EventTypeDownload,
-					ModuleName: "__mass__",
+					AppName:    "__mass__",
 					DlFilename: ds.Filename,
 					Error:      writeErr,
 				})
@@ -1012,7 +1051,7 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 					lastPct = pct
 					h.broker.Broadcast(SSEEvent{
 						Type:         EventTypeDownload,
-						ModuleName:   "__mass__",
+						AppName:      "__mass__",
 						DlFilename:   ds.Filename,
 						DlDownloaded: copied,
 						DlTotal:      total,
@@ -1024,13 +1063,17 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 			break
 		}
 		if readErr != nil {
-			_ = dst.Close()
-			_ = os.Remove(tmpPath)
+			if cErr := dst.Close(); cErr != nil {
+				h.logger.Warn().Err(cErr).Str("file", tmpPath).Msg("closing import temp after read failure")
+			}
+			if rmErr := os.Remove(tmpPath); rmErr != nil {
+				h.logger.Warn().Err(rmErr).Str("file", tmpPath).Msg("removing import temp after read failure")
+			}
 			h.logger.Error().Err(readErr).Str("file", ds.Filename).Msg("import read failed")
 			h.removeDownload(ds.Filename)
 			h.broker.Broadcast(SSEEvent{
 				Type:       EventTypeDownload,
-				ModuleName: "__mass__",
+				AppName:    "__mass__",
 				DlFilename: ds.Filename,
 				Error:      readErr,
 			})
@@ -1039,12 +1082,14 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 	}
 
 	if err := dst.Close(); err != nil {
-		_ = os.Remove(tmpPath)
+		if rmErr := os.Remove(tmpPath); rmErr != nil {
+			h.logger.Warn().Err(rmErr).Str("file", tmpPath).Msg("removing import temp after close failure")
+		}
 		h.logger.Error().Err(err).Str("file", ds.Filename).Msg("import close failed")
 		h.removeDownload(ds.Filename)
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
@@ -1053,12 +1098,14 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 
 	// Atomic rename.
 	if err := os.Rename(tmpPath, destPath); err != nil {
-		_ = os.Remove(tmpPath)
+		if rmErr := os.Remove(tmpPath); rmErr != nil {
+			h.logger.Warn().Err(rmErr).Str("file", tmpPath).Msg("removing import temp after rename failure")
+		}
 		h.logger.Error().Err(err).Str("file", ds.Filename).Msg("import rename failed")
 		h.removeDownload(ds.Filename)
 		h.broker.Broadcast(SSEEvent{
 			Type:       EventTypeDownload,
-			ModuleName: "__mass__",
+			AppName:    "__mass__",
 			DlFilename: ds.Filename,
 			Error:      err,
 		})
@@ -1069,7 +1116,7 @@ func (h *Handler) runImport(ctx context.Context, ds *downloadState, srcPath, loc
 	h.removeDownload(ds.Filename)
 	h.broker.Broadcast(SSEEvent{
 		Type:       EventTypeDownload,
-		ModuleName: "__mass__",
+		AppName:    "__mass__",
 		DlFilename: ds.Filename,
 		DlDone:     true,
 		DlPath:     destPath,
@@ -1148,7 +1195,7 @@ func (h *Handler) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 			// Auto-detect vision projector in the model's directory.
 			mmprojPath = config.DetectMmproj(absPath)
 		}
-		cfg := config.ChatModelConfig{
+		cfg := config.LlamaChatConfig{
 			Path:         absPath,
 			ContextSize:  req.ContextSize,
 			BatchSize:    req.BatchSize,
@@ -1158,7 +1205,7 @@ func (h *Handler) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 			MmprojPath:   mmprojPath,
 			ChatTemplate: req.ChatTemplate,
 			CacheType:    req.CacheType,
-		}
+		}.WithDefaults()
 		placement := config.PlacementConfig{
 			GpuLayers:     req.GpuLayers,
 			Threads:       req.Threads,
@@ -1166,12 +1213,12 @@ func (h *Handler) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 			MainGPU:       req.MainGPU,
 			TensorSplit:   req.TensorSplit,
 		}
-		fp, err = h.orch.LoadModel("chat", &cfg, nil, placement, "direct")
+		fp, err = h.orch.LoadModel(cfg, placement, "direct", scheduler.ModeStatic)
 	case "embedding":
-		cfg := config.EmbeddingModelConfig{
+		cfg := config.LlamaEmbeddingConfig{
 			Path:        absPath,
 			ContextSize: req.ContextSize,
-		}
+		}.WithDefaults()
 		placement := config.PlacementConfig{
 			GpuLayers:     req.GpuLayers,
 			Threads:       req.Threads,
@@ -1179,7 +1226,7 @@ func (h *Handler) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 			MainGPU:       req.MainGPU,
 			TensorSplit:   req.TensorSplit,
 		}
-		fp, err = h.orch.LoadModel("embedding", nil, &cfg, placement, "direct")
+		fp, err = h.orch.LoadModel(cfg, placement, "direct", scheduler.ModeStatic)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "type must be 'chat' or 'embedding'"})
 		return
@@ -1197,7 +1244,7 @@ func (h *Handler) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 
 // handleModelsSelect returns HTML for a model selection overlay filtered by type.
 func (h *Handler) handleModelsSelect(w http.ResponseWriter, r *http.Request) {
-	filterType := r.URL.Query().Get("type") // "Chat", "Embedding", or "" for all
+	filterType := strings.ToLower(r.URL.Query().Get("type")) // "chat", "embedding", or "" for all
 
 	dir := h.modelsDir()
 	var models []LocalModelInfo
@@ -1215,10 +1262,10 @@ func (h *Handler) handleModelsSelect(w http.ResponseWriter, r *http.Request) {
 	{
 		var filtered []LocalModelInfo
 		for _, m := range models {
-			if strings.EqualFold(m.ModelType, "mmproj") {
+			if m.ModelType == ModelFileKindMmproj {
 				continue
 			}
-			if filterType != "" && !strings.EqualFold(m.ModelType, filterType) {
+			if filterType != "" && string(m.ModelType) != filterType {
 				continue
 			}
 			filtered = append(filtered, m)
@@ -1227,7 +1274,7 @@ func (h *Handler) handleModelsSelect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(RenderModelSelectOverlay(models, filterType)))
+	mustHTTPWrite(w, []byte(RenderModelSelectOverlay(models, filterType)))
 }
 
 // RenderModelSelectOverlay renders HTML for a model selection overlay.
@@ -1257,8 +1304,8 @@ func RenderModelSelectOverlay(models []LocalModelInfo, filterType string) string
 				displayName = parts[0] + "/" + m.Filename
 			}
 			fmt.Fprintf(&b, `<div class="flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer" data-filename="%s" data-model-type="%s" data-model-id="%s" `,
-				html.EscapeString(displayName), strings.ToLower(m.ModelType), html.EscapeString(m.ModelID))
-			fmt.Fprintf(&b, `onclick="window.__massSelectModel('%s','%s')"`, jsStringEscape(m.ModelID), strings.ToLower(m.ModelType))
+				html.EscapeString(displayName), m.ModelType, html.EscapeString(m.ModelID))
+			fmt.Fprintf(&b, `onclick="window.__massSelectModel('%s','%s')"`, jsStringEscape(m.ModelID), m.ModelType)
 			b.WriteString(`>`)
 			if quant != "" {
 				fmt.Fprintf(&b, `<span class="mass-badge-alt font-mono text-xs font-bold rounded px-1.5 py-0.5" style="min-width:4.5rem;text-align:center">%s</span>`, quant)
@@ -1266,15 +1313,15 @@ func RenderModelSelectOverlay(models []LocalModelInfo, filterType string) string
 				b.WriteString(`<span style="min-width:4.5rem;flex-shrink:0"></span>`)
 			}
 			badgeCls := "mass-badge"
-			switch strings.ToLower(m.ModelType) {
-			case "chat":
+			switch m.ModelType {
+			case ModelFileKindChat:
 				badgeCls = "mass-badge mass-badge-chat"
-			case "embedding":
+			case ModelFileKindEmbedding:
 				badgeCls = "mass-badge mass-badge-embedding"
-			case "mmproj":
+			case ModelFileKindMmproj:
 				badgeCls = "mass-badge mass-badge-mmproj"
 			}
-			fmt.Fprintf(&b, `<span class="%s font-mono text-xs font-bold rounded px-1.5 py-0.5">%s</span>`, badgeCls, m.ModelType)
+			fmt.Fprintf(&b, `<span class="%s font-mono text-xs font-bold rounded px-1.5 py-0.5">%s</span>`, badgeCls, m.ModelType.Title())
 			if m.HasVision {
 				b.WriteString(`<sl-tooltip content="Vision capable"><sl-icon name="eye" style="font-size:0.85rem;color:var(--sl-color-primary-400)"></sl-icon></sl-tooltip>`)
 			}

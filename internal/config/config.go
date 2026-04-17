@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +18,7 @@ import (
 // DefaultListenAddr is the default HTTP listen address for the web UI.
 const DefaultListenAddr = ":3455"
 
-// LaunchMode controls how a module starts.
+// LaunchMode controls how an app starts.
 type LaunchMode string
 
 const (
@@ -30,8 +29,8 @@ const (
 // DefaultModelIdleTimeout is the default idle timeout for dynamically loaded models.
 const DefaultModelIdleTimeout = 2 * time.Minute
 
-// DefaultModuleIdleTimeout is the default idle timeout for on-demand modules.
-const DefaultModuleIdleTimeout = 5 * time.Second
+// DefaultAppIdleTimeout is the default idle timeout for on-demand apps.
+const DefaultAppIdleTimeout = 5 * time.Second
 
 // DefaultResultTTL is the default TTL for cached inference results.
 const DefaultResultTTL = 24 * time.Hour
@@ -100,24 +99,24 @@ type LoggerConfig struct {
 
 // Config is the unified application configuration.
 type Config struct {
-	ListenAddr        string `yaml:"listen_addr" json:"listen_addr"`
-	AuthToken         string `yaml:"auth_token,omitempty" json:"-"` // Legacy: read from YAML for migration only, never serialized
-	DataDir           string `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
-	Theme             string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
-	DevMode           bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
-	RegistryURL       string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
-	ModelIdleTimeout  string `yaml:"model_idle_timeout,omitempty" json:"model_idle_timeout,omitempty"`   // Idle timeout before evicting dynamic models (e.g. "5m")
-	ModuleIdleTimeout string `yaml:"module_idle_timeout,omitempty" json:"module_idle_timeout,omitempty"` // Idle timeout before stopping on-demand modules (e.g. "5s")
-	ResultTTL         string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`                   // How long to keep inference results for caching (e.g. "24h")
+	ListenAddr       string `yaml:"listen_addr" json:"listen_addr"`
+	AuthToken        string `yaml:"auth_token,omitempty" json:"-" secret:"true"` // Legacy: read from YAML for migration only, never serialized
+	DataDir          string `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
+	Theme            string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
+	DevMode          bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
+	RegistryURL      string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
+	ModelIdleTimeout string `yaml:"model_idle_timeout,omitempty" json:"model_idle_timeout,omitempty"` // Idle timeout before evicting dynamic models (e.g. "5m")
+	AppIdleTimeout   string `yaml:"app_idle_timeout,omitempty" json:"app_idle_timeout,omitempty"`     // Idle timeout before stopping on-demand apps (e.g. "5s")
+	ResultTTL        string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`                 // How long to keep inference results for caching (e.g. "24h")
 
 	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 	TLS    TLSConfig    `yaml:"tls,omitempty" json:"tls,omitempty"`
 
-	// Modules are persisted separately in modules.yml.
-	Modules []ModuleConfig `yaml:"-" json:"-"`
+	// Apps are persisted separately in apps.yml.
+	Apps []AppConfig `yaml:"-" json:"-"`
 }
 
-// TLSConfig holds TLS settings for MASS server and agent communication.
+// TLSConfig holds TLS settings for MASS server and worker communication.
 type TLSConfig struct {
 	// Enabled activates TLS. When false, the server uses plaintext h2c.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
@@ -146,15 +145,15 @@ func (c *Config) EffectiveModelIdleTimeout() time.Duration {
 	return d
 }
 
-// EffectiveModuleIdleTimeout returns the idle timeout for on-demand module shutdown,
-// defaulting to DefaultModuleIdleTimeout if empty or invalid.
-func (c *Config) EffectiveModuleIdleTimeout() time.Duration {
-	if c.ModuleIdleTimeout == "" {
-		return DefaultModuleIdleTimeout
+// EffectiveAppIdleTimeout returns the idle timeout for on-demand app shutdown,
+// defaulting to DefaultAppIdleTimeout if empty or invalid.
+func (c *Config) EffectiveAppIdleTimeout() time.Duration {
+	if c.AppIdleTimeout == "" {
+		return DefaultAppIdleTimeout
 	}
-	d, err := time.ParseDuration(c.ModuleIdleTimeout)
+	d, err := time.ParseDuration(c.AppIdleTimeout)
 	if err != nil {
-		return DefaultModuleIdleTimeout
+		return DefaultAppIdleTimeout
 	}
 	return d
 }
@@ -180,41 +179,41 @@ func (c *Config) EffectiveDataDir() (string, error) {
 	return DefaultDataDir()
 }
 
-// FindModule returns the ModuleConfig with the given name, or nil.
-func (c *Config) FindModule(name string) *ModuleConfig {
-	for i := range c.Modules {
-		if c.Modules[i].Name == name {
-			return &c.Modules[i]
+// FindApp returns the AppConfig with the given name, or nil.
+func (c *Config) FindApp(name string) *AppConfig {
+	for i := range c.Apps {
+		if c.Apps[i].Name == name {
+			return &c.Apps[i]
 		}
 	}
 	return nil
 }
 
-// RemoveModule removes a module by name. Returns true if found and removed.
-func (c *Config) RemoveModule(name string) bool {
-	for i := range c.Modules {
-		if c.Modules[i].Name == name {
-			c.Modules = append(c.Modules[:i], c.Modules[i+1:]...)
+// RemoveApp removes an app by name. Returns true if found and removed.
+func (c *Config) RemoveApp(name string) bool {
+	for i := range c.Apps {
+		if c.Apps[i].Name == name {
+			c.Apps = append(c.Apps[:i], c.Apps[i+1:]...)
 			return true
 		}
 	}
 	return false
 }
 
-// ModuleConfig describes a module known to MASS (unified superset).
-type ModuleConfig struct {
+// AppConfig describes an app known to MASS (unified superset).
+type AppConfig struct {
 	Name       string     `yaml:"name" json:"name"`
-	Command    string     `yaml:"command" json:"command"`                   // Command to execute, e.g. "./module" or "python main.py"
-	Config     string     `yaml:"config,omitempty" json:"config,omitempty"` // Config file path passed to module as extra arg
+	Command    string     `yaml:"command" json:"command"`                   // Command to execute, e.g. "./app" or "python main.py"
+	Config     string     `yaml:"config,omitempty" json:"config,omitempty"` // Config file path passed to app as extra arg
 	Source     string     `yaml:"source,omitempty" json:"source,omitempty"` // "local", "url", "github:owner/repo", or registry name
 	Version    string     `yaml:"version,omitempty" json:"version,omitempty"`
-	Debug      bool       `yaml:"debug,omitempty" json:"debug,omitempty"`             // Connect to already-running module via .reattach.json
+	Debug      bool       `yaml:"debug,omitempty" json:"debug,omitempty"`             // Connect to already-running app via .reattach.json
 	AutoStart  bool       `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`   // Start subprocess when MASS launches
 	LaunchMode LaunchMode `yaml:"launch_mode,omitempty" json:"launch_mode,omitempty"` // manual or on_demand
 }
 
 // EffectiveLaunchMode returns the configured launch mode, defaulting to on_demand.
-func (mc *ModuleConfig) EffectiveLaunchMode() LaunchMode {
+func (mc *AppConfig) EffectiveLaunchMode() LaunchMode {
 	if mc.LaunchMode == "" {
 		return LaunchModeOnDemand
 	}
@@ -228,12 +227,20 @@ func Default() *Config {
 			Level:         LogLevel(zerolog.DebugLevel),
 			ConsoleWriter: true,
 		},
-		Modules: []ModuleConfig{},
+		Apps: []AppConfig{},
 	}
 }
 
-// DefaultPath returns the default config file path under os.UserConfigDir().
-func DefaultPath() (string, error) {
+// File names within the MASS config directory.
+const (
+	ConfigFile = "config.yml"
+	AppsFile   = "apps.yml"
+)
+
+// DefaultDir returns the platform-appropriate MASS config directory,
+// creating it if needed (e.g. %APPDATA%/mass on Windows, ~/.config/mass
+// on Linux). Files like ConfigFile and AppsFile live inside it.
+func DefaultDir() (string, error) {
 	cfgDir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("getting user config dir: %w", err)
@@ -242,20 +249,16 @@ func DefaultPath() (string, error) {
 	if err := os.MkdirAll(massDir, 0755); err != nil {
 		return "", fmt.Errorf("creating mass config dir: %w", err)
 	}
-	return filepath.Join(massDir, "config.yml"), nil
+	return massDir, nil
 }
 
-// ModulesPath returns the modules.yml path for a given config.yml path.
-func ModulesPath(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), "modules.yml")
-}
-
-// LogsDir returns the platform-appropriate logs directory.
+// LogsDir returns the platform-appropriate logs directory. configDir is the
+// MASS config directory (used as the fallback root on Windows/unknown).
 //
 //	Windows: {configDir}/logs  (e.g. %APPDATA%/mass/logs)
 //	macOS:   ~/Library/Logs/mass
 //	Linux:   $XDG_STATE_HOME/mass/logs or ~/.local/state/mass/logs
-func LogsDir(configPath string) string {
+func LogsDir(configDir string) string {
 	switch runtime.GOOS {
 	case "darwin":
 		if home, err := os.UserHomeDir(); err == nil {
@@ -269,118 +272,64 @@ func LogsDir(configPath string) string {
 			return filepath.Join(home, ".local", "state", "mass", "logs")
 		}
 	}
-	// Windows and fallback: logs next to config.
-	return filepath.Join(filepath.Dir(configPath), "logs")
+	return filepath.Join(configDir, "logs")
 }
 
-// Load reads the configuration from the specified YAML file and module
-// settings from the sibling modules.yml file. Returns Default() if neither
-// file exists. Also handles migration from legacy gui-config.json.
-// The returned firstRun flag is true when no config file existed on disk.
-func Load(path string) (cfg *Config, firstRun bool, err error) {
-	errCtx := map[string]any{"path": path}
+// Load reads ConfigFile and AppsFile from the given config directory.
+// Returns Default() (with overlay from any existing files) and firstRun=true
+// when no ConfigFile exists on disk.
+func Load(configDir string) (cfg *Config, firstRun bool, err error) {
+	cfgPath := filepath.Join(configDir, ConfigFile)
+	errCtx := map[string]any{"path": cfgPath}
 	cfg = Default()
 
-	data, readErr := os.ReadFile(path)
+	data, readErr := os.ReadFile(cfgPath)
 	if readErr != nil {
 		if !os.IsNotExist(readErr) {
 			return nil, false, ctxerr.With(fmt.Errorf("reading config: %w", readErr), errCtx)
 		}
 		firstRun = true
-		// Try legacy gui-config.json migration.
-		cfg = migrateFromLegacy(filepath.Dir(path), cfg)
-	} else {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, false, ctxerr.With(fmt.Errorf("parsing config: %w", err), errCtx)
-		}
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, false, ctxerr.With(fmt.Errorf("parsing config: %w", err), errCtx)
 	}
 
-	// Load modules from dedicated file.
-	modulesPath := ModulesPath(path)
-	pdata, readErr := os.ReadFile(modulesPath)
+	appsPath := filepath.Join(configDir, AppsFile)
+	pdata, readErr := os.ReadFile(appsPath)
 	if readErr == nil {
-		// Intermediate type to handle migration from legacy fields.
-		type moduleWithLegacy struct {
-			ModuleConfig `yaml:",inline"`
-			Binary       string `yaml:"binary"`
-		}
-		var raw []moduleWithLegacy
-		if err := yaml.Unmarshal(pdata, &raw); err != nil {
-			return nil, false, ctxerr.With(fmt.Errorf("parsing modules config: %w", err), map[string]any{
-				"modules_path": modulesPath,
+		if err := yaml.Unmarshal(pdata, &cfg.Apps); err != nil {
+			return nil, false, ctxerr.With(fmt.Errorf("parsing apps config: %w", err), map[string]any{
+				"apps_path": appsPath,
 			})
-		}
-		cfg.Modules = make([]ModuleConfig, len(raw))
-		for i, r := range raw {
-			cfg.Modules[i] = r.ModuleConfig
-			// Migrate legacy "binary" field to "command".
-			if cfg.Modules[i].Command == "" && r.Binary != "" {
-				cfg.Modules[i].Command = r.Binary
-			}
-			// Migrate legacy launch_mode "auto" → AutoStart + manual.
-			if cfg.Modules[i].LaunchMode == "auto" {
-				cfg.Modules[i].AutoStart = true
-				cfg.Modules[i].LaunchMode = LaunchModeManual
-			}
 		}
 	}
 
 	return cfg, firstRun, nil
 }
 
-// migrateFromLegacy reads the old gui-config.json and extracts settings.
-func migrateFromLegacy(dir string, cfg *Config) *Config {
-	legacyPath := filepath.Join(dir, "gui-config.json")
-	data, err := os.ReadFile(legacyPath)
-	if err != nil {
-		return cfg
-	}
-
-	var legacy struct {
-		ListenAddr string         `json:"listen_addr"`
-		AuthToken  string         `json:"auth_token"`
-		DataDir    string         `json:"data_dir"`
-		Theme      string         `json:"theme"`
-		DevMode    bool           `json:"dev_mode"`
-		Plugins    []ModuleConfig `json:"plugins"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return cfg
-	}
-
-	cfg.ListenAddr = legacy.ListenAddr
-	cfg.AuthToken = legacy.AuthToken
-	cfg.DataDir = legacy.DataDir
-	cfg.Theme = legacy.Theme
-	cfg.DevMode = legacy.DevMode
-	cfg.Modules = legacy.Plugins
-
-	return cfg
-}
-
-// Save writes the configuration to config.yml and module settings
-// to a sibling modules.yml file.
-func Save(cfg *Config, path string) error {
-	errCtx := map[string]any{"path": path}
+// Save writes ConfigFile and AppsFile to the given config directory.
+func Save(cfg *Config, configDir string) error {
+	cfgPath := filepath.Join(configDir, ConfigFile)
+	errCtx := map[string]any{"path": cfgPath}
 
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("marshalling config: %w", err), errCtx)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		return ctxerr.With(fmt.Errorf("writing config: %w", err), errCtx)
 	}
 
-	modulesPath := ModulesPath(path)
-	pdata, err := yaml.Marshal(cfg.Modules)
+	appsPath := filepath.Join(configDir, AppsFile)
+	pdata, err := yaml.Marshal(cfg.Apps)
 	if err != nil {
-		return ctxerr.With(fmt.Errorf("marshalling modules config: %w", err), map[string]any{
-			"modules_path": modulesPath,
+		return ctxerr.With(fmt.Errorf("marshalling apps config: %w", err), map[string]any{
+			"apps_path": appsPath,
 		})
 	}
-	if err := os.WriteFile(modulesPath, pdata, 0644); err != nil {
-		return ctxerr.With(fmt.Errorf("writing modules config: %w", err), map[string]any{
-			"modules_path": modulesPath,
+	if err := os.WriteFile(appsPath, pdata, 0644); err != nil {
+		return ctxerr.With(fmt.Errorf("writing apps config: %w", err), map[string]any{
+			"apps_path": appsPath,
 		})
 	}
 	return nil
@@ -417,19 +366,19 @@ func DefaultDataDir() (string, error) {
 	}
 }
 
-// ModuleInstallDir returns the directory where module binaries are installed.
-func ModuleInstallDir(dataDir string) string {
-	return filepath.Join(dataDir, "modules")
+// AppInstallDir returns the directory where app binaries are installed.
+func AppInstallDir(dataDir string) string {
+	return filepath.Join(dataDir, "apps")
 }
 
-// ModuleDir returns the base directory for a specific module (contains version subdirs).
-func ModuleDir(dataDir, moduleName string) string {
-	return filepath.Join(dataDir, "modules", moduleName)
+// AppDir returns the base directory for a specific app (contains version subdirs).
+func AppDir(dataDir, appName string) string {
+	return filepath.Join(dataDir, "apps", appName)
 }
 
-// ModuleVersionDir returns the install directory for a specific module version.
-func ModuleVersionDir(dataDir, moduleName, version string) string {
-	return filepath.Join(dataDir, "modules", moduleName, version)
+// AppVersionDir returns the install directory for a specific app version.
+func AppVersionDir(dataDir, appName, version string) string {
+	return filepath.Join(dataDir, "apps", appName, version)
 }
 
 // ModelsDir returns the centralized models directory: {dataDir}/models/.
@@ -437,15 +386,10 @@ func ModelsDir(dataDir string) string {
 	return filepath.Join(dataDir, "models")
 }
 
-// ModuleModelsDir returns the models directory for a specific module.
-func ModuleModelsDir(dataDir, moduleName string) string {
-	return filepath.Join(dataDir, "models", moduleName)
-}
-
 // --- Command string helpers ---
 //
 // Command strings may contain paths with spaces. Such paths are stored
-// in double-quoted form (e.g. `"C:\Program Files\mod\mod.exe" --flag`).
+// in double-quoted form (e.g. `"C:\Program Files\app\app.exe" --flag`).
 // SplitCommand splits a command string into tokens respecting double quotes.
 // QuotePath wraps a path in double quotes if it contains spaces.
 
@@ -511,6 +455,10 @@ func ExpandCommandVars(command string, vars map[string]string) string {
 
 // --- Model configs (canonical definitions in pkg/llm, re-exported here) ---
 
-type ChatModelConfig = pkgllm.ChatModelConfig
-type EmbeddingModelConfig = pkgllm.EmbeddingModelConfig
+type LlamaChatConfig = pkgllm.LlamaChatConfig
+type LlamaEmbeddingConfig = pkgllm.LlamaEmbeddingConfig
 type PlacementConfig = pkgllm.PlacementConfig
+
+type ModelConfigInterface = pkgllm.ModelConfigInterface
+type ChatModelConfigInterface = pkgllm.ChatModelConfigInterface
+type EmbeddingModelConfigInterface = pkgllm.EmbeddingModelConfigInterface

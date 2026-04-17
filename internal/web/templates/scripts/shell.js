@@ -23,7 +23,10 @@
   // Persist activeTab to localStorage so page refresh keeps the current tab.
   // Inject saved tab into data-signals before Datastar processes it.
   (function() {
+    var validTabs = {apps:1, models:1, scheduler:1, agents:1, settings:1};
     var saved = localStorage.getItem('mass-active-tab');
+    // Drop unknown values so the server-rendered default ("apps") wins.
+    if (saved && !validTabs[saved]) saved = null;
     if (saved) {
       var el = document.querySelector('[data-signals]');
       if (el) {
@@ -41,7 +44,7 @@
     });
   })();
 
-  // Module search filtering is handled by data-show on each .module-row.
+  // App search filtering is handled by data-show on each .app-row.
 
   // Shared debounced button click: returns a function that, when called,
   // schedules a click on the given button ID after `ms` milliseconds.
@@ -57,20 +60,17 @@
     };
   };
 
-  // Auto-save: debounce 500ms after any input/change inside #module-content.
-  // Module config auto-save: only fires for inputs inside a [data-mass-autosave]
-  // container within #module-content. Modules opt in by adding data-mass-autosave
-  // to their config form wrapper.
-  var triggerModuleSave = window.__massDebouncedClick('pe-autosave-trigger', 500);
+  // Auto-save: debounce 500ms after any input/change inside [data-mass-autosave].
+  var triggerAppSave = window.__massDebouncedClick('pe-autosave-trigger', 500);
   function handleAutoSave(e) {
     if (window.__massInitSync) return;
     if (!e.target.closest('[data-mass-autosave]')) return;
-    triggerModuleSave();
+    triggerAppSave();
   }
   document.addEventListener('input', handleAutoSave);
   document.addEventListener('sl-change', handleAutoSave);
 
-  // Resizable panels — shared logic for modules and settings tabs.
+  // Resizable panels — shared logic for apps and settings tabs.
   // Each entry: [handleId, panelId, barId, minWidth, maxWidth].
   var _resizePanels = [
     ['mass-resize-handle',    'mass-left-panel',      'mass-resize-bar',     270, 700],
@@ -122,7 +122,7 @@
     _dragPanel = null;
   }, true);
 
-  // File browser: used by module UIs via window.__massBrowse(signalName, ext).
+  // File browser: used by app UIs via window.__massBrowse(signalName, ext).
   window.__massBrowse = function(signal, ext) {
     var _selectedPath = '';
     var dlg = document.getElementById('mass-file-browser');
@@ -154,7 +154,7 @@
     });
   };
 
-  // Model select: used by module UIs via window.__massModelSelect(signalName, type).
+  // Model select: used by app UIs via window.__massModelSelect(signalName, type).
   // Opens a dialog with local models filtered by type. Clicking a model sets the signal.
   var _modelSelectSignal = '';
   window.__massModelSelect = function(signal, filterType) {
@@ -167,7 +167,7 @@
     if (inner) inner.innerHTML = '<div class="text-center py-8"><sl-spinner style="font-size:1.5rem;--track-width:3px"></sl-spinner></div>';
     dlg.show();
     // Fetch model list as HTML.
-    var url = '/api/models/select' + (filterType ? '?type=' + encodeURIComponent(filterType) : '');
+    var url = '/api/v1/models/select' + (filterType ? '?type=' + encodeURIComponent(filterType) : '');
     fetch(url).then(function(r) { return r.text(); }).then(function(html) {
       if (inner) inner.innerHTML = html;
       // Wire up debounced search filter.
@@ -209,18 +209,18 @@
     if (dlg) dlg.hide();
   };
 
-  // Deselect module: click on empty space in sidebar or content area.
-  function deselectModule() {
+  // Deselect app: click on empty space in sidebar or content area.
+  function deselectApp() {
     var btn = document.getElementById('mass-deselect-trigger');
     if (btn) btn.click();
   }
   document.addEventListener('click', function(e) {
     var t = e.target;
-    var list = document.getElementById('module-list');
-    var wrapper = document.getElementById('module-content-wrapper');
-    var content = document.getElementById('module-content');
+    var list = document.getElementById('app-list');
+    var wrapper = document.getElementById('app-content-wrapper');
+    var content = document.getElementById('app-content');
     if (t === list || t === wrapper || t === content) {
-      deselectModule();
+      deselectApp();
     }
   });
 
@@ -250,7 +250,7 @@
     }
   });
 
-  // Keep Modules-tab dialogs centered relative to the right content panel.
+  // Keep Apps-tab dialogs centered relative to the right content panel.
   function syncDialogOffset(e) {
     var dlg = e.target.closest('sl-dialog');
     var panel = document.getElementById('mass-left-panel');
@@ -259,7 +259,7 @@
     var hw = handle ? handle.offsetWidth : 0;
     dlg.style.setProperty('--mass-sidebar-w', (panel.offsetWidth + hw) + 'px');
   }
-  ['mass-add-module-dialog', 'mass-confirm-uninstall-dialog', 'mass-file-browser',
+  ['mass-add-app-dialog', 'mass-confirm-uninstall-dialog', 'mass-file-browser',
    'mass-hf-dialog', 'mass-model-select-dialog'].forEach(function(id) {
     var d = document.getElementById(id);
     if (d) d.addEventListener('sl-show', syncDialogOffset);
@@ -274,19 +274,19 @@
   function syncLogs() {
     if (_syncPending) return;
     _syncPending = true;
-    var url = '/api/v1/sync-logs';
-    var row = document.querySelector('.module-row.mass-row-active');
-    if (row && row.dataset.moduleName) {
-      url += '?module=' + encodeURIComponent(row.dataset.moduleName);
+    var url = '/internal/sync-logs';
+    var row = document.querySelector('.app-row.mass-row-active');
+    if (row && row.dataset.appName) {
+      url += '?app=' + encodeURIComponent(row.dataset.appName);
     }
     fetch(url).then(function(r) { return r.json(); }).then(function(data) {
       if (data.sysLog !== undefined) {
         var el = document.getElementById('syslog-entries');
         if (el) { el.innerHTML = data.sysLog; el.scrollTop = el.scrollHeight; }
       }
-      if (data.moduleLog) {
+      if (data.appLog) {
         var el = document.getElementById('log-entries');
-        if (el) { el.innerHTML = data.moduleLog; el.scrollTop = el.scrollHeight; }
+        if (el) { el.innerHTML = data.appLog; el.scrollTop = el.scrollHeight; }
       }
     }).catch(function() {}).finally(function() { _syncPending = false; });
   }
@@ -333,20 +333,20 @@
     return doFilter;
   }
   setupFilter('scheduler-filter-input', 'scheduler-content');
-  var agentsFilterFn = setupFilter('agents-filter-input', 'agents-list', function(total, visible, hasFilter) {
-    var label = document.getElementById('bench-all-agents-label');
-    var btn = document.getElementById('bench-all-agents-btn');
+  var workersFilterFn = setupFilter('workers-filter-input', 'workers-list', function(total, visible, hasFilter) {
+    var label = document.getElementById('bench-all-workers-label');
+    var btn = document.getElementById('bench-all-workers-btn');
     if (label) label.textContent = hasFilter ? 'Benchmark Selected' : 'Benchmark All';
     if (btn) btn.disabled = hasFilter && visible === 0;
   });
-  window.__reapplyAgentsFilter = agentsFilterFn || function() {};
+  window.__reapplyWorkersFilter = workersFilterFn || function() {};
 
-  // Collect visible agent IDs for filtered benchmarking.
-  window.__visibleAgentIds = function() {
+  // Collect visible worker IDs for filtered benchmarking.
+  window.__visibleWorkerIds = function() {
     var ids = [];
-    document.querySelectorAll('#agents-list .agent-card').forEach(function(c) {
+    document.querySelectorAll('#workers-list .worker-card').forEach(function(c) {
       if (c.style.display !== 'none') {
-        var id = (c.id || '').replace('agent-card-', '');
+        var id = (c.id || '').replace('worker-card-', '');
         if (id) ids.push(id);
       }
     });

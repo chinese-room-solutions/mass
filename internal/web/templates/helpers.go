@@ -13,6 +13,7 @@ import (
 
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
+	"github.com/chinese-room-solutions/mass/pkg/stats"
 )
 
 var (
@@ -35,17 +36,17 @@ var (
 	modelsTabJS string
 )
 
-// fileBrowserScript is the shared file browser logic used by both the module
+// fileBrowserScript is the shared file browser logic used by both the app
 // file picker and the settings directory picker. Must load before shellScripts.
 var fileBrowserScript string
 
 // shellScripts contains the inline JS for the main shell:
-// module search filter, auto-save debounce, and resizable left panel.
+// app search filter, auto-save debounce, and resizable left panel.
 var shellScripts string
 
 // settingsAutoSaveScript adds debounced auto-save for settings inputs.
 // Datastar's data-on:sl-change doesn't work with Shoelace custom events,
-// so we use a global event listener (same pattern as module config auto-save).
+// so we use a global event listener (same pattern as app config auto-save).
 var settingsAutoSaveScript string
 
 // settingsBrowseScript is the inline JS for the directory browser dialog on the Settings page.
@@ -70,27 +71,28 @@ func init() {
 
 // DashboardData holds all data needed to render the main dashboard shell.
 type DashboardData struct {
-	Modules           []ModuleViewData
-	ActiveModule      string
-	ListenAddr        string
-	DataDir           string
-	AuthTokenSet      bool
-	ModelIdleTimeout  string // idle timeout for dynamic model eviction (e.g. "5m")
-	ModuleIdleTimeout string // idle timeout for on-demand module shutdown (e.g. "5s")
-	LogLevel          string // zerolog level name (e.g. "debug", "info")
-	Theme             string // "dark" or "light"
-	DevMode           bool
-	ConfigDir         string // directory containing config.yml (shown on Settings tab)
-	LogsDir           string // path to logs directory (shown on Settings tab)
-	AgentsHTML        string // pre-rendered agents list for initial page load
-	TLSEnabled        bool
-	TLSCertFile       string
+	Apps             []AppViewData
+	ActiveApp        string
+	ListenAddr       string
+	DataDir          string
+	AuthTokenSet     bool
+	ModelIdleTimeout string // idle timeout for dynamic model eviction (e.g. "5m")
+	AppIdleTimeout   string // idle timeout for on-demand app shutdown (e.g. "5s")
+	ResultTTL        string // how long to keep cached inference results (e.g. "24h")
+	LogLevel         string // zerolog level name (e.g. "debug", "info")
+	Theme            string // "dark" or "light"
+	DevMode          bool
+	ConfigDir        string // directory containing config.yml (shown on Settings tab)
+	LogsDir          string // path to logs directory (shown on Settings tab)
+	AgentsHTML       string // pre-rendered agents list for initial page load
+	TLSEnabled       bool
+	TLSCertFile      string
 }
 
-// ModuleViewData holds template data for a single module.
-type ModuleViewData struct {
+// AppViewData holds template data for a single app.
+type AppViewData struct {
 	Name       string
-	State      scheduler.ModuleState
+	State      scheduler.AppState
 	Version    string
 	Error      error
 	LaunchMode config.LaunchMode
@@ -124,10 +126,10 @@ type SchedulerInstanceView struct {
 	Path        string
 	Filename    string   // base filename extracted from Path
 	Type        string   // "Chat" or "Embedding"
-	Source      string   // caller identity: "direct", "module: <name>", or custom value
+	Source      string   // caller identity: "direct", "app: <name>", or custom value
 	Mode        string   // "dynamic" or "static"
-	AgentID     string   // ID of the agent running this model
-	AgentName   string   // human-readable name of the agent
+	WorkerID    string   // ID of the agent running this model
+	WorkerName  string   // human-readable name of the agent
 	DeviceIDs   []string // device(s) the model is loaded on
 	ActiveReqs  int64
 	Status      string // "Active", "Idle", or "Loading"
@@ -141,8 +143,8 @@ type SchedulerInstancePropsView struct {
 	Type        string // "Chat" or "Embedding"
 	Source      string
 	Mode        string   // "dynamic" or "static"
-	AgentID     string   // ID of the agent running this model
-	AgentName   string   // human-readable name of the agent
+	WorkerID    string   // ID of the agent running this model
+	WorkerName  string   // human-readable name of the agent
 	DeviceIDs   []string // device(s) the model is loaded on
 	Status      string
 	ActiveReqs  int64
@@ -176,12 +178,11 @@ func dashboardSignals(data DashboardData) string {
 		theme = "dark"
 	}
 	signals := map[string]any{
-		"activeTab":        "modules",
-		"activeModule":     data.ActiveModule,
-		"moduleView":       "ui",
+		"activeTab":        "apps",
+		"activeApp":        data.ActiveApp,
 		"sidebarCollapsed": false,
-		"moduleSearch":     "",
-		"addModuleOpen":    false,
+		"appSearch":        "",
+		"addAppOpen":       false,
 		"confirmOpen":      false,
 		"confirmUninstall": "",
 		"packagePath":      "",
@@ -206,13 +207,14 @@ func dashboardSignals(data DashboardData) string {
 		"confirmDeleteModelName": "",
 		"selectedSchedulerFp":    "",
 		"modelIdleTimeout":       data.ModelIdleTimeout,
-		"moduleIdleTimeout":      data.ModuleIdleTimeout,
+		"appIdleTimeout":         data.AppIdleTimeout,
+		"resultTtl":              data.ResultTTL,
 		"logLevel":               data.LogLevel,
 		"tlsEnabled":             data.TLSEnabled,
 		"tlsCertFile":            data.TLSCertFile,
 	}
-	// Per-module debug signals.
-	for _, p := range data.Modules {
+	// Per-app debug signals.
+	for _, p := range data.Apps {
 		signals["debug_"+p.Name] = p.Debug
 	}
 	b, err := json.Marshal(signals)
@@ -254,7 +256,7 @@ func initial(name string) string {
 }
 
 // statusDotClass returns Tailwind classes for the status dot.
-func statusDotClass(state scheduler.ModuleState, launchMode config.LaunchMode) string {
+func statusDotClass(state scheduler.AppState, launchMode config.LaunchMode) string {
 	base := "w-2.5 h-2.5 rounded-full flex-shrink-0"
 	switch state {
 	case scheduler.StateRunning:
@@ -271,8 +273,8 @@ func statusDotClass(state scheduler.ModuleState, launchMode config.LaunchMode) s
 	}
 }
 
-// statusBadgeVariant returns the Shoelace badge variant for a module state.
-func statusBadgeVariant(state scheduler.ModuleState) string {
+// statusBadgeVariant returns the Shoelace badge variant for a app state.
+func statusBadgeVariant(state scheduler.AppState) string {
 	switch state {
 	case scheduler.StateRunning:
 		return "success"
@@ -293,10 +295,10 @@ func RenderError(msg string) string {
 	)
 }
 
-// RenderModuleStatus returns HTML for the module status area (used by SSE updates).
-func RenderModuleStatus(name string, state scheduler.ModuleState, err error, progress string) string {
+// RenderAppStatus returns HTML for the app status area (used by SSE updates).
+func RenderAppStatus(name string, state scheduler.AppState, err error, progress string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, `<div id="module-status-%s" class="flex items-center gap-2">`, html.EscapeString(name))
+	fmt.Fprintf(&b, `<div id="app-status-%s" class="flex items-center gap-2">`, html.EscapeString(name))
 	fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`,
 		statusBadgeVariant(state), html.EscapeString(state.String()))
 	if progress != "" {
@@ -310,7 +312,7 @@ func RenderModuleStatus(name string, state scheduler.ModuleState, err error, pro
 }
 
 // RenderSidebarDot returns HTML for the status dot (SSE update).
-func RenderSidebarDot(name string, state scheduler.ModuleState, launchMode config.LaunchMode) string {
+func RenderSidebarDot(name string, state scheduler.AppState, launchMode config.LaunchMode) string {
 	return fmt.Sprintf(
 		`<span id="sidebar-dot-%s" class="%s absolute -bottom-0.5 -right-0.5 border border-neutral-900"></span>`,
 		html.EscapeString(name), statusDotClass(state, launchMode))
@@ -346,37 +348,37 @@ func launchModeTooltip(mode config.LaunchMode) string {
 	}
 }
 
-// RenderLaunchModeDropdown returns the launch mode dropdown HTML for a module.
+// RenderLaunchModeDropdown returns the launch mode dropdown HTML for a app.
 func RenderLaunchModeDropdown(name string, mode config.LaunchMode) string {
 	var buf bytes.Buffer
 	_ = launchModeDropdown(name, mode).Render(context.Background(), &buf)
 	return buf.String()
 }
 
-// RenderModuleActions returns the Start/Stop icon button area with a stable ID
+// RenderAppActions returns the Start/Stop icon button area with a stable ID
 // so it can be patched independently via SSE status events.
-// Delegates to the moduleActionIcons templ component as the single source of truth.
-func RenderModuleActions(name string, state scheduler.ModuleState) string {
+// Delegates to the appActionIcons templ component as the single source of truth.
+func RenderAppActions(name string, state scheduler.AppState) string {
 	var buf bytes.Buffer
-	_ = moduleActionIcons(name, state).Render(context.Background(), &buf)
-	return fmt.Sprintf(`<div id="module-actions-%s" class="flex items-center justify-center" style="min-width:2rem">`,
+	_ = appActionIcons(name, state).Render(context.Background(), &buf)
+	return fmt.Sprintf(`<div id="app-actions-%s" class="flex items-center justify-center" style="min-width:2rem">`,
 		html.EscapeString(name)) + buf.String() + `</div>`
 }
 
-// RenderWelcomeState returns the welcome/empty state HTML for #module-content.
-// When empty is true, it shows "No modules configured"; otherwise "Select a module".
+// RenderWelcomeState returns the welcome/empty state HTML for #app-content.
+// When empty is true, it shows "No apps installed"; otherwise "Select an app".
 func RenderWelcomeState(empty bool) string {
-	heading := "Select a module"
-	subtext := "Choose a module from the sidebar, or install a new one."
+	heading := "Select an app"
+	subtext := "Choose an app from the sidebar, or install a new one."
 	if empty {
-		heading = "No modules configured"
-		subtext = "Add a module to get started."
+		heading = "No apps installed"
+		subtext = "Install an app to get started."
 	}
 	return `<div class="flex flex-col items-center justify-center h-64 text-center">` +
 		`<h2 class="text-lg font-semibold mb-2">` + heading + `</h2>` +
 		`<p class="text-neutral-400 text-sm mb-4">` + subtext + `</p>` +
-		`<sl-button variant="primary" size="small" data-on:click="$addModuleOpen = true">` +
-		`<sl-icon slot="prefix" name="plus-lg"></sl-icon>Install New Module</sl-button></div>`
+		`<sl-button variant="primary" size="small" data-on:click="$addAppOpen = true">` +
+		`<sl-icon slot="prefix" name="plus-lg"></sl-icon>Install New App</sl-button></div>`
 }
 
 // RenderRestartNotice returns the yellow restart-needed banner for pe-restart-notice.
@@ -384,7 +386,7 @@ func RenderRestartNotice() string {
 	return `<div id="pe-restart-notice">` +
 		`<sl-alert variant="warning" open style="--sl-spacing-large:0.5rem;font-size:0.8rem">` +
 		`<sl-icon slot="icon" name="exclamation-triangle" style="font-size:1rem"></sl-icon>` +
-		`Configuration saved. Restart the module to apply changes.` +
+		`Configuration saved. Restart the app to apply changes.` +
 		`</sl-alert></div>`
 }
 
@@ -431,12 +433,9 @@ func logLevelColor(line string) string {
 	return "var(--mass-log-inf)" // default green
 }
 
-// renderStructuredLogLine renders a plain-text structured log line
-// (timestamp LEVEL message key=value...) with colored parts:
-// - timestamp: dim gray
-// - level token: colored by severity
-// - message: white
-// - key=value pairs: dim cyan keys, neutral values
+// renderStructuredLogLine colors a plain-text structured log line
+// "timestamp LEVEL message key=value...": dim gray timestamp, severity-
+// colored level, white message, dim cyan keys, neutral values.
 func renderStructuredLogLine(raw string) string {
 	esc := html.EscapeString
 
@@ -530,7 +529,7 @@ func RenderLogLine(raw string) string {
 }
 
 // RenderLogView returns the HTML for the live log stream view.
-// The caller patches this into #module-content using inner mode.
+// The caller patches this into #app-content using inner mode.
 // If history is non-empty, the buffered lines are pre-rendered instead of
 // the "Waiting for log output..." placeholder.
 func RenderLogView(name string, history []string) string {
@@ -564,22 +563,22 @@ obs.observe(el,{childList:true})})();
 }
 
 // RenderSystemLogLine renders a MASS system log line (console-formatted with ANSI codes)
-// into an HTML <p> element. Uses the same ANSI parser as module logs.
+// into an HTML <p> element. Uses the same ANSI parser as app logs.
 func RenderSystemLogLine(raw string) string {
 	return RenderLogLine(raw)
 }
 
-// RenderModuleList returns the outer HTML of #module-list for SSE updates
-// after module discovery or removal.
-// Delegates to the moduleListItems templ component as the single source of truth.
-func RenderModuleList(modules []ModuleViewData, activeModule string) string {
+// RenderAppList returns the outer HTML of #app-list for SSE updates
+// after app discovery or removal.
+// Delegates to the appListItems templ component as the single source of truth.
+func RenderAppList(apps []AppViewData, activeApp string) string {
 	var buf bytes.Buffer
-	_ = moduleListItems(modules, activeModule).Render(context.Background(), &buf)
-	return `<div id="module-list" class="flex-1 overflow-y-auto py-1">` + buf.String() + `</div>`
+	_ = appListItems(apps, activeApp).Render(context.Background(), &buf)
+	return `<div id="app-list" class="flex-1 overflow-y-auto py-1">` + buf.String() + `</div>`
 }
 
-// AgentView holds data for rendering an agent row in the Agents tab.
-type AgentView struct {
+// WorkerView holds data for rendering an agent row in the Workers tab.
+type WorkerView struct {
 	ID          string
 	Name        string
 	Online      bool
@@ -588,12 +587,12 @@ type AgentView struct {
 }
 
 // RenderAgentsList returns the full HTML for the agents list area (with wrapper div).
-func RenderAgentsList(agents []AgentView) string {
-	return `<div id="agents-list" class="space-y-3">` + RenderAgentsListInner(agents) + `</div>`
+func RenderAgentsList(agents []WorkerView) string {
+	return `<div id="workers-list" class="space-y-3">` + RenderAgentsListInner(agents) + `</div>`
 }
 
 // RenderAgentsListInner returns just the inner HTML of the agents list (no wrapper).
-func RenderAgentsListInner(agents []AgentView) string {
+func RenderAgentsListInner(agents []WorkerView) string {
 	var b strings.Builder
 	b.WriteString(`<style>.agent-stats-row{display:grid;font-family:var(--sl-font-mono);grid-template-columns:10ch 6rem 12ch 6rem;align-items:center;gap:0 2rem}.agent-stats-row .bench-val{white-space:nowrap}.agent-stats-row>div.text-xs{text-align:center}</style>`)
 	if len(agents) == 0 {
@@ -609,24 +608,24 @@ func RenderAgentsListInner(agents []AgentView) string {
 			statusText = "Offline"
 		}
 
-		agentIDSafe := html.EscapeString(ag.ID)
+		workerIDSafe := html.EscapeString(ag.ID)
 		// Build filter text: agent name + status + device names/types.
 		filterText := strings.ToLower(ag.Name + " " + statusText)
 		for _, d := range ag.Devices {
-			filterText += " " + strings.ToLower(d.DeviceName+" "+d.Type)
+			filterText += " " + strings.ToLower(d.DeviceName+" "+string(d.Type))
 		}
-		agentCardStyle := ""
+		workerCardStyle := ""
 		if ag.AllDisabled {
-			agentCardStyle = ` style="--mass-border:rgba(133,77,14,0.5)"`
+			workerCardStyle = ` style="--mass-border:rgba(133,77,14,0.5)"`
 		}
-		fmt.Fprintf(&b, `<sl-details class="agent-card" id="agent-card-%s" data-filter-text="%s"%s>`,
-			agentIDSafe, html.EscapeString(filterText), agentCardStyle)
+		fmt.Fprintf(&b, `<sl-details class="worker-card" id="worker-card-%s" data-filter-text="%s"%s>`,
+			workerIDSafe, html.EscapeString(filterText), workerCardStyle)
 		b.WriteString(`<div slot="summary" class="flex items-center gap-3 w-full">`)
 		fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon name="%s" style="font-size:0.5rem;color:%s"></sl-icon></sl-tooltip>`, statusText, statusIcon, statusColor)
 		fmt.Fprintf(&b, `<span class="text-sm font-medium" style="color:var(--mass-text)">%s</span>`, html.EscapeString(ag.Name))
 		fmt.Fprintf(&b, `<span class="text-xs text-neutral-500 ml-auto mr-2">%d device(s)</span>`, len(ag.Devices))
 		if ag.Online && len(ag.Devices) > 0 {
-			agentID := html.EscapeString(ag.ID)
+			workerID := html.EscapeString(ag.ID)
 			agToggleIcon := "toggle2-on"
 			agToggleColor := "var(--sl-color-success-500)"
 			agToggleTip := "Pause all devices"
@@ -635,13 +634,15 @@ func RenderAgentsListInner(agents []AgentView) string {
 				agToggleColor = "var(--sl-color-neutral-500)"
 				agToggleTip = "Resume all devices"
 			}
-			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button name="%s" style="font-size:1.2rem;color:%s" `+
-				`onclick="event.stopPropagation();fetch('/api/agents/toggle?agent=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
-				agToggleTip, agToggleIcon, agToggleColor, url.QueryEscape(agentID))
+			// See devtog comment below: id includes icon state so morphdom
+			// replaces instead of attr-patching the sl-icon-button.
+			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button id="workertog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
+				`onclick="event.stopPropagation();fetch('/internal/workers/toggle?worker=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
+				agToggleTip, workerIDSafe, agToggleIcon, agToggleIcon, agToggleColor, url.QueryEscape(workerID))
 			fmt.Fprintf(&b, `<sl-button size="small" variant="text" id="bench-all-%s" `+
 				`onclick="event.stopPropagation()" `+
-				`data-on:click="@post('/api/agents/benchmark?agentIds=%s')">`,
-				agentID, agentID)
+				`data-on:click="@post('/internal/workers/benchmark?workerIds=%s')">`,
+				workerID, workerID)
 			b.WriteString(`<sl-icon slot="prefix" name="speedometer2"></sl-icon>Bench All</sl-button>`)
 		}
 		b.WriteString(`</div>`)
@@ -654,25 +655,28 @@ func RenderAgentsListInner(agents []AgentView) string {
 			icon := "cpu"
 			iconColor := "var(--mass-blue)"
 			badgeVariant := "primary"
-			if d.Type == "GPU" {
+			if d.Type == stats.DeviceTypeGPU {
 				icon = "gpu-card"
 				iconColor = "var(--mass-green)"
 				badgeVariant = "success"
 			}
 			// Prefix device IDs with agent ID to ensure uniqueness across agents.
-			scopedID := agentIDSafe + "_" + html.EscapeString(d.DeviceID)
+			scopedID := workerIDSafe + "_" + html.EscapeString(d.DeviceID)
 			devIDSafe := scopedID
 			cardBorder := "border-neutral-800"
 			if !d.Enabled {
 				cardBorder = "border-yellow-900/50"
 			}
-			fmt.Fprintf(&b, `<div class="bg-neutral-900 rounded-lg border %s p-3 mb-2 space-y-2">`, cardBorder)
+			fmt.Fprintf(&b, `<div class="relative bg-neutral-900 rounded-lg border %s p-3 mb-2 space-y-2">`, cardBorder)
+			// Device ID overlay in the bottom-right corner — useful for matching
+			// "loaded on gpu:0" in the Loaded Models panel to a physical device.
+			fmt.Fprintf(&b, `<span class="absolute bottom-1.5 right-2 text-xs text-neutral-500 font-mono pointer-events-none">%s</span>`, html.EscapeString(d.DeviceID))
 
 			// Header row: icon + name + badge + toggle + bench button.
 			b.WriteString(`<div class="flex items-center gap-3">`)
 			fmt.Fprintf(&b, `<sl-icon name="%s" style="font-size:1.1rem;color:%s"></sl-icon>`, icon, iconColor)
 			fmt.Fprintf(&b, `<span class="text-sm font-medium text-white">%s</span>`, html.EscapeString(d.DeviceName))
-			fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`, badgeVariant, html.EscapeString(d.Type))
+			fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`, badgeVariant, html.EscapeString(string(d.Type)))
 			b.WriteString(`<span class="ml-auto"></span>`)
 			devToggleIcon := "toggle2-on"
 			devToggleColor := "var(--sl-color-success-500)"
@@ -682,10 +686,15 @@ func RenderAgentsListInner(agents []AgentView) string {
 				devToggleColor = "var(--sl-color-neutral-500)"
 				devToggleTip = "Resume scheduling"
 			}
-			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button name="%s" style="font-size:1.2rem;color:%s" `+
-				`onclick="event.stopPropagation();fetch('/api/agents/devices/toggle?queue=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
-				devToggleTip, devToggleIcon, devToggleColor, url.QueryEscape(d.QueueName))
-			fmt.Fprintf(&b, `<sl-button size="small" variant="text" data-on:click="@post('/api/agents/benchmark?agentIds=%s&deviceIds=%s')">`,
+			// ID includes the icon name so the DOM morpher treats an on→off
+			// transition as a replacement rather than an in-place attribute
+			// update. Shoelace's sl-icon-button caches its SVG; mutating the
+			// `name` attribute on the same element sometimes fails to refresh
+			// the rendered icon.
+			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button id="devtog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
+				`onclick="event.stopPropagation();fetch('/internal/workers/devices/toggle?queue=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
+				devToggleTip, devIDSafe, devToggleIcon, devToggleIcon, devToggleColor, url.QueryEscape(d.QueueName))
+			fmt.Fprintf(&b, `<sl-button size="small" variant="text" data-on:click="@post('/internal/workers/benchmark?workerIds=%s&deviceIds=%s')">`,
 				html.EscapeString(ag.ID), html.EscapeString(d.DeviceID))
 			b.WriteString(`<sl-icon slot="prefix" name="speedometer2"></sl-icon>Bench</sl-button>`)
 			b.WriteString(`</div>`)
@@ -703,7 +712,7 @@ func RenderAgentsListInner(agents []AgentView) string {
 
 					// Memory bandwidth.
 					memTip := "RAM throughput (ggml device-local add)"
-					if d.Type == "GPU" {
+					if d.Type == stats.DeviceTypeGPU {
 						memTip = "VRAM throughput (ggml device-local add)"
 					}
 					b.WriteString(`<div class="text-xs">`)
@@ -718,7 +727,7 @@ func RenderAgentsListInner(agents []AgentView) string {
 
 					// Memory gauge (always emit a grid item for alignment).
 					memLabel := "RAM"
-					if d.Type == "GPU" {
+					if d.Type == stats.DeviceTypeGPU {
 						memLabel = "VRAM"
 					}
 					if d.HasStats && d.MemoryMB > 0 {
@@ -748,7 +757,7 @@ func RenderAgentsListInner(agents []AgentView) string {
 					// Utilization gauge (always emit a grid item for alignment).
 					if d.HasUtilization {
 						computeLabel := "CPU"
-						if d.Type == "GPU" {
+						if d.Type == stats.DeviceTypeGPU {
 							computeLabel = "GPU"
 						}
 						pct := d.UtilizationPct
@@ -778,7 +787,7 @@ func RenderAgentsListInner(agents []AgentView) string {
 type ComputeView struct {
 	DeviceID       string
 	DeviceName     string
-	Type           string  // "CPU" or "GPU"
+	Type           stats.DeviceType
 	MemoryMB       int     // total RAM/VRAM in MB (0 = unknown)
 	UsedMemoryMB   int     // currently used RAM/VRAM in MB (0 = unknown)
 	UtilizationPct float64 // 0-100, compute utilization
@@ -794,7 +803,7 @@ type ComputeView struct {
 
 // writeGauge renders an SVG ring gauge with a label, percentage, and subtitle.
 // The ring uses stroke-dashoffset for the fill arc. Animation is handled by JS
-// after DOM patching (see patchAgentsList ExecuteScript).
+// after DOM patching (see patchWorkersList ExecuteScript).
 func writeGauge(b *strings.Builder, id, label string, pct float64, subtitle string) {
 	// SVG ring parameters: radius=28, stroke=5, viewBox 66x66 centered at 33,33.
 	const r = 28

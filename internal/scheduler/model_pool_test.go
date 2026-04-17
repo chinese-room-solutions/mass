@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/chinese-room-solutions/mass/internal/config"
-	"github.com/chinese-room-solutions/mass/internal/llm"
+	"github.com/chinese-room-solutions/mass/pkg/llm"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +20,7 @@ type stubChatModel struct {
 }
 
 func (m *stubChatModel) Pool() llm.PredictorInterface { return nil }
+func (m *stubChatModel) PoolSize() int32              { return 1 }
 func (m *stubChatModel) Close()                       { atomic.AddInt64(&m.closed, 1) }
 func (m *stubChatModel) Closed() bool                 { return atomic.LoadInt64(&m.closed) > 0 }
 
@@ -28,6 +29,7 @@ type stubEmbeddingModel struct {
 }
 
 func (m *stubEmbeddingModel) Pool() llm.EmbedderInterface { return nil }
+func (m *stubEmbeddingModel) PoolSize() int32             { return 1 }
 func (m *stubEmbeddingModel) Close()                      { atomic.AddInt64(&m.closed, 1) }
 func (m *stubEmbeddingModel) Closed() bool                { return atomic.LoadInt64(&m.closed) > 0 }
 
@@ -38,14 +40,14 @@ type stubLoader struct {
 	embedLoadCount int64
 }
 
-func (l *stubLoader) LoadChatModel(_ zerolog.Logger, _ string, _ config.ChatModelConfig, _ config.PlacementConfig) (llm.ChatModelInterface, error) {
+func (l *stubLoader) LoadChatModel(_ zerolog.Logger, _ string, _ llm.ChatModelConfigInterface, _ llm.PlacementConfig) (llm.ChatModelInterface, error) {
 	atomic.AddInt64(&l.chatLoadCount, 1)
 	m := &stubChatModel{}
 	l.chatModel = m
 	return m, nil
 }
 
-func (l *stubLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ config.EmbeddingModelConfig, _ config.PlacementConfig) (llm.EmbeddingModelInterface, error) {
+func (l *stubLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ llm.EmbeddingModelConfigInterface, _ llm.PlacementConfig) (llm.EmbeddingModelInterface, error) {
 	atomic.AddInt64(&l.embedLoadCount, 1)
 	m := &stubEmbeddingModel{}
 	l.embedModel = m
@@ -58,7 +60,7 @@ func TestModelPool_GetOrLoadChat_Reuse(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	_, fp1, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
@@ -76,7 +78,7 @@ func TestModelPool_GetOrLoadEmbedding_Reuse(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+	cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 
 	_, fp1, err := pool.GetOrLoadEmbedding(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
@@ -94,8 +96,8 @@ func TestModelPool_DifferentConfigs(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg1 := config.ChatModelConfig{Path: "/model1.gguf"}
-	cfg2 := config.ChatModelConfig{Path: "/model2.gguf"}
+	cfg1 := config.LlamaChatConfig{Path: "/model1.gguf"}
+	cfg2 := config.LlamaChatConfig{Path: "/model2.gguf"}
 
 	_, fp1, err := pool.GetOrLoadChat(cfg1, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
@@ -114,7 +116,7 @@ func TestModelPool_IdleEviction_Chat(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 50*time.Millisecond)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf"}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf"}
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 
@@ -136,7 +138,7 @@ func TestModelPool_IdleEviction_Embedding(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 50*time.Millisecond)
 
-	cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+	cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 	_, fp, err := pool.GetOrLoadEmbedding(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 
@@ -156,7 +158,7 @@ func TestModelPool_IdleEviction_CancelledByNewRequest(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 200*time.Millisecond)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf"}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf"}
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 
@@ -187,13 +189,179 @@ func TestModelPool_IdleEviction_CancelledByNewRequest(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond)
 }
 
+// TestModelPool_TryEvict_Behavior covers the contract of TryEvict in a
+// table-driven form: it should atomically commit the eviction only when the
+// instance is truly idle (activeReqs==0, not loading, not already draining).
+// Once it commits, subsequent Acquire calls must observe draining and refuse.
+func TestModelPool_TryEvict_Behavior(t *testing.T) {
+	tests := []struct {
+		name           string
+		preAcquire     bool // hold an active req before TryEvict
+		wantEvicted    bool
+		wantRetryWorks bool // Acquire still works (instance gone)
+	}{
+		{
+			name:           "idle instance evicts; subsequent Acquire returns false",
+			preAcquire:     false,
+			wantEvicted:    true,
+			wantRetryWorks: false,
+		},
+		{
+			name:           "busy instance refuses eviction; Acquire still works",
+			preAcquire:     true,
+			wantEvicted:    false,
+			wantRetryWorks: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &stubLoader{}
+			pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
+
+			chatModel := &stubChatModel{}
+			cfg := config.LlamaChatConfig{Path: "/m-" + tt.name + ".gguf"}
+			fp := pool.RegisterChat(ModeDynamic, "direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
+
+			if tt.preAcquire {
+				_, _, ok := pool.AcquireChat(fp)
+				require.True(t, ok)
+			}
+
+			got := pool.TryEvict(fp)
+			require.Equal(t, tt.wantEvicted, got)
+
+			_, _, ok := pool.AcquireChat(fp)
+			require.Equal(t, tt.wantRetryWorks, ok)
+
+			if tt.preAcquire {
+				// Clean up the pre-acquired ref so the test goroutine doesn't leak.
+				pool.Release(fp)
+				if tt.wantRetryWorks {
+					pool.Release(fp)
+				}
+			}
+		})
+	}
+}
+
+// TestModelPool_TryEvict_RaceGuard is the targeted regression for the
+// TOCTOU bug observed in production: a device worker saw CanEvict()=true
+// and proceeded to Evict, but a concurrent (duplicate-redelivered) Acquire
+// snuck in between the check and the eviction, causing CUDA cleanup to
+// happen mid-inference. With the draining flag set under the same lock as
+// the activeReqs==0 final check, an Acquire that loses the race must
+// observe draining and return false.
+func TestModelPool_TryEvict_RaceGuard(t *testing.T) {
+	loader := &stubLoader{}
+	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
+
+	// Run TryEvict and a flurry of AcquireChat calls in parallel many times;
+	// with the draining guard, a successful TryEvict must mean every
+	// concurrent Acquire that observes the draining state returns false. We
+	// don't claim a particular ordering — only that no Acquire ever returns
+	// ok==true after TryEvict commits.
+	const iterations = 200
+	for i := range iterations {
+		// Re-register a fresh instance for each iteration so we test the
+		// race repeatedly against a real pool entry.
+		fpi := pool.RegisterChat(ModeDynamic, "direct", "", config.LlamaChatConfig{Path: fmt.Sprintf("/r%d.gguf", i)}, config.PlacementConfig{}, &stubChatModel{}, "local", "Local")
+
+		var (
+			evicted      atomic.Bool
+			ackAfterEv   atomic.Bool
+			startBarrier = make(chan struct{})
+			evictDone    = make(chan struct{})
+			spammerDone  = make(chan struct{})
+		)
+
+		go func() {
+			defer close(evictDone)
+			<-startBarrier
+			evicted.Store(pool.TryEvict(fpi))
+			// Immediately try to Acquire after the eviction returns; if
+			// TryEvict actually committed, this must fail.
+			_, _, ok := pool.AcquireChat(fpi)
+			ackAfterEv.Store(ok)
+		}()
+
+		go func() {
+			defer close(spammerDone)
+			<-startBarrier
+			// Spam Acquire to maximise overlap with TryEvict. Stop when the
+			// eviction goroutine signals it's done (its post-evict Acquire
+			// has already been captured into ackAfterEv).
+			for {
+				select {
+				case <-evictDone:
+					return
+				default:
+				}
+				if _, _, ok := pool.AcquireChat(fpi); ok {
+					pool.Release(fpi)
+				}
+			}
+		}()
+
+		close(startBarrier)
+		<-evictDone
+		<-spammerDone
+
+		// If eviction committed, no later Acquire could see the instance.
+		if evicted.Load() {
+			require.False(t, ackAfterEv.Load(), "Acquire after TryEvict commits must observe draining and return false (iter %d)", i)
+		}
+		// We don't make assertions about the racing-Acquire goroutine — it
+		// either won the race (and got an ok=true Acquire+Release before
+		// eviction committed) or it lost (every Acquire returned false).
+		// Both outcomes are valid; the bug would be Acquire returning ok=true
+		// AFTER TryEvict's commit, which is what ackAfterEv checks.
+	}
+}
+
+func TestModelPool_RegisterMode_EvictionBehavior(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        InstanceMode
+		idleTimeout time.Duration
+		shouldExist bool // expected to still exist after waiting past idleTimeout
+	}{
+		{"dynamic gets evicted after idle timeout", ModeDynamic, 50 * time.Millisecond, false},
+		{"static survives idle timeout", ModeStatic, 50 * time.Millisecond, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader := &stubLoader{}
+			pool := newModelPool(loader, "local", "Local", zerolog.Nop(), tt.idleTimeout)
+
+			chatModel := &stubChatModel{}
+			cfg := config.LlamaChatConfig{Path: "/m-" + tt.name + ".gguf"}
+			fp := pool.RegisterChat(tt.mode, "direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
+
+			// Acquire then Release to drive the idleTimer setup path —
+			// Register alone does not arm a timer; the timer is armed when
+			// the last in-flight request releases the instance.
+			_, _, ok := pool.AcquireChat(fp)
+			require.True(t, ok)
+			pool.Release(fp)
+
+			// Wait well past the idle timeout.
+			time.Sleep(3 * tt.idleTimeout)
+
+			pool.mu.RLock()
+			_, exists := pool.chatModels[fp]
+			pool.mu.RUnlock()
+			require.Equal(t, tt.shouldExist, exists)
+		})
+	}
+}
+
 func TestModelPool_StaticModels_NotEvicted(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 50*time.Millisecond)
 
 	chatModel := &stubChatModel{}
-	cfg := config.ChatModelConfig{Path: "/user-model.gguf"}
-	fp := pool.RegisterChat("direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
+	cfg := config.LlamaChatConfig{Path: "/user-model.gguf"}
+	fp := pool.RegisterChat(ModeStatic, "direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
 
 	// Release a static (user-loaded) model — should not start idle timer.
 	pool.Release(fp)
@@ -211,7 +379,7 @@ func TestModelPool_ConcurrentGetOrLoad(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 	done := make(chan string, 5)
 
 	for range 5 {
@@ -244,7 +412,7 @@ func TestModelPool_CloseAll_StopsTimers(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf"}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf"}
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 
@@ -264,7 +432,7 @@ func TestModelPool_ZeroIdleTimeout_NoEviction(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 0)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf"}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf"}
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 
@@ -285,7 +453,7 @@ func TestModelPool_ResolverReleaseAll(t *testing.T) {
 	resolver := &modelResolver{pool: pool, source: "direct"}
 
 	// Simulate a dynamic chat request via the resolver.
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	// Manually do what ResolveChat does for model_config path.
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
@@ -315,7 +483,7 @@ func TestModelPool_LoadingStatus_VisibleInSnapshot(t *testing.T) {
 	}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/slow-model.gguf"}
+	cfg := config.LlamaChatConfig{Path: "/slow-model.gguf"}
 
 	// Start loading in background.
 	go func() {
@@ -349,23 +517,23 @@ type slowLoader struct {
 	proceed chan struct{} // LoadChatModel blocks until this is closed
 }
 
-func (l *slowLoader) LoadChatModel(_ zerolog.Logger, _ string, _ config.ChatModelConfig, _ config.PlacementConfig) (llm.ChatModelInterface, error) {
+func (l *slowLoader) LoadChatModel(_ zerolog.Logger, _ string, _ llm.ChatModelConfigInterface, _ llm.PlacementConfig) (llm.ChatModelInterface, error) {
 	close(l.started)
 	<-l.proceed
 	return &stubChatModel{}, nil
 }
 
-func (l *slowLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ config.EmbeddingModelConfig, _ config.PlacementConfig) (llm.EmbeddingModelInterface, error) {
+func (l *slowLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ llm.EmbeddingModelConfigInterface, _ llm.PlacementConfig) (llm.EmbeddingModelInterface, error) {
 	return &stubEmbeddingModel{}, nil
 }
 
-func TestModelPool_ModuleModels_AreDynamic(t *testing.T) {
+func TestModelPool_AppModels_AreDynamic(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), 50*time.Millisecond)
 
-	// Module loads a model via GetOrLoadChat — should be dynamic.
-	cfg := config.ChatModelConfig{Path: "/module-model.gguf"}
-	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "module:testmod")
+	// App loads a model via GetOrLoadChat — should be dynamic.
+	cfg := config.LlamaChatConfig{Path: "/app-model.gguf"}
+	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "app:testmod")
 	require.NoError(t, err)
 
 	pool.mu.RLock()
@@ -373,17 +541,17 @@ func TestModelPool_ModuleModels_AreDynamic(t *testing.T) {
 	pool.mu.RUnlock()
 	require.Equal(t, ModeDynamic, inst.mode)
 
-	// Release — idle timer should start and evict.
+	// Release — idle timer should start and evict. Wait on Closed() rather
+	// than the map removal so the goroutine that drives Close() has time to
+	// run after the chatModels entry disappears.
 	pool.Release(fp)
 
-	require.Eventually(t, func() bool {
-		pool.mu.RLock()
-		defer pool.mu.RUnlock()
-		_, exists := pool.chatModels[fp]
-		return !exists
-	}, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, loader.chatModel.Closed, 3*time.Second, 10*time.Millisecond)
 
-	require.True(t, loader.chatModel.Closed())
+	pool.mu.RLock()
+	_, exists := pool.chatModels[fp]
+	pool.mu.RUnlock()
+	require.False(t, exists)
 }
 
 // slowEmbeddingLoader blocks LoadEmbeddingModel until proceed is closed.
@@ -392,11 +560,11 @@ type slowEmbeddingLoader struct {
 	proceed chan struct{} // LoadEmbeddingModel blocks until this is closed
 }
 
-func (l *slowEmbeddingLoader) LoadChatModel(_ zerolog.Logger, _ string, _ config.ChatModelConfig, _ config.PlacementConfig) (llm.ChatModelInterface, error) {
+func (l *slowEmbeddingLoader) LoadChatModel(_ zerolog.Logger, _ string, _ llm.ChatModelConfigInterface, _ llm.PlacementConfig) (llm.ChatModelInterface, error) {
 	return &stubChatModel{}, nil
 }
 
-func (l *slowEmbeddingLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ config.EmbeddingModelConfig, _ config.PlacementConfig) (llm.EmbeddingModelInterface, error) {
+func (l *slowEmbeddingLoader) LoadEmbeddingModel(_ zerolog.Logger, _ string, _ llm.EmbeddingModelConfigInterface, _ llm.PlacementConfig) (llm.EmbeddingModelInterface, error) {
 	close(l.started)
 	<-l.proceed
 	return &stubEmbeddingModel{}, nil
@@ -414,7 +582,7 @@ func TestModelPool_AcquireChat(t *testing.T) {
 				t.Helper()
 				loader := &stubLoader{}
 				pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
-				cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+				cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 				_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 				require.NoError(t, err)
 				pool.Release(fp)
@@ -439,8 +607,8 @@ func TestModelPool_AcquireChat(t *testing.T) {
 				loader := &slowLoader{started: started, proceed: proceed}
 				pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-				cfg := config.ChatModelConfig{Path: "/slow.gguf"}
-				fp := config.ChatModelFingerprint(cfg)
+				cfg := config.LlamaChatConfig{Path: "/slow.gguf"}
+				fp := cfg.Fingerprint()
 
 				go func() {
 					_, _, _ = pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
@@ -496,7 +664,7 @@ func TestModelPool_AcquireEmbedding(t *testing.T) {
 				t.Helper()
 				loader := &stubLoader{}
 				pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
-				cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+				cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 				_, fp, err := pool.GetOrLoadEmbedding(cfg, config.PlacementConfig{}, "direct")
 				require.NoError(t, err)
 				pool.Release(fp)
@@ -521,8 +689,8 @@ func TestModelPool_AcquireEmbedding(t *testing.T) {
 				loader := &slowEmbeddingLoader{started: started, proceed: proceed}
 				pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-				cfg := config.EmbeddingModelConfig{Path: "/slow-embed.gguf"}
-				fp := config.EmbeddingModelFingerprint(cfg)
+				cfg := config.LlamaEmbeddingConfig{Path: "/slow-embed.gguf"}
+				fp := cfg.Fingerprint()
 
 				go func() {
 					_, _, _ = pool.GetOrLoadEmbedding(cfg, config.PlacementConfig{}, "direct")
@@ -567,7 +735,7 @@ func TestModelPool_AcquireChat_ConcurrentSafe(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 	_, fp, err := pool.GetOrLoadChat(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 	// Release the initial acquisition from GetOrLoadChat so we start clean.
@@ -605,7 +773,7 @@ func TestModelPool_AcquireEmbedding_ConcurrentSafe(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+	cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 	_, fp, err := pool.GetOrLoadEmbedding(cfg, config.PlacementConfig{}, "direct")
 	require.NoError(t, err)
 	pool.Release(fp)
@@ -642,15 +810,15 @@ func TestResolver_GetOrLoadChat_FastPath(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 	chatModel := &stubChatModel{}
-	fp := pool.RegisterChat("direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
+	fp := pool.RegisterChat(ModeStatic, "direct", "", cfg, config.PlacementConfig{}, chatModel, "local", "Local")
 
 	loadCalled := false
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(string, *config.ChatModelConfig, *config.EmbeddingModelConfig, config.PlacementConfig, string) (string, error) {
+		loadModel: func(config.ModelConfigInterface, config.PlacementConfig, string, InstanceMode) (string, error) {
 			loadCalled = true
 			return "", nil
 		},
@@ -678,17 +846,18 @@ func TestResolver_GetOrLoadChat_LoadsViaScheduler(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	// loadModel simulates what Scheduler.LoadModel does: registers the model in
 	// the pool and returns the fingerprint.
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(modelType string, chatCfg *config.ChatModelConfig, _ *config.EmbeddingModelConfig, placement config.PlacementConfig, _ string) (string, error) {
-			require.Equal(t, "chat", modelType)
-			require.NotNil(t, chatCfg)
-			fp := pool.RegisterChat("direct", "", *chatCfg, placement, &stubChatModel{}, "local", "Local")
+		loadModel: func(cfg config.ModelConfigInterface, placement config.PlacementConfig, _ string, _ InstanceMode) (string, error) {
+			require.Equal(t, llm.ModelKindChat, cfg.Kind())
+			chatCfg, ok := cfg.(config.LlamaChatConfig)
+			require.True(t, ok)
+			fp := pool.RegisterChat(ModeStatic, "direct", "", chatCfg, placement, &stubChatModel{}, "local", "Local")
 			return fp, nil
 		},
 	}
@@ -712,7 +881,7 @@ func TestResolver_GetOrLoadChat_Fallback(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	// No loadModel — nil falls back to pool.GetOrLoadChat.
 	r := &modelResolver{
@@ -735,13 +904,13 @@ func TestResolver_GetOrLoadChat_LoadError(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	loadErr := fmt.Errorf("device unavailable")
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(string, *config.ChatModelConfig, *config.EmbeddingModelConfig, config.PlacementConfig, string) (string, error) {
+		loadModel: func(config.ModelConfigInterface, config.PlacementConfig, string, InstanceMode) (string, error) {
 			return "", loadErr
 		},
 	}
@@ -755,13 +924,15 @@ func TestResolver_ReleaseAll_AfterGetOrLoad(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.ChatModelConfig{Path: "/model.gguf", ContextSize: 4096}
+	cfg := config.LlamaChatConfig{Path: "/model.gguf", ContextSize: 4096}
 
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(_ string, chatCfg *config.ChatModelConfig, _ *config.EmbeddingModelConfig, placement config.PlacementConfig, _ string) (string, error) {
-			fp := pool.RegisterChat("direct", "", *chatCfg, placement, &stubChatModel{}, "local", "Local")
+		loadModel: func(cfg config.ModelConfigInterface, placement config.PlacementConfig, _ string, _ InstanceMode) (string, error) {
+			chatCfg, ok := cfg.(config.LlamaChatConfig)
+			require.True(t, ok)
+			fp := pool.RegisterChat(ModeStatic, "direct", "", chatCfg, placement, &stubChatModel{}, "local", "Local")
 			return fp, nil
 		},
 	}
@@ -792,15 +963,16 @@ func TestResolver_GetOrLoadEmbedding_LoadsViaScheduler(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+	cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(modelType string, _ *config.ChatModelConfig, embedCfg *config.EmbeddingModelConfig, placement config.PlacementConfig, _ string) (string, error) {
-			require.Equal(t, "embedding", modelType)
-			require.NotNil(t, embedCfg)
-			fp := pool.RegisterEmbedding("direct", "", *embedCfg, placement, &stubEmbeddingModel{}, "local", "Local")
+		loadModel: func(cfg config.ModelConfigInterface, placement config.PlacementConfig, _ string, _ InstanceMode) (string, error) {
+			require.Equal(t, llm.ModelKindEmbedding, cfg.Kind())
+			embedCfg, ok := cfg.(config.LlamaEmbeddingConfig)
+			require.True(t, ok)
+			fp := pool.RegisterEmbedding(ModeStatic, "direct", "", embedCfg, placement, &stubEmbeddingModel{}, "local", "Local")
 			return fp, nil
 		},
 	}
@@ -822,13 +994,13 @@ func TestResolver_GetOrLoadEmbedding_LoadError(t *testing.T) {
 	loader := &stubLoader{}
 	pool := newModelPool(loader, "local", "Local", zerolog.Nop(), time.Minute)
 
-	cfg := config.EmbeddingModelConfig{Path: "/embed.gguf"}
+	cfg := config.LlamaEmbeddingConfig{Path: "/embed.gguf"}
 
 	loadErr := fmt.Errorf("no VRAM available")
 	r := &modelResolver{
 		pool:   pool,
 		source: "direct",
-		loadModel: func(string, *config.ChatModelConfig, *config.EmbeddingModelConfig, config.PlacementConfig, string) (string, error) {
+		loadModel: func(config.ModelConfigInterface, config.PlacementConfig, string, InstanceMode) (string, error) {
 			return "", loadErr
 		},
 	}

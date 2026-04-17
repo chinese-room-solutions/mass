@@ -51,7 +51,7 @@ CREATE INDEX queue_results_created_at_idx ON queue_results (created_at);
 -- Device queue state (tail tracking for scheduler dispatch).
 CREATE TABLE device_queue_state (
     queue_name  TEXT PRIMARY KEY,
-    agent_id    TEXT NOT NULL,
+    worker_id    TEXT NOT NULL,
     device_ids  TEXT NOT NULL,
     tail_hash   TEXT NOT NULL DEFAULT '',
     tail_length INTEGER NOT NULL DEFAULT 0,
@@ -60,13 +60,13 @@ CREATE TABLE device_queue_state (
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ'))
 );
 
--- Device benchmark results (keyed by agent + device).
+-- Device benchmark results (keyed by worker + device).
 CREATE TABLE device_benchmarks (
-    agent_id        TEXT NOT NULL,
+    worker_id        TEXT NOT NULL,
     device_id       TEXT NOT NULL,
     device_name     TEXT NOT NULL,
     memory_gbs      REAL NOT NULL,
     compute_gflops  REAL NOT NULL DEFAULT 0,
     benched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ')),
-    PRIMARY KEY (agent_id, device_id)
+    PRIMARY KEY (worker_id, device_id)
 );

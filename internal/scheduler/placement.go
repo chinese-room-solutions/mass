@@ -10,42 +10,31 @@ import (
 	"github.com/chinese-room-solutions/mass/internal/store"
 )
 
-const (
-	// affinityWeight scales the tail length bonus when a device queue
-	// already has the same model fingerprint loaded.
-	affinityWeight = 10.0
-
-	// computeBase is the denominator base in the max concurrent formula.
-	// Used with a power law to model sublinear scaling of concurrent slots:
-	//   max_concurrent = floor((GFlops / (modelSizeGB * computeBase)) ^ computeExponent)
-	// Calibrated against known-good concurrency targets:
-	//   RTX 3070 Ti (~1800 GFLOPS, 3GB model) → 3
-	//   RTX 4090   (~10000 GFLOPS, 3GB model) → 10
-	computeBase     = 140.0
-	computeExponent = 0.75
-
-	// maxConcurrentCap is the upper bound for auto-calculated max_concurrent.
-	maxConcurrentCap int32 = 64
-)
-
 // DeviceInfo describes a compute device for placement decisions.
 type DeviceInfo struct {
-	AgentID       string
+	WorkerID      string
 	DeviceID      string
 	TotalMemoryMB int
 	GFlops        float64
 }
 
 // Candidate represents a possible placement for a task.
+//
+// `Manager` is resolved at scoring time inside [Dispatcher.collectCandidates]
+// while the dispatcher lock is held, eliminating the second lookup that
+// could race against worker disconnect. May be nil for candidates produced
+// outside the dispatcher (tests, helper paths) — callers that need the
+// manager must check before using it.
 type Candidate struct {
-	AgentID       string
-	DeviceIDs     []string // single device or multi-device for tensor split
-	QueueName     string
-	GFlops        float64 // min of group for tensor split
-	TotalMemoryMB int     // sum of group
-	TailHash      string
-	TailLength    int
-	LoadedHash    string
+	WorkerID       string
+	DeviceIDs      []string // single device or multi-device for tensor split
+	QueueName      string
+	GFlops         float64 // min of group for tensor split
+	TotalMemoryMB  int     // sum of group
+	TailHash       string
+	TailDifficulty float64 // running sum of difficulty for queued tasks
+	LoadedHash     string
+	Manager        *DeviceQueueManager
 }
 
 // IsCPU returns true if all devices in this candidate are CPU (no GPU offload possible).
@@ -58,47 +47,82 @@ func (c *Candidate) IsCPU() bool {
 	return true
 }
 
-// ScorePlacement computes a placement score for a candidate.
-// Higher score = better placement.
+// ScoreCost estimates how long the candidate would take to complete a fresh
+// task — smaller is better.
 //
-// Three tiers:
-//  1. Matching tail: strongly preferred, longer tails score higher (build longest sequence).
-//  2. Loaded model, empty queue: bonus for avoiding model load cost.
-//  3. No match: prefer the LONGEST non-matching tail — the context switch is deferred
-//     furthest into the future (after all those queued same-model tasks finish),
-//     which means fewer context switches per unit time overall. Shorter tails are
-//     protected because they'd switch sooner, causing more frequent switching.
+//	cost = (queueWait + execTime + swapCost) / GFlops
+//	queueWait = TailDifficulty                  (sum of queued M*I)
+//	execTime  = taskDifficulty = M * I          (this task's heaviness)
+//	swapCost  = M * M, only on a model swap
 //
-// Device power (GFlops) is used as a tiebreaker when scores are equal.
-func ScorePlacement(c Candidate, taskFingerprint string) float64 {
-	if c.TailHash == taskFingerprint {
-		// Build the longest uninterrupted sequence — prefer longer tails.
-		return affinityWeight * float64(c.TailLength+1)
+// The M*M swap term keeps swap and wait/exec dimensionally consistent —
+// all three are bytes × bytes before normalization. Conceptually it treats
+// a model load as a fictitious task that runs the whole model through
+// itself; rough, but in the same units, so the weighting is honest.
+//
+// Swap is decided by the **effective fingerprint**: with a non-empty tail
+// it's the tail's fingerprint (what the device will be running by the time
+// our task reaches the front), otherwise the currently loaded model.
+//
+// Affinity is emergent: matching effective fingerprint → swap cost = 0.
+// No magic constants, no separate "match" / "no match" tiers.
+//
+// GFlops <= 0 (never benchmarked) returns +Inf so it loses to every
+// measured candidate.
+func ScoreCost(c Candidate, taskFingerprint string, taskDifficulty float64, modelSizeBytes uint64) float64 {
+	if c.GFlops <= 0 {
+		return math.Inf(1)
 	}
-	if c.LoadedHash == taskFingerprint && c.TailLength == 0 {
-		// Model is loaded and queue is empty — avoids model load.
-		return affinityWeight * 0.5
+
+	effectiveFP := c.TailHash
+	if effectiveFP == "" {
+		effectiveFP = c.LoadedHash
 	}
-	// No match — prefer longest tail: context switch happens later (after more
-	// same-model tasks drain), avoiding frequent switching on short-tail devices.
-	// Score is always negative (worse than any match) but less negative for longer tails.
-	// The -affinityWeight base ensures non-matches never outscore matches.
-	return -affinityWeight - 1.0/(float64(c.TailLength)+1)
+
+	cost := c.TailDifficulty + taskDifficulty
+	if effectiveFP != taskFingerprint {
+		m := float64(modelSizeBytes)
+		cost += m * m
+	}
+	return cost / c.GFlops
 }
 
-// SelectBestCandidate picks the highest-scoring candidate.
-// On tie, the candidate with higher GFlops wins (stronger device handles tasks faster).
-func SelectBestCandidate(candidates []Candidate, taskFingerprint string) *Candidate {
+// SelectMinCost picks the candidate with the lowest [ScoreCost]. Ties
+// break by:
+//  1. LoadedHash already matches taskFingerprint — reusing a loaded model
+//     beats triggering a swap even when the cost number is the same
+//     (common when modelSizeBytes is unknown or wait dominates swap).
+//  2. Higher GFlops — frees the stronger device sooner for the next task.
+//
+// Returns nil if candidates is empty.
+func SelectMinCost(candidates []Candidate, taskFingerprint string, taskDifficulty float64, modelSizeBytes uint64) *Candidate {
 	if len(candidates) == 0 {
 		return nil
 	}
 	best := 0
-	bestScore := ScorePlacement(candidates[0], taskFingerprint)
+	bestCost := ScoreCost(candidates[0], taskFingerprint, taskDifficulty, modelSizeBytes)
 	for i := 1; i < len(candidates); i++ {
-		score := ScorePlacement(candidates[i], taskFingerprint)
-		if score > bestScore || (score == bestScore && candidates[i].GFlops > candidates[best].GFlops) {
+		cost := ScoreCost(candidates[i], taskFingerprint, taskDifficulty, modelSizeBytes)
+		if cost < bestCost {
 			best = i
-			bestScore = score
+			bestCost = cost
+			continue
+		}
+		if cost > bestCost {
+			continue
+		}
+		// Equal cost: prefer already-loaded match, then higher GFlops.
+		bestLoaded := candidates[best].LoadedHash == taskFingerprint
+		thisLoaded := candidates[i].LoadedHash == taskFingerprint
+		if thisLoaded && !bestLoaded {
+			best = i
+			continue
+		}
+		if !thisLoaded && bestLoaded {
+			continue
+		}
+		if candidates[i].GFlops > candidates[best].GFlops {
+			best = i
 		}
 	}
 	return &candidates[best]
@@ -117,10 +141,10 @@ func FindCandidates(
 		stateByQueue[s.QueueName] = s
 	}
 
-	// Build lookup: agentID → devices.
-	agentDevices := make(map[string][]DeviceInfo)
+	// Build lookup: workerID → devices.
+	workerDevices := make(map[string][]DeviceInfo)
 	for _, d := range devices {
-		agentDevices[d.AgentID] = append(agentDevices[d.AgentID], d)
+		workerDevices[d.WorkerID] = append(workerDevices[d.WorkerID], d)
 	}
 
 	var candidates []Candidate
@@ -128,17 +152,17 @@ func FindCandidates(
 	// Single-device candidates.
 	for _, d := range devices {
 		if int64(d.TotalMemoryMB) >= modelVRAMMB {
-			qn := DeviceQueueName(d.AgentID, d.DeviceID)
+			qn := DeviceQueueName(d.WorkerID, d.DeviceID)
 			st := stateByQueue[qn]
 			candidates = append(candidates, Candidate{
-				AgentID:       d.AgentID,
-				DeviceIDs:     []string{d.DeviceID},
-				QueueName:     qn,
-				GFlops:        d.GFlops,
-				TotalMemoryMB: d.TotalMemoryMB,
-				TailHash:      st.TailHash,
-				TailLength:    st.TailLength,
-				LoadedHash:    st.LoadedHash,
+				WorkerID:       d.WorkerID,
+				DeviceIDs:      []string{d.DeviceID},
+				QueueName:      qn,
+				GFlops:         d.GFlops,
+				TotalMemoryMB:  d.TotalMemoryMB,
+				TailHash:       st.TailHash,
+				TailDifficulty: st.TailDifficulty,
+				LoadedHash:     st.LoadedHash,
 			})
 		}
 	}
@@ -148,7 +172,7 @@ func FindCandidates(
 	}
 
 	// Multi-device candidates (tensor split) — only if no single device fits.
-	for agentID, devs := range agentDevices {
+	for workerID, devs := range workerDevices {
 		// Sort devices by VRAM descending for greedy grouping.
 		sorted := make([]DeviceInfo, len(devs))
 		copy(sorted, devs)
@@ -171,17 +195,17 @@ func FindCandidates(
 			}
 			if int64(totalMB) >= modelVRAMMB {
 				sort.Strings(deviceIDs)
-				qn := DeviceGroupQueueName(agentID, deviceIDs)
+				qn := DeviceGroupQueueName(workerID, deviceIDs)
 				st := stateByQueue[qn]
 				candidates = append(candidates, Candidate{
-					AgentID:       agentID,
-					DeviceIDs:     deviceIDs,
-					QueueName:     qn,
-					GFlops:        minGFlops,
-					TotalMemoryMB: totalMB,
-					TailHash:      st.TailHash,
-					TailLength:    st.TailLength,
-					LoadedHash:    st.LoadedHash,
+					WorkerID:       workerID,
+					DeviceIDs:      deviceIDs,
+					QueueName:      qn,
+					GFlops:         minGFlops,
+					TotalMemoryMB:  totalMB,
+					TailHash:       st.TailHash,
+					TailDifficulty: st.TailDifficulty,
+					LoadedHash:     st.LoadedHash,
 				})
 				break // smallest sufficient group for this agent
 			}
@@ -210,40 +234,6 @@ func CalcTensorSplit(devices []DeviceInfo) string {
 		parts[i] = fmt.Sprintf("%.2f", ratio)
 	}
 	return strings.Join(parts, ",")
-}
-
-// CalcMaxConcurrent computes the optimal max_concurrent value for a model on a device.
-// Compute cap uses a power law to model sublinear scaling:
-//
-//	computeCap = floor((GFlops / (modelSizeGB * computeBase)) ^ computeExponent)
-//
-// VRAM cap: floor((TotalMB - modelSizeMB) / kvCacheMB)
-// Result: min(computeCap, vramCap), clamped to [1, maxConcurrentCap].
-func CalcMaxConcurrent(gflops float64, modelSizeGB float64, totalMB, modelSizeMB, kvCacheMB int) int32 {
-	if gflops <= 0 || modelSizeGB <= 0 {
-		return 1
-	}
-
-	ratio := gflops / (modelSizeGB * computeBase)
-	computeCap := int32(math.Floor(math.Pow(ratio, computeExponent)))
-
-	vramCap := maxConcurrentCap
-	if kvCacheMB > 0 {
-		freeMB := totalMB - modelSizeMB
-		if freeMB <= 0 {
-			return 1
-		}
-		vramCap = int32(freeMB / kvCacheMB)
-	}
-
-	result := min(computeCap, vramCap)
-	if result < 1 {
-		result = 1
-	}
-	if result > maxConcurrentCap {
-		result = maxConcurrentCap
-	}
-	return result
 }
 
 // CalcGpuLayers estimates how many GPU layers fit in available VRAM.
@@ -281,11 +271,11 @@ func FallbackPlacement(modelSizeBytes int64, device DeviceInfo) config.Placement
 }
 
 // DeviceQueueName returns the canonical queue name for a single device.
-func DeviceQueueName(agentID, deviceID string) string {
-	return fmt.Sprintf("device:%s:%s", agentID, deviceID)
+func DeviceQueueName(workerID, deviceID string) string {
+	return fmt.Sprintf("device:%s:%s", workerID, deviceID)
 }
 
 // DeviceGroupQueueName returns the canonical queue name for a multi-device group.
-func DeviceGroupQueueName(agentID string, deviceIDs []string) string {
-	return fmt.Sprintf("device:%s:%s", agentID, strings.Join(deviceIDs, "+"))
+func DeviceGroupQueueName(workerID string, deviceIDs []string) string {
+	return fmt.Sprintf("device:%s:%s", workerID, strings.Join(deviceIDs, "+"))
 }

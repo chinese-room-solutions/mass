@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/chinese-room-solutions/mass/internal/llm"
-	"github.com/chinese-room-solutions/mass/rpc"
+	rpc "github.com/chinese-room-solutions/mass-proto/gen/go"
+	"github.com/chinese-room-solutions/mass/pkg/llm"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -100,11 +100,22 @@ type stubResolver struct {
 	embedder   llm.EmbedderInterface
 }
 
-func (r *stubResolver) ResolveChat(req *rpc.ChatCompletionRequest) (llm.PredictorInterface, string, error) {
-	if m, ok := r.chatModels[req.Model]; ok {
-		return m, req.Model, nil
+// chatModelName extracts the model name from a chat ModelConfig for stub
+// lookup. The runtime resolver computes a fingerprint; the stub keys by
+// the user-visible model field for readability.
+func chatModelName(mc *rpc.ChatModelConfig) string {
+	if mc == nil {
+		return ""
 	}
-	return nil, "", connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown model %s", req.Model))
+	return mc.GetLlama().GetModel()
+}
+
+func (r *stubResolver) ResolveChat(req *rpc.ChatCompletionRequest) (llm.PredictorInterface, string, error) {
+	name := chatModelName(req.ModelConfig)
+	if m, ok := r.chatModels[name]; ok {
+		return m, name, nil
+	}
+	return nil, "", connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown model %s", name))
 }
 
 func (r *stubResolver) ResolveEmbedding(req *rpc.EmbeddingRequest) (llm.EmbedderInterface, string, error) {
@@ -128,6 +139,29 @@ func (r *stubResolver) ResolveTokenize(req *rpc.TokenizeRequest) (llm.PredictorI
 	return nil, "", connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown model %s", req.Model))
 }
 
+// chatCfg is a small builder that wraps a model name into the
+// model_config envelope that all chat-kind requests now require.
+func chatCfg(name string) *rpc.ChatModelConfig {
+	return &rpc.ChatModelConfig{
+		Config: &rpc.ChatModelConfig_Llama{
+			Llama: &rpc.LlamaChatConfig{Model: name},
+		},
+	}
+}
+
+// embedCfg mirrors chatCfg for embedding requests. Returns a config naming
+// the test fixture model so the stub resolver can find it.
+func embedCfg() *rpc.EmbeddingModelConfig {
+	return &rpc.EmbeddingModelConfig{
+		Config: &rpc.EmbeddingModelConfig_Llama{
+			Llama: &rpc.LlamaEmbeddingConfig{Model: "embedding"},
+		},
+	}
+}
+
+// ptr returns a pointer to v — handy for proto3 `optional` scalar fields.
+func ptr[T any](v T) *T { return &v }
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	resolver := &stubResolver{
@@ -145,26 +179,26 @@ func TestChatCompletion(t *testing.T) {
 
 	t.Run("valid request", func(t *testing.T) {
 		resp, err := s.ChatCompletion(context.Background(), connect.NewRequest(&rpc.ChatCompletionRequest{
-			Model: "advert",
+			ModelConfig: chatCfg("advert"),
 			Messages: []*rpc.ChatMessage{
-				{Role: "user", Content: "Hello"},
+				{Role: rpc.Role_ROLE_USER, Content: "Hello"},
 			},
-			MaxTokens: 100,
+			Sampling: &rpc.SamplingParams{MaxTokens: ptr[int32](100)},
 		}))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
 		require.Equal(t, "advert", resp.Msg.Model)
-		require.Equal(t, "assistant", resp.Msg.Message.Role)
+		require.Equal(t, rpc.Role_ROLE_ASSISTANT, resp.Msg.Message.Role)
 		require.Equal(t, "advert response", resp.Msg.Message.Content)
-		require.Equal(t, "stop", resp.Msg.FinishReason)
+		require.Equal(t, rpc.FinishReason_FINISH_REASON_STOP, resp.Msg.FinishReason)
 		require.NotEmpty(t, resp.Msg.Id)
 	})
 
 	t.Run("unknown model", func(t *testing.T) {
 		_, err := s.ChatCompletion(context.Background(), connect.NewRequest(&rpc.ChatCompletionRequest{
-			Model: "nonexistent",
+			ModelConfig: chatCfg("nonexistent"),
 			Messages: []*rpc.ChatMessage{
-				{Role: "user", Content: "Hello"},
+				{Role: rpc.Role_ROLE_USER, Content: "Hello"},
 			},
 		}))
 		require.Error(t, err)
@@ -173,8 +207,8 @@ func TestChatCompletion(t *testing.T) {
 
 	t.Run("empty messages", func(t *testing.T) {
 		_, err := s.ChatCompletion(context.Background(), connect.NewRequest(&rpc.ChatCompletionRequest{
-			Model:    "advert",
-			Messages: nil,
+			ModelConfig: chatCfg("advert"),
+			Messages:    nil,
 		}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "at least one message")
@@ -184,46 +218,37 @@ func TestChatCompletion(t *testing.T) {
 func TestBatchChatCompletion(t *testing.T) {
 	s := newTestServer(t)
 
-	t.Run("multiple requests", func(t *testing.T) {
+	t.Run("multiple items", func(t *testing.T) {
 		resp, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-			Requests: []*rpc.ChatCompletionRequest{
-				{
-					Model:    "advert",
-					Messages: []*rpc.ChatMessage{{Role: "user", Content: "First"}},
-				},
-				{
-					Model:    "resume",
-					Messages: []*rpc.ChatMessage{{Role: "user", Content: "Second"}},
-				},
+			ModelConfig: chatCfg("advert"),
+			Items: []*rpc.BatchChatCompletionItem{
+				{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "First"}}},
+				{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "Second"}}},
 			},
 		}))
 		require.NoError(t, err)
 		require.Len(t, resp.Msg.Responses, 2)
 		require.Equal(t, "advert", resp.Msg.Responses[0].Model)
 		require.Equal(t, "advert response", resp.Msg.Responses[0].Message.Content)
-		require.Equal(t, "resume", resp.Msg.Responses[1].Model)
-		require.Equal(t, "resume response", resp.Msg.Responses[1].Message.Content)
+		require.Equal(t, "advert", resp.Msg.Responses[1].Model)
+		require.Equal(t, "advert response", resp.Msg.Responses[1].Message.Content)
 	})
 
-	t.Run("empty requests", func(t *testing.T) {
+	t.Run("empty items", func(t *testing.T) {
 		_, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-			Requests: nil,
+			ModelConfig: chatCfg("advert"),
+			Items:       nil,
 		}))
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "at least one request")
+		require.Contains(t, err.Error(), "at least one item")
 	})
 
-	t.Run("batch with invalid model", func(t *testing.T) {
+	t.Run("invalid model", func(t *testing.T) {
 		_, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-			Requests: []*rpc.ChatCompletionRequest{
-				{
-					Model:    "advert",
-					Messages: []*rpc.ChatMessage{{Role: "user", Content: "OK"}},
-				},
-				{
-					Model:    "bad",
-					Messages: []*rpc.ChatMessage{{Role: "user", Content: "Fail"}},
-				},
+			ModelConfig: chatCfg("bad"),
+			Items: []*rpc.BatchChatCompletionItem{
+				{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "OK"}}},
+				{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "Fail"}}},
 			},
 		}))
 		require.Error(t, err)
@@ -238,16 +263,16 @@ func TestBatchChatCompletion_Concurrent(t *testing.T) {
 	}
 	s := NewServer(zerolog.Nop(), resolver)
 
-	reqs := make([]*rpc.ChatCompletionRequest, 3)
-	for i := range reqs {
-		reqs[i] = &rpc.ChatCompletionRequest{
-			Model:    "slow",
-			Messages: []*rpc.ChatMessage{{Role: "user", Content: fmt.Sprintf("msg-%d", i)}},
+	items := make([]*rpc.BatchChatCompletionItem, 3)
+	for i := range items {
+		items[i] = &rpc.BatchChatCompletionItem{
+			Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: fmt.Sprintf("msg-%d", i)}},
 		}
 	}
 
 	resp, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-		Requests: reqs,
+		ModelConfig: chatCfg("slow"),
+		Items:       items,
 	}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.Responses, 3)
@@ -258,45 +283,35 @@ func TestBatchChatCompletion_Concurrent(t *testing.T) {
 	}
 
 	// All 3 should have run concurrently — max concurrent must exceed 1.
-	require.Greater(t, pred.maxConc.Load(), int32(1), "requests should execute concurrently")
+	require.Greater(t, pred.maxConc.Load(), int32(1), "items should execute concurrently")
 }
 
-func TestBatchChatCompletion_SingleRequestBatch(t *testing.T) {
+func TestBatchChatCompletion_SingleItemBatch(t *testing.T) {
 	s := newTestServer(t)
 
 	resp, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-		Requests: []*rpc.ChatCompletionRequest{
-			{
-				Model:    "advert",
-				Messages: []*rpc.ChatMessage{{Role: "user", Content: "solo"}},
-			},
+		ModelConfig: chatCfg("advert"),
+		Items: []*rpc.BatchChatCompletionItem{
+			{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "solo"}}},
 		},
 	}))
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.Responses, 1)
 	require.Equal(t, "advert", resp.Msg.Responses[0].Model)
 	require.Equal(t, "advert response", resp.Msg.Responses[0].Message.Content)
-	require.Equal(t, "stop", resp.Msg.Responses[0].FinishReason)
+	require.Equal(t, rpc.FinishReason_FINISH_REASON_STOP, resp.Msg.Responses[0].FinishReason)
 	require.NotEmpty(t, resp.Msg.Responses[0].Id)
 }
 
-func TestBatchChatCompletion_ErrorInOneRequest(t *testing.T) {
+func TestBatchChatCompletion_ErrorInOneItem(t *testing.T) {
 	s := newTestServer(t)
 
 	_, err := s.BatchChatCompletion(context.Background(), connect.NewRequest(&rpc.BatchChatCompletionRequest{
-		Requests: []*rpc.ChatCompletionRequest{
-			{
-				Model:    "advert",
-				Messages: []*rpc.ChatMessage{{Role: "user", Content: "good"}},
-			},
-			{
-				Model:    "advert",
-				Messages: nil, // empty messages → error
-			},
-			{
-				Model:    "resume",
-				Messages: []*rpc.ChatMessage{{Role: "user", Content: "also good"}},
-			},
+		ModelConfig: chatCfg("advert"),
+		Items: []*rpc.BatchChatCompletionItem{
+			{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "good"}}},
+			{Messages: nil}, // empty messages → error
+			{Messages: []*rpc.ChatMessage{{Role: rpc.Role_ROLE_USER, Content: "also good"}}},
 		},
 	}))
 	require.Error(t, err)
@@ -308,7 +323,8 @@ func TestEmbedding(t *testing.T) {
 
 	t.Run("valid request", func(t *testing.T) {
 		resp, err := s.Embedding(context.Background(), connect.NewRequest(&rpc.EmbeddingRequest{
-			Input: "Hello world",
+			ModelConfig: embedCfg(),
+			Input:       "Hello world",
 		}))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
@@ -320,7 +336,8 @@ func TestEmbedding(t *testing.T) {
 	t.Run("not loaded", func(t *testing.T) {
 		s := NewServer(zerolog.Nop(), &stubResolver{})
 		_, err := s.Embedding(context.Background(), connect.NewRequest(&rpc.EmbeddingRequest{
-			Input: "Hello",
+			ModelConfig: embedCfg(),
+			Input:       "Hello",
 		}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not loaded")
@@ -328,7 +345,8 @@ func TestEmbedding(t *testing.T) {
 
 	t.Run("empty input", func(t *testing.T) {
 		_, err := s.Embedding(context.Background(), connect.NewRequest(&rpc.EmbeddingRequest{
-			Input: "",
+			ModelConfig: embedCfg(),
+			Input:       "",
 		}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "input text is required")
@@ -340,7 +358,8 @@ func TestBatchEmbedding(t *testing.T) {
 
 	t.Run("valid request", func(t *testing.T) {
 		resp, err := s.BatchEmbedding(context.Background(), connect.NewRequest(&rpc.BatchEmbeddingRequest{
-			Inputs: []string{"first", "second", "third"},
+			ModelConfig: embedCfg(),
+			Inputs:      []string{"first", "second", "third"},
 		}))
 		require.NoError(t, err)
 		require.NotNil(t, resp)
@@ -356,7 +375,8 @@ func TestBatchEmbedding(t *testing.T) {
 	t.Run("not loaded", func(t *testing.T) {
 		s := NewServer(zerolog.Nop(), &stubResolver{})
 		_, err := s.BatchEmbedding(context.Background(), connect.NewRequest(&rpc.BatchEmbeddingRequest{
-			Inputs: []string{"hello"},
+			ModelConfig: embedCfg(),
+			Inputs:      []string{"hello"},
 		}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "not loaded")
@@ -364,7 +384,8 @@ func TestBatchEmbedding(t *testing.T) {
 
 	t.Run("empty inputs", func(t *testing.T) {
 		_, err := s.BatchEmbedding(context.Background(), connect.NewRequest(&rpc.BatchEmbeddingRequest{
-			Inputs: nil,
+			ModelConfig: embedCfg(),
+			Inputs:      nil,
 		}))
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "at least one input")

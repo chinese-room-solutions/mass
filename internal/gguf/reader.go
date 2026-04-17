@@ -1,12 +1,7 @@
-// Package gguf reads GGUF file header metadata without loading tensor data.
+// Package gguf reads GGUF file header metadata without loading tensors.
 //
-// GGUF v3 format (little-endian):
-//
-//	Magic (4 bytes): "GGUF"
-//	Version (uint32)
-//	Tensor count (uint64)
-//	Metadata KV count (uint64)
-//	KV pairs: key (string) + value type (uint32) + value
+// GGUF v3 (little-endian): magic "GGUF", uint32 version, uint64 tensor
+// count, uint64 KV count, then KV pairs (key string + uint32 type + value).
 package gguf
 
 import (

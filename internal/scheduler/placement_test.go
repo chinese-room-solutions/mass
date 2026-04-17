@@ -1,118 +1,169 @@
 package scheduler
 
 import (
+	"math"
 	"testing"
 
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
-func TestScorePlacement_Affinity(t *testing.T) {
+const (
+	testTaskDifficulty = 1_000_000.0
+	// 4 GB; the swap term in ScoreCost is M*M, so this is intentionally
+	// large enough to dominate any realistic queue backlog.
+	testModelSize = 4_000_000_000
+)
+
+// TestScoreCost_AffinityIsEmergent — matching effective fingerprint must
+// beat any mismatched candidate, because the swap term goes to zero. With
+// taskDifficulty=0 the score reduces to TailDifficulty/GFlops + (swap if
+// mismatch), so a matched empty queue scores 0, which is the floor.
+func TestScoreCost_AffinityIsEmergent(t *testing.T) {
+	gflops := 1000.0
 	tests := []struct {
-		name      string
-		candidate Candidate
-		fp        string
-		wantSign  int // 1 = positive, -1 = negative
+		name string
+		cost float64
 	}{
-		{"matching tail", Candidate{TailHash: "abc", TailLength: 5}, "abc", 1},
-		{"matching tail zero length", Candidate{TailHash: "abc", TailLength: 0}, "abc", 1},
-		{"different tail", Candidate{TailHash: "abc", TailLength: 5}, "def", -1},
-		{"different tail zero length", Candidate{TailHash: "abc", TailLength: 0}, "def", -1},
-		{"empty tail and loaded", Candidate{}, "abc", -1},
-		{"loaded model matches, empty queue", Candidate{LoadedHash: "abc"}, "abc", 1},
-		{"loaded model matches, different tail queued", Candidate{LoadedHash: "abc", TailHash: "other", TailLength: 2}, "abc", -1},
+		{"matching tail", ScoreCost(Candidate{GFlops: gflops, TailHash: "abc"}, "abc", 0, testModelSize)},
+		{"matching loaded, empty tail", ScoreCost(Candidate{GFlops: gflops, LoadedHash: "abc"}, "abc", 0, testModelSize)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			score := ScorePlacement(tt.candidate, tt.fp)
-			switch tt.wantSign {
-			case 1:
-				require.Greater(t, score, 0.0)
-			case -1:
-				require.Less(t, score, 0.0)
-			}
+			require.InDelta(t, 0.0, tt.cost, 1e-9, "matched candidate with empty queue should cost 0")
 		})
 	}
+
+	mismatch := ScoreCost(Candidate{GFlops: gflops, TailHash: "other"}, "abc", 0, testModelSize)
+	require.Greater(t, mismatch, 0.0, "mismatched candidate must cost at least the swap")
 }
 
-func TestScorePlacement_LongerTailWins_Matching(t *testing.T) {
-	// When both candidates match the fingerprint, longer tail must score higher.
-	short := Candidate{TailHash: "abc", TailLength: 2}
-	long := Candidate{TailHash: "abc", TailLength: 10}
-	require.Greater(t, ScorePlacement(long, "abc"), ScorePlacement(short, "abc"))
+// TestScoreCost_BusyMatchedBeatsIdleMismatch — even a queue with prior work
+// queued under the same fingerprint can beat an idle but mismatched queue,
+// as long as queue wait < swap cost. This is exactly the "no false
+// affinity" property: don't switch models when a same-model queue is short.
+func TestScoreCost_BusyMatchedBeatsIdleMismatch(t *testing.T) {
+	gflops := 1000.0
+	// Matched queue with some pending work (small).
+	busyMatched := Candidate{GFlops: gflops, TailHash: "abc", TailDifficulty: 1_000}
+	// Idle but wrong model loaded → swap = 4GB / 1000 GFlops.
+	idleMismatch := Candidate{GFlops: gflops, LoadedHash: "other"}
+	require.Less(t,
+		ScoreCost(busyMatched, "abc", testTaskDifficulty, testModelSize),
+		ScoreCost(idleMismatch, "abc", testTaskDifficulty, testModelSize),
+		"a small same-model wait should beat a fresh model swap",
+	)
 }
 
-func TestScorePlacement_LongerTailWins_NonMatching(t *testing.T) {
-	// When neither matches, prefer LONGEST tail — context switch deferred furthest.
-	short := Candidate{TailHash: "other", TailLength: 2}
-	long := Candidate{TailHash: "other", TailLength: 10}
-	require.Greater(t, ScorePlacement(long, "abc"), ScorePlacement(short, "abc"),
-		"longer non-matching tail should score higher (context switch deferred)")
+// TestScoreCost_DeepQueueLosesToSwap — if the matched queue is deep enough
+// that its accumulated work exceeds a model swap (M*M with the current
+// formula), the formula correctly prefers the idle-but-mismatched candidate.
+// Crossover: TailDifficulty > M*M.
+func TestScoreCost_DeepQueueLosesToSwap(t *testing.T) {
+	gflops := 1000.0
+	deepMatched := Candidate{
+		GFlops:         gflops,
+		TailHash:       "abc",
+		TailDifficulty: 2 * float64(testModelSize) * float64(testModelSize), // > one swap's worth
+	}
+	idleMismatch := Candidate{GFlops: gflops, LoadedHash: "other"}
+	require.Greater(t,
+		ScoreCost(deepMatched, "abc", testTaskDifficulty, testModelSize),
+		ScoreCost(idleMismatch, "abc", testTaskDifficulty, testModelSize),
+		"a long matched queue should lose to a fresh swap",
+	)
 }
 
-func TestScorePlacement_LoadedHashBeatsEmpty(t *testing.T) {
-	// A device with the model loaded (but empty queue) should beat a cold device.
-	loaded := Candidate{LoadedHash: "abc"}
-	cold := Candidate{}
-	require.Greater(t, ScorePlacement(loaded, "abc"), ScorePlacement(cold, "abc"))
+// TestScoreCost_TailHashOverridesLoadedHash — when the tail is non-empty,
+// only its fingerprint matters. A queue with the right model loaded but a
+// different-fp tail will swap before our task runs, so it incurs the swap.
+func TestScoreCost_TailHashOverridesLoadedHash(t *testing.T) {
+	gflops := 1000.0
+	// Loaded model matches, but tail says next batch is a different model.
+	c := Candidate{GFlops: gflops, LoadedHash: "abc", TailHash: "other", TailDifficulty: 100}
+	cost := ScoreCost(c, "abc", 0, testModelSize)
+	require.Greater(t, cost, float64(testModelSize)/gflops*0.99,
+		"tail mismatch must trigger swap cost even if loaded matches")
 }
 
-func TestScorePlacement_TailMatchBeatsLoadedMatch(t *testing.T) {
-	// Tail match (active sequence) should beat loaded-only match (no queue).
-	tail := Candidate{TailHash: "abc", TailLength: 1}
-	loaded := Candidate{LoadedHash: "abc"}
-	require.Greater(t, ScorePlacement(tail, "abc"), ScorePlacement(loaded, "abc"))
+// TestScoreCost_ZeroGFlopsIsUnschedulable — never benchmarked devices
+// must lose to every measured candidate. Returning +Inf is the cleanest
+// way to encode that.
+func TestScoreCost_ZeroGFlopsIsUnschedulable(t *testing.T) {
+	c := Candidate{GFlops: 0, TailHash: "abc"}
+	require.True(t, math.IsInf(ScoreCost(c, "abc", 0, testModelSize), 1))
 }
 
-func TestScorePlacement_MatchAlwaysBeatsNonMatch(t *testing.T) {
-	// Any matching candidate must always beat any non-matching candidate,
-	// regardless of tail lengths.
-	match := Candidate{TailHash: "abc", TailLength: 0}       // weakest match
-	noMatch := Candidate{TailHash: "other", TailLength: 100} // strongest non-match
-	require.Greater(t, ScorePlacement(match, "abc"), ScorePlacement(noMatch, "abc"),
-		"any tail match must beat any non-match")
+// TestSelectMinCost_AffinityWins — the basic "prefer same model" check
+// with full state on candidates.
+func TestSelectMinCost_AffinityWins(t *testing.T) {
+	candidates := []Candidate{
+		{QueueName: "gpu0", TailHash: "other", GFlops: 1000},
+		{QueueName: "gpu1", TailHash: "abc", GFlops: 500},
+	}
+	best := SelectMinCost(candidates, "abc", testTaskDifficulty, testModelSize)
+	require.Equal(t, "gpu1", best.QueueName)
 }
 
-func TestSelectBestCandidate(t *testing.T) {
-	t.Run("prefers affinity", func(t *testing.T) {
-		candidates := []Candidate{
-			{QueueName: "gpu0", TailHash: "other", TailLength: 0, GFlops: 1000},
-			{QueueName: "gpu1", TailHash: "abc", TailLength: 3, GFlops: 500},
-		}
-		best := SelectBestCandidate(candidates, "abc")
-		require.Equal(t, "gpu1", best.QueueName)
-	})
+// TestSelectMinCost_TiebreakByGFlops — equal cost should prefer the
+// stronger device (frees its capacity sooner for the next task).
+func TestSelectMinCost_TiebreakByGFlops(t *testing.T) {
+	candidates := []Candidate{
+		{QueueName: "gpu0", GFlops: 500},
+		{QueueName: "gpu1", GFlops: 1000},
+	}
+	best := SelectMinCost(candidates, "abc", 0, 0)
+	require.Equal(t, "gpu1", best.QueueName)
+}
 
-	t.Run("tiebreak by GFlops", func(t *testing.T) {
-		candidates := []Candidate{
-			{QueueName: "gpu0", TailHash: "", TailLength: 0, GFlops: 500},
-			{QueueName: "gpu1", TailHash: "", TailLength: 0, GFlops: 1000},
-		}
-		best := SelectBestCandidate(candidates, "abc")
-		require.Equal(t, "gpu1", best.QueueName)
-	})
+// TestSelectMinCost_EmptyReturnsNil — empty candidate list is a valid
+// input; SelectMinCost must not panic.
+func TestSelectMinCost_EmptyReturnsNil(t *testing.T) {
+	require.Nil(t, SelectMinCost(nil, "abc", 0, 0))
+}
 
-	t.Run("prefers longest non-matching tail", func(t *testing.T) {
-		candidates := []Candidate{
-			{QueueName: "gpu0", TailHash: "other", TailLength: 10, GFlops: 1000},
-			{QueueName: "gpu1", TailHash: "other2", TailLength: 2, GFlops: 500},
-		}
-		best := SelectBestCandidate(candidates, "abc")
-		require.Equal(t, "gpu0", best.QueueName) // longest tail = context switch deferred furthest
-	})
+// TestSelectMinCost_TiebreakPrefersLoadedMatch — when costs tie, the
+// candidate that already has the requested model loaded wins over an
+// unloaded one. This guards selectAvailablePlacement: with no real task
+// (taskDifficulty=0, modelSizeBytes=0), the cost formula collapses to 0
+// for everyone, and we must still prefer the device that holds the model.
+func TestSelectMinCost_TiebreakPrefersLoadedMatch(t *testing.T) {
+	candidates := []Candidate{
+		{QueueName: "gpu1-empty", GFlops: 1000},                     // cost = 0, no match
+		{QueueName: "gpu0-loaded", GFlops: 1000, LoadedHash: "abc"}, // cost = 0, match
+	}
+	best := SelectMinCost(candidates, "abc", 0, 0)
+	require.Equal(t, "gpu0-loaded", best.QueueName)
 
-	t.Run("empty returns nil", func(t *testing.T) {
-		require.Nil(t, SelectBestCandidate(nil, "abc"))
-	})
+	// Order-independence: same outcome regardless of slice order.
+	candidates = []Candidate{
+		{QueueName: "gpu0-loaded", GFlops: 1000, LoadedHash: "abc"},
+		{QueueName: "gpu1-empty", GFlops: 1000},
+	}
+	best = SelectMinCost(candidates, "abc", 0, 0)
+	require.Equal(t, "gpu0-loaded", best.QueueName)
+}
+
+// TestSelectMinCost_TiebreakLoadedBeforeGFlops — the loaded-match tiebreak
+// fires before the GFlops tiebreak. A weaker device with the model loaded
+// beats a stronger empty device when costs are otherwise equal: we save the
+// swap unconditionally.
+func TestSelectMinCost_TiebreakLoadedBeforeGFlops(t *testing.T) {
+	candidates := []Candidate{
+		{QueueName: "weak-loaded", GFlops: 500, LoadedHash: "abc"},
+		{QueueName: "strong-empty", GFlops: 5000},
+	}
+	best := SelectMinCost(candidates, "abc", 0, 0)
+	require.Equal(t, "weak-loaded", best.QueueName)
 }
 
 func TestFindCandidates_SingleDevice(t *testing.T) {
 	devices := []DeviceInfo{
-		{AgentID: "local", DeviceID: "gpu:0", TotalMemoryMB: 8000, GFlops: 1800},
-		{AgentID: "local", DeviceID: "gpu:1", TotalMemoryMB: 4000, GFlops: 900},
+		{WorkerID: "local", DeviceID: "gpu:0", TotalMemoryMB: 8000, GFlops: 1800},
+		{WorkerID: "local", DeviceID: "gpu:1", TotalMemoryMB: 4000, GFlops: 900},
 	}
 	states := []store.DeviceQueueState{
-		{QueueName: "device:local:gpu:0", TailHash: "abc", TailLength: 5},
+		{QueueName: "device:local:gpu:0", TailHash: "abc", TailDifficulty: 1234.5},
 	}
 
 	// Model fits on gpu:0.
@@ -124,8 +175,8 @@ func TestFindCandidates_SingleDevice(t *testing.T) {
 
 func TestFindCandidates_MultiDevice(t *testing.T) {
 	devices := []DeviceInfo{
-		{AgentID: "local", DeviceID: "gpu:0", TotalMemoryMB: 4000, GFlops: 1800},
-		{AgentID: "local", DeviceID: "gpu:1", TotalMemoryMB: 4000, GFlops: 900},
+		{WorkerID: "local", DeviceID: "gpu:0", TotalMemoryMB: 4000, GFlops: 1800},
+		{WorkerID: "local", DeviceID: "gpu:1", TotalMemoryMB: 4000, GFlops: 900},
 	}
 
 	// Model doesn't fit on any single device, but fits on both combined.
@@ -137,7 +188,7 @@ func TestFindCandidates_MultiDevice(t *testing.T) {
 
 func TestFindCandidates_NoFit(t *testing.T) {
 	devices := []DeviceInfo{
-		{AgentID: "local", DeviceID: "gpu:0", TotalMemoryMB: 2000, GFlops: 500},
+		{WorkerID: "local", DeviceID: "gpu:0", TotalMemoryMB: 2000, GFlops: 500},
 	}
 	candidates := FindCandidates(devices, nil, 10000)
 	require.Empty(t, candidates)
@@ -163,32 +214,6 @@ func TestCalcTensorSplit(t *testing.T) {
 		}
 		require.Equal(t, "0.75,0.25", CalcTensorSplit(devices))
 	})
-}
-
-func TestCalcMaxConcurrent(t *testing.T) {
-	tests := []struct {
-		name      string
-		gflops    float64
-		modelGB   float64
-		totalMB   int
-		modelMB   int
-		kvCacheMB int
-		want      int32
-	}{
-		{"3070 Ti 4B Q4 large KV", 1800, 2.5, 8000, 2500, 1800, 3}, // min(floor(5.14^0.75)=3, floor(5500/1800)=3) = 3
-		{"3070 Ti 4B Q4 30K ctx", 1800, 2.5, 8000, 2500, 1091, 3},  // min(3, floor(5500/1091)=5) = 3
-		{"3070 Ti 4B Q4 4K ctx", 1800, 2.5, 8000, 2500, 149, 3},    // min(3, floor(5500/149)=36) = 3
-		{"A100 70B Q4 8K ctx", 20000, 40.0, 80000, 40000, 7450, 2}, // min(floor(3.57^0.75)=2, floor(40000/7450)=5) = 2
-		{"zero gflops", 0, 2.5, 8000, 2500, 1800, 1},               // clamped to 1
-		{"no kvCache info", 1800, 2.5, 8000, 2500, 0, 3},           // compute-only: floor(5.14^0.75)=3
-		{"tiny model huge gpu", 10000, 0.5, 32000, 500, 100, 41},   // floor(142.86^0.75)=41, vramCap=315
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := CalcMaxConcurrent(tt.gflops, tt.modelGB, tt.totalMB, tt.modelMB, tt.kvCacheMB)
-			require.Equal(t, tt.want, got)
-		})
-	}
 }
 
 func TestCalcGpuLayers(t *testing.T) {

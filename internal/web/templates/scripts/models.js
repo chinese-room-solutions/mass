@@ -243,7 +243,7 @@
     var btn = document.getElementById('mass-dl-pause-' + safeId);
     if (!btn) return;
     var isPaused = btn.name === 'play-fill';
-    var endpoint = isPaused ? '/api/models/download/resume' : '/api/models/download/pause';
+    var endpoint = isPaused ? '/internal/models/download/resume' : '/internal/models/download/pause';
     // Optimistic icon swap.
     btn.name = isPaused ? 'pause-fill' : 'play-fill';
     // Reset speed tracking so resumed download doesn't show bogus speed.
@@ -262,7 +262,7 @@
 
   // __massModelDlCancelClick: POST cancel and optimistically remove row.
   window.__massModelDlCancelClick = function(filename) {
-    fetch('/api/models/download/cancel', {
+    fetch('/internal/models/download/cancel', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({filename: filename})

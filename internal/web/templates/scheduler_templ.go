@@ -36,7 +36,7 @@ func schedulerTab() templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div id=\"scheduler-tab\" style=\"height:100%; display:flex; justify-content:center\"><!-- Instance list --><div style=\"display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0\"><!-- Header --><div style=\"padding:0.75rem 1.5rem 0\"><div class=\"flex items-center justify-center gap-2 text-sm font-semibold text-white\"><sl-icon name=\"cpu\"></sl-icon> <span>Loaded Models</span></div><div class=\"mt-2\"><sl-input id=\"scheduler-filter-input\" size=\"small\" clearable placeholder=\"Filter models...\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input></div><button id=\"scheduler-deselect-trigger\" style=\"display:none\" data-on:click=\"$selectedSchedulerFp=''\"></button></div><!-- Instance list (scrollable) --><div id=\"scheduler-list-scroll\" style=\"flex:1; overflow-y:auto; padding:0.75rem 1.5rem\"><div id=\"scheduler-content\" data-init=\"@get('/api/scheduler')\"><div class=\"text-center py-8\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div></div></div><!-- Anchored bottom bar --><div style=\"padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; text-align:center\"><sl-button variant=\"default\" size=\"small\" style=\"min-width:16rem\" data-on:click=\"var d=document.getElementById('scheduler-load-dialog'); if(d){d.show(); window.__schedLoadInit&&window.__schedLoadInit()}\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Load Model</sl-button></div></div><!-- Properties panel (slides open when an instance is selected) --><div id=\"scheduler-props-panel\" style=\"overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0\" data-attr:style=\"$selectedSchedulerFp !== '' ? 'overflow-y:auto;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0'\"><div id=\"scheduler-props-spacer\"></div><div id=\"scheduler-props-content\"></div></div><!-- Load Model dialog --><sl-dialog id=\"scheduler-load-dialog\" label=\"Load Model into Pool\" style=\"--width:36rem\"><style>\n\t\t\t\t#scheduler-load-dialog sl-details::part(header) { padding: 0.5rem 0.75rem; }\n\t\t\t\t#scheduler-load-dialog sl-details::part(content) { padding: 0 0.75rem 0.75rem; }\n\t\t\t\t#scheduler-load-dialog::part(footer) { display: none; }\n\t\t\t</style><div class=\"space-y-4\"><!-- Model selection: embedded list --><div><div class=\"mb-2\"><sl-input id=\"sched-load-filter\" size=\"small\" clearable placeholder=\"Filter models...\"></sl-input></div><div id=\"sched-load-models\" class=\"overflow-y-auto rounded border border-neutral-700/50\" style=\"max-height:180px\"><div class=\"text-center py-4\"><sl-spinner style=\"font-size:1rem;--track-width:2px\"></sl-spinner></div></div><input type=\"hidden\" id=\"sched-load-path\"></div><!-- Config + submit (hidden until a model is selected) --><div id=\"sched-load-config\" class=\"space-y-4\" style=\"display:none\"><!-- Model settings (identity — affects fingerprint) --><div class=\"grid grid-cols-2 gap-3\"><div><label class=\"text-xs text-neutral-400 block mb-1\">Context Size</label> <sl-input id=\"sched-load-ctx\" size=\"small\" type=\"number\" placeholder=\"0 = model default\" min=\"0\"></sl-input></div><div id=\"sched-load-batch-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Batch Size</label> <sl-input id=\"sched-load-batch\" size=\"small\" type=\"number\" placeholder=\"0 = auto\" min=\"0\"></sl-input></div><div id=\"sched-load-maxtokens-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Max Tokens</label> <sl-input id=\"sched-load-maxtokens\" size=\"small\" type=\"number\" placeholder=\"0 = unlimited\" min=\"0\"></sl-input></div><div id=\"sched-load-flash-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Flash Attention</label> <sl-select id=\"sched-load-flash\" size=\"small\" placeholder=\"Default\" clearable><sl-option value=\"enabled\">Enabled</sl-option> <sl-option value=\"disabled\">Disabled</sl-option></sl-select></div></div><div id=\"sched-load-thinking-wrap\" class=\"sched-load-chat-field\" style=\"display:none\"><sl-switch id=\"sched-load-thinking\" size=\"small\">Thinking Mode</sl-switch></div><!-- Advanced model settings --><sl-details summary=\"Advanced Model Settings\" class=\"text-sm\"><div class=\"grid grid-cols-2 gap-3\"><div id=\"sched-load-chat-template-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Chat Template</label> <sl-input id=\"sched-load-chat-template\" size=\"small\" placeholder=\"e.g. vicuna\"></sl-input></div><div id=\"sched-load-cachetype-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">KV Cache Type</label> <sl-select id=\"sched-load-cachetype\" size=\"small\" placeholder=\"Default (q8_0)\" clearable hoist><sl-option value=\"f16\">f16 (full precision)</sl-option> <sl-option value=\"q8_0\">q8_0 (recommended)</sl-option> <sl-option value=\"q4_0\">q4_0 (low VRAM)</sl-option></sl-select></div></div></sl-details><!-- Placement overrides (scheduler decides by default) --><sl-details summary=\"Placement Overrides\" class=\"text-sm\"><p class=\"text-xs text-neutral-500 mb-2\">Optional. The scheduler handles these automatically based on device capabilities.</p><div class=\"grid grid-cols-2 gap-3\"><div><label class=\"text-xs text-neutral-400 block mb-1\">Device</label> <sl-select id=\"sched-load-device\" size=\"small\" value=\"gpu\"><sl-option value=\"gpu\">GPU (auto)</sl-option> <sl-option value=\"cpu\">CPU only</sl-option></sl-select></div><div id=\"sched-load-gpu-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">GPU Layers</label> <sl-input id=\"sched-load-gpu\" size=\"small\" type=\"number\" placeholder=\"auto\" min=\"0\"></sl-input></div><div><label class=\"text-xs text-neutral-400 block mb-1\">Threads</label> <sl-input id=\"sched-load-threads\" size=\"small\" type=\"number\" placeholder=\"auto\" min=\"0\"></sl-input></div><div><label class=\"text-xs text-neutral-400 block mb-1\">Max Concurrent</label> <sl-input id=\"sched-load-concurrent\" size=\"small\" type=\"number\" placeholder=\"auto\" min=\"0\"></sl-input></div><div id=\"sched-load-maingpu-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Main GPU</label> <sl-input id=\"sched-load-maingpu\" size=\"small\" placeholder=\"auto\"></sl-input></div><div id=\"sched-load-tensorsplit-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Tensor Split</label> <sl-input id=\"sched-load-tensorsplit\" size=\"small\" placeholder=\"auto\"></sl-input></div></div></sl-details><!-- Error + submit --><div id=\"sched-load-error\" class=\"text-xs text-red-400\" style=\"display:none\"></div><div class=\"flex justify-end\"><sl-button id=\"sched-load-submit\" variant=\"primary\" size=\"small\"><sl-icon slot=\"prefix\" name=\"cpu\"></sl-icon> Load</sl-button></div></div></div></sl-dialog>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div id=\"scheduler-tab\" style=\"height:100%; display:flex; justify-content:center\"><!-- Instance list --><div style=\"display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0\"><!-- Header --><div style=\"padding:0.75rem 1.5rem 0\"><div class=\"flex items-center justify-center gap-2 text-sm font-semibold text-white\"><sl-icon name=\"cpu\"></sl-icon> <span>Loaded Models</span></div><div class=\"mt-2\"><sl-input id=\"scheduler-filter-input\" size=\"small\" clearable placeholder=\"Filter models...\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input></div><button id=\"scheduler-deselect-trigger\" style=\"display:none\" data-on:click=\"$selectedSchedulerFp=''\"></button></div><!-- Instance list (scrollable) --><div id=\"scheduler-list-scroll\" style=\"flex:1; overflow-y:auto; padding:0.75rem 1.5rem\"><div id=\"scheduler-content\" data-init=\"@get('/internal/scheduler')\"><div class=\"text-center py-8\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div></div></div><!-- Anchored bottom bar --><div style=\"padding:0.75rem 1.5rem; border-top:1px solid rgb(64 64 64); flex-shrink:0; text-align:center\"><sl-button variant=\"default\" size=\"small\" style=\"min-width:16rem\" data-on:click=\"var d=document.getElementById('scheduler-load-dialog'); if(d){d.show(); window.__schedLoadInit&&window.__schedLoadInit()}\"><sl-icon slot=\"prefix\" name=\"plus-lg\"></sl-icon> Load Model</sl-button></div></div><!-- Properties panel (slides open when an instance is selected) --><div id=\"scheduler-props-panel\" style=\"overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0\" data-attr:style=\"$selectedSchedulerFp !== '' ? 'overflow-y:auto;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0'\"><div id=\"scheduler-props-spacer\"></div><div id=\"scheduler-props-content\"></div></div><!-- Load Model dialog --><sl-dialog id=\"scheduler-load-dialog\" label=\"Load Model into Pool\" style=\"--width:36rem\"><style>\n\t\t\t\t#scheduler-load-dialog sl-details::part(header) { padding: 0.5rem 0.75rem; }\n\t\t\t\t#scheduler-load-dialog sl-details::part(content) { padding: 0 0.75rem 0.75rem; }\n\t\t\t\t#scheduler-load-dialog::part(footer) { display: none; }\n\t\t\t</style><div class=\"space-y-4\"><!-- Model selection: embedded list --><div><div class=\"mb-2\"><sl-input id=\"sched-load-filter\" size=\"small\" clearable placeholder=\"Filter models...\"></sl-input></div><div id=\"sched-load-models\" class=\"overflow-y-auto rounded border border-neutral-700/50\" style=\"max-height:180px\"><div class=\"text-center py-4\"><sl-spinner style=\"font-size:1rem;--track-width:2px\"></sl-spinner></div></div><input type=\"hidden\" id=\"sched-load-path\"></div><!-- Config + submit (hidden until a model is selected) --><div id=\"sched-load-config\" class=\"space-y-4\" style=\"display:none\"><!-- Model settings (identity — affects fingerprint) --><div class=\"grid grid-cols-2 gap-3\"><div><label class=\"text-xs text-neutral-400 block mb-1\">Context Size</label> <sl-input id=\"sched-load-ctx\" size=\"small\" type=\"number\" placeholder=\"0 = 4096 (default)\" min=\"0\"></sl-input></div><div id=\"sched-load-batch-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Batch Size</label> <sl-input id=\"sched-load-batch\" size=\"small\" type=\"number\" placeholder=\"0 = auto\" min=\"0\"></sl-input></div><div id=\"sched-load-maxtokens-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Max Tokens</label> <sl-input id=\"sched-load-maxtokens\" size=\"small\" type=\"number\" placeholder=\"0 = unlimited\" min=\"0\"></sl-input></div><div id=\"sched-load-flash-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">Flash Attention</label> <sl-select id=\"sched-load-flash\" size=\"small\" placeholder=\"Default\" clearable><sl-option value=\"enabled\">Enabled</sl-option> <sl-option value=\"disabled\">Disabled</sl-option></sl-select></div></div><div id=\"sched-load-thinking-wrap\" class=\"sched-load-chat-field\" style=\"display:none\"><sl-switch id=\"sched-load-thinking\" size=\"small\">Thinking Mode</sl-switch></div><!-- Advanced model settings --><sl-details summary=\"Advanced Model Settings\" class=\"text-sm\"><div class=\"grid grid-cols-2 gap-3\"><div id=\"sched-load-chat-template-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Chat Template</label> <sl-input id=\"sched-load-chat-template\" size=\"small\" placeholder=\"e.g. vicuna\"></sl-input></div><div id=\"sched-load-cachetype-wrap\" class=\"sched-load-chat-field\"><label class=\"text-xs text-neutral-400 block mb-1\">KV Cache Type</label> <sl-select id=\"sched-load-cachetype\" size=\"small\" placeholder=\"Default (q8_0)\" clearable hoist><sl-option value=\"f16\">f16 (full precision)</sl-option> <sl-option value=\"q8_0\">q8_0 (recommended)</sl-option> <sl-option value=\"q4_0\">q4_0 (low VRAM)</sl-option></sl-select></div></div></sl-details><!-- Placement overrides (scheduler decides by default) --><sl-details summary=\"Placement Overrides\" class=\"text-sm\"><p class=\"text-xs text-neutral-500 mb-2\">Optional. The scheduler handles these automatically based on device capabilities.</p><div class=\"grid grid-cols-2 gap-3\"><div><label class=\"text-xs text-neutral-400 block mb-1\">Device</label> <sl-select id=\"sched-load-device\" size=\"small\" value=\"gpu\"><sl-option value=\"gpu\">GPU (auto)</sl-option> <sl-option value=\"cpu\">CPU only</sl-option></sl-select></div><div id=\"sched-load-gpu-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">GPU Layers</label> <sl-input id=\"sched-load-gpu\" size=\"small\" type=\"number\" placeholder=\"auto\" min=\"0\"></sl-input></div><div><label class=\"text-xs text-neutral-400 block mb-1\">Threads</label> <sl-input id=\"sched-load-threads\" size=\"small\" type=\"number\" placeholder=\"auto\" min=\"0\"></sl-input></div><div><label class=\"text-xs text-neutral-400 block mb-1\">Max Concurrent</label> <sl-input id=\"sched-load-concurrent\" size=\"small\" type=\"number\" placeholder=\"auto = fill GPU\" min=\"0\"></sl-input></div><div id=\"sched-load-maingpu-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Main GPU</label> <sl-input id=\"sched-load-maingpu\" size=\"small\" placeholder=\"auto\"></sl-input></div><div id=\"sched-load-tensorsplit-wrap\"><label class=\"text-xs text-neutral-400 block mb-1\">Tensor Split</label> <sl-input id=\"sched-load-tensorsplit\" size=\"small\" placeholder=\"auto\"></sl-input></div></div></sl-details><!-- Error + submit --><div id=\"sched-load-error\" class=\"text-xs text-red-400\" style=\"display:none\"></div><div class=\"flex justify-end\"><sl-button id=\"sched-load-submit\" variant=\"primary\" size=\"small\"><sl-icon slot=\"prefix\" name=\"cpu\"></sl-icon> Load</sl-button></div></div></div></sl-dialog>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -79,7 +79,7 @@ func SchedulerInstanceList(instances []SchedulerInstanceView) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		if len(instances) == 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<div class=\"flex flex-col items-center justify-center py-16 text-center\"><sl-icon name=\"cpu\" style=\"font-size:2rem;color:var(--sl-color-neutral-500)\" class=\"mb-3\"></sl-icon><p class=\"text-neutral-400 text-sm\">No models loaded.</p><p class=\"text-neutral-500 text-xs mt-1\">Models are loaded when modules start or when requests arrive with model_config.</p></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<div class=\"flex flex-col items-center justify-center py-16 text-center\"><sl-icon name=\"cpu\" style=\"font-size:2rem;color:var(--sl-color-neutral-500)\" class=\"mb-3\"></sl-icon><p class=\"text-neutral-400 text-sm\">No models loaded.</p><p class=\"text-neutral-500 text-xs mt-1\">Models are loaded when apps start or when requests arrive with model_config.</p></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -146,9 +146,9 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var5 string
-		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.Type + " " + inst.Source + " " + inst.Mode + " " + inst.Status + " " + inst.AgentName))
+		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.Type + " " + inst.Source + " " + inst.Mode + " " + inst.Status + " " + inst.WorkerName))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 199, Col: 175}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 199, Col: 176}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 		if templ_7745c5c3_Err != nil {
@@ -159,9 +159,9 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
-		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$selectedSchedulerFp='%s'; @get('/api/scheduler/info?fp=%s')", inst.Fingerprint, inst.Fingerprint))
+		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("$selectedSchedulerFp='%s'; @get('/internal/scheduler/info?fp=%s')", inst.Fingerprint, inst.Fingerprint))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 200, Col: 129}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 200, Col: 134}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {
@@ -224,9 +224,9 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var10 string
-			templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@delete('/api/scheduler/evict?fp=%s')", inst.Fingerprint))
+			templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("@delete('/internal/scheduler/evict?fp=%s')", inst.Fingerprint))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 219, Col: 93}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 219, Col: 98}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 			if templ_7745c5c3_Err != nil {
@@ -237,14 +237,14 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</div><!-- Bottom row: details + badges --><div class=\"flex items-center gap-4 mt-2 text-xs text-neutral-400 overflow-hidden\"><span class=\"font-mono\" title=\"Config fingerprint\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</div><!-- Bottom row: details + badges --><div class=\"flex items-center gap-4 mt-2 text-xs text-neutral-400 overflow-hidden\"><span class=\"font-mono whitespace-nowrap\" title=\"Config fingerprint\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var11 string
 		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(inst.Fingerprint)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 227, Col: 72}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 227, Col: 90}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 		if templ_7745c5c3_Err != nil {
@@ -254,19 +254,19 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if inst.AgentName != "" {
-			templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, goToAgent(inst.AgentID))
+		if inst.WorkerName != "" {
+			templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, goToWorker(inst.WorkerID))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<span class=\"text-blue-400 hover:text-blue-300 cursor-pointer\" title=\"")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<span class=\"text-blue-400 hover:text-blue-300 cursor-pointer truncate min-w-0\" title=\"")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var12 string
-			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs("Running on agent: " + inst.AgentName)
+			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs("Running on worker: " + inst.WorkerName)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 231, Col: 50}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 231, Col: 52}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
 			if templ_7745c5c3_Err != nil {
@@ -276,7 +276,7 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var13 templ.ComponentScript = goToAgent(inst.AgentID)
+			var templ_7745c5c3_Var13 templ.ComponentScript = goToWorker(inst.WorkerID)
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var13.Call)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
@@ -286,9 +286,9 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var14 string
-			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(inst.AgentName)
+			templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.JoinStringErrs(inst.WorkerName)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 235, Col: 21}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 235, Col: 22}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var14))
 			if templ_7745c5c3_Err != nil {
@@ -299,7 +299,7 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 			if len(inst.DeviceIDs) > 0 {
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, "<span class=\"text-neutral-500\" title=\"Device(s)\">")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, "<span class=\"text-neutral-500 whitespace-nowrap\" title=\"Device(s)\">")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
@@ -312,26 +312,30 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
-				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</span>")
+				templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</span> ")
 				if templ_7745c5c3_Err != nil {
 					return templ_7745c5c3_Err
 				}
 			}
 		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "<span class=\"whitespace-nowrap\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
 		templ_7745c5c3_Err = SchedulerInstanceReqs(inst.Fingerprint, inst.ActiveReqs).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "<span class=\"ml-auto flex items-center gap-2\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "</span> <span class=\"ml-auto flex items-center gap-2 flex-shrink-0\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var16 = []any{"text-xs rounded px-1.5 py-0.5 " + sourceBadge(inst.Source)}
+		var templ_7745c5c3_Var16 = []any{"text-xs rounded px-1.5 py-0.5 whitespace-nowrap " + sourceBadge(inst.Source)}
 		templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var16...)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "<span class=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "<span class=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -344,29 +348,29 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var18 string
 		templ_7745c5c3_Var18, templ_7745c5c3_Err = templ.JoinStringErrs(inst.Source)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 245, Col: 93}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 247, Col: 111}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var18))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 29, "</span> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "</span> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var19 = []any{"text-xs rounded px-1.5 py-0.5 " + modeBadge(inst.Mode)}
+		var templ_7745c5c3_Var19 = []any{"text-xs rounded px-1.5 py-0.5 whitespace-nowrap " + modeBadge(inst.Mode)}
 		templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var19...)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 30, "<span class=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "<span class=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -379,29 +383,29 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 31, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var21 string
 		templ_7745c5c3_Var21, templ_7745c5c3_Err = templ.JoinStringErrs(inst.Mode)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 246, Col: 87}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 248, Col: 105}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var21))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 32, "</span> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "</span> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var22 = []any{"text-xs font-bold rounded px-1.5 py-0.5 " + instanceTypeBadge(inst.Type)}
+		var templ_7745c5c3_Var22 = []any{"text-xs font-bold rounded px-1.5 py-0.5 whitespace-nowrap " + instanceTypeBadge(inst.Type)}
 		templ_7745c5c3_Err = templ.RenderCSSItems(ctx, templ_7745c5c3_Buffer, templ_7745c5c3_Var22...)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 33, "<span class=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 34, "<span class=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -414,20 +418,20 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 34, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var24 string
 		templ_7745c5c3_Var24, templ_7745c5c3_Err = templ.JoinStringErrs(inst.Type)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 247, Col: 105}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 249, Col: 123}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var24))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 35, "</span>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 36, "</span>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -435,7 +439,7 @@ func schedulerInstanceRow(inst SchedulerInstanceView) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 36, "</span></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "</span></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -464,33 +468,33 @@ func SchedulerInstanceDot(fp string, status string) templ.Component {
 			templ_7745c5c3_Var25 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 37, "<sl-tooltip id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "<sl-tooltip id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var26 string
 		templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs("sched-dot-" + fp)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 255, Col: 35}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 257, Col: 35}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 38, "\" content=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "\" content=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var27 string
 		templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(status)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 255, Col: 54}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 257, Col: 54}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 39, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -499,7 +503,7 @@ func SchedulerInstanceDot(fp string, status string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 40, "<span class=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "<span class=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -512,7 +516,7 @@ func SchedulerInstanceDot(fp string, status string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 41, "\"></span></sl-tooltip>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "\"></span></sl-tooltip>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -546,20 +550,20 @@ func SchedulerInstanceStatusBadge(fp string, status string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 42, "<span id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "<span id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var32 string
 		templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.JoinStringErrs("sched-status-" + fp)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 261, Col: 32}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 263, Col: 32}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var32))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 43, "\" class=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "\" class=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -572,20 +576,20 @@ func SchedulerInstanceStatusBadge(fp string, status string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var34 string
 		templ_7745c5c3_Var34, templ_7745c5c3_Err = templ.JoinStringErrs(status)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 262, Col: 10}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 264, Col: 10}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var34))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 45, "</span>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "</span>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -614,20 +618,20 @@ func SchedulerInstanceReqs(fp string, activeReqs int64) templ.Component {
 			templ_7745c5c3_Var35 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 46, "<span id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "<span id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var36 string
 		templ_7745c5c3_Var36, templ_7745c5c3_Err = templ.JoinStringErrs("sched-reqs-" + fp)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 267, Col: 30}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 269, Col: 30}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var36))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 47, "\" class=\"text-xs text-neutral-400\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "\" class=\"text-xs text-neutral-400\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -635,14 +639,14 @@ func SchedulerInstanceReqs(fp string, activeReqs int64) templ.Component {
 			var templ_7745c5c3_Var37 string
 			templ_7745c5c3_Var37, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d active req%s", activeReqs, pluralS(int(activeReqs))))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 269, Col: 73}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 271, Col: 73}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var37))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 48, "</span>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "</span>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -672,33 +676,33 @@ func SchedulerInstancePropsPanel(info SchedulerInstancePropsView) templ.Componen
 			templ_7745c5c3_Var38 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 49, "<div id=\"scheduler-props-content\" class=\"bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5\" style=\"display:flex;flex-direction:column\"><!-- Header --><div class=\"flex items-start justify-between mb-4\"><div><h3 class=\"text-sm font-semibold text-white\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "<div id=\"scheduler-props-content\" class=\"bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5\" style=\"display:flex;flex-direction:column\"><!-- Header --><div class=\"flex items-start justify-between mb-4\"><div><h3 class=\"text-sm font-semibold text-white\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var39 string
 		templ_7745c5c3_Var39, templ_7745c5c3_Err = templ.JoinStringErrs(info.Filename)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 280, Col: 64}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 282, Col: 64}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var39))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 50, "</h3><p class=\"text-xs text-neutral-400 mt-0.5 font-mono\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "</h3><p class=\"text-xs text-neutral-400 mt-0.5 font-mono\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var40 string
 		templ_7745c5c3_Var40, templ_7745c5c3_Err = templ.JoinStringErrs(info.Fingerprint)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 281, Col: 75}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 283, Col: 75}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var40))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 51, "</p></div><sl-icon-button name=\"x-lg\" style=\"font-size:0.85rem\" data-on:click=\"$selectedSchedulerFp=''\"></sl-icon-button></div><!-- Properties grid --><div class=\"space-y-2.5\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "</p></div><sl-icon-button name=\"x-lg\" style=\"font-size:0.85rem\" data-on:click=\"$selectedSchedulerFp=''\"></sl-icon-button></div><!-- Properties grid --><div class=\"space-y-2.5\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -718,8 +722,8 @@ func SchedulerInstancePropsPanel(info SchedulerInstancePropsView) templ.Componen
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if info.AgentName != "" {
-			templ_7745c5c3_Err = schedulerPropsAgent(info.AgentID, info.AgentName).Render(ctx, templ_7745c5c3_Buffer)
+		if info.WorkerName != "" {
+			templ_7745c5c3_Err = schedulerPropsWorker(info.WorkerID, info.WorkerName).Render(ctx, templ_7745c5c3_Buffer)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -739,7 +743,7 @@ func SchedulerInstancePropsPanel(info SchedulerInstancePropsView) templ.Componen
 			return templ_7745c5c3_Err
 		}
 		if len(info.Config) > 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 52, "<div class=\"border-t border-neutral-700/50 my-2\"></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "<div class=\"border-t border-neutral-700/50 my-2\"></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -750,7 +754,7 @@ func SchedulerInstancePropsPanel(info SchedulerInstancePropsView) templ.Componen
 				}
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 53, "</div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "</div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -779,20 +783,20 @@ func SchedulerPropsStatus(fp string, status string) templ.Component {
 			templ_7745c5c3_Var41 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 54, "<div id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "<div id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var42 string
 		templ_7745c5c3_Var42, templ_7745c5c3_Err = templ.JoinStringErrs("sched-props-status-" + fp)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 315, Col: 37}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 317, Col: 37}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var42))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 55, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -800,7 +804,7 @@ func SchedulerPropsStatus(fp string, status string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 56, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -829,20 +833,20 @@ func SchedulerPropsReqs(fp string, activeReqs int64) templ.Component {
 			templ_7745c5c3_Var43 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 57, "<div id=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "<div id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var44 string
 		templ_7745c5c3_Var44, templ_7745c5c3_Err = templ.JoinStringErrs("sched-props-reqs-" + fp)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 321, Col: 35}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 323, Col: 35}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var44))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 58, "\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -852,7 +856,7 @@ func SchedulerPropsReqs(fp string, activeReqs int64) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 59, "</div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "</div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -860,7 +864,7 @@ func SchedulerPropsReqs(fp string, activeReqs int64) templ.Component {
 	})
 }
 
-func schedulerPropsAgent(agentID string, agentName string) templ.Component {
+func schedulerPropsWorker(workerID string, workerName string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -881,37 +885,37 @@ func schedulerPropsAgent(agentID string, agentName string) templ.Component {
 			templ_7745c5c3_Var45 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 60, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:8.5rem\">Agent</span> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:8.5rem\">Agent</span> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, goToAgent(agentID))
+		templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, goToWorker(workerID))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 61, "<span class=\"text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono\" onclick=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "<span class=\"text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono\" onclick=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var46 templ.ComponentScript = goToAgent(agentID)
+		var templ_7745c5c3_Var46 templ.ComponentScript = goToWorker(workerID)
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var46.Call)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 62, "\"><sl-icon name=\"pc-display\" style=\"font-size:0.7rem;vertical-align:-1px;margin-right:2px\"></sl-icon> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "\"><sl-icon name=\"pc-display\" style=\"font-size:0.7rem;vertical-align:-1px;margin-right:2px\"></sl-icon> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var47 string
-		templ_7745c5c3_Var47, templ_7745c5c3_Err = templ.JoinStringErrs(agentName)
+		templ_7745c5c3_Var47, templ_7745c5c3_Err = templ.JoinStringErrs(workerName)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 336, Col: 14}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 338, Col: 15}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var47))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 63, "</span></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "</span></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -940,7 +944,7 @@ func schedulerPropsModel(path string, filename string) templ.Component {
 			templ_7745c5c3_Var48 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 64, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:8.5rem\">Model</span> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:8.5rem\">Model</span> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -948,7 +952,7 @@ func schedulerPropsModel(path string, filename string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 65, "<span class=\"text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono\" onclick=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "<span class=\"text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono\" onclick=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -957,20 +961,20 @@ func schedulerPropsModel(path string, filename string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 66, "\"><sl-icon name=\"box\" style=\"font-size:0.7rem;vertical-align:-1px;margin-right:2px\"></sl-icon> ")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "\"><sl-icon name=\"box\" style=\"font-size:0.7rem;vertical-align:-1px;margin-right:2px\"></sl-icon> ")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var50 string
 		templ_7745c5c3_Var50, templ_7745c5c3_Err = templ.JoinStringErrs(filename)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 349, Col: 13}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/scheduler.templ`, Line: 351, Col: 13}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var50))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 67, "</span></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 68, "</span></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -997,7 +1001,7 @@ func instanceTypeBadge(typ string) string {
 }
 
 func sourceBadge(source string) string {
-	if strings.HasPrefix(source, "module") {
+	if strings.HasPrefix(source, "app") {
 		return "bg-teal-900/60 text-teal-300"
 	}
 	return "mass-badge"
@@ -1021,22 +1025,22 @@ func instanceStatusBadge(status string) string {
 	}
 }
 
-// goToAgent switches to the Agents tab and opens the specified agent card.
-func goToAgent(agentID string) templ.ComponentScript {
+// goToWorker switches to the Workers tab and opens the specified worker card.
+func goToWorker(workerID string) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_goToAgent_a62e`,
-		Function: `function __templ_goToAgent_a62e(agentID){event.stopPropagation();
-	// Click the Agents tab button — its data-on:click sets $activeTab via Datastar.
-	var tabBtn = document.querySelector('[data-tab-name="agents"]');
+		Name: `__templ_goToWorker_bc6f`,
+		Function: `function __templ_goToWorker_bc6f(workerID){event.stopPropagation();
+	// Click the Workers tab button — its data-on:click sets $activeTab via Datastar.
+	var tabBtn = document.querySelector('[data-tab-name="workers"]');
 	if (tabBtn) tabBtn.click();
-	// Open the target agent card after a short delay for DOM update.
+	// Open the target worker card after a short delay for DOM update.
 	setTimeout(function() {
-		var card = document.getElementById('agent-card-' + agentID);
+		var card = document.getElementById('worker-card-' + workerID);
 		if (card) { card.open = true; card.scrollIntoView({behavior:'smooth', block:'nearest'}); }
 	}, 100);
 }`,
-		Call:       templ.SafeScript(`__templ_goToAgent_a62e`, agentID),
-		CallInline: templ.SafeScriptInline(`__templ_goToAgent_a62e`, agentID),
+		Call:       templ.SafeScript(`__templ_goToWorker_bc6f`, workerID),
+		CallInline: templ.SafeScriptInline(`__templ_goToWorker_bc6f`, workerID),
 	}
 }
 

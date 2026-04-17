@@ -35,7 +35,7 @@ templ schedulerTab() {
 				</div>
 				<!-- Instance list (scrollable) -->
 				<div id="scheduler-list-scroll" style="flex:1; overflow-y:auto; padding:0.75rem 1.5rem">
-					<div id="scheduler-content" data-init="@get('/api/scheduler')">
+					<div id="scheduler-content" data-init="@get('/internal/scheduler')">
 						<div class="text-center py-8">
 							<sl-spinner style="font-size:1.5rem;--track-width:3px"></sl-spinner>
 						</div>
@@ -87,7 +87,7 @@ templ schedulerTab() {
 					<div class="grid grid-cols-2 gap-3">
 						<div>
 							<label class="text-xs text-neutral-400 block mb-1">Context Size</label>
-							<sl-input id="sched-load-ctx" size="small" type="number" placeholder="0 = model default" min="0"></sl-input>
+							<sl-input id="sched-load-ctx" size="small" type="number" placeholder="0 = 4096 (default)" min="0"></sl-input>
 						</div>
 						<div id="sched-load-batch-wrap" class="sched-load-chat-field">
 							<label class="text-xs text-neutral-400 block mb-1">Batch Size</label>
@@ -146,7 +146,7 @@ templ schedulerTab() {
 							</div>
 							<div>
 								<label class="text-xs text-neutral-400 block mb-1">Max Concurrent</label>
-								<sl-input id="sched-load-concurrent" size="small" type="number" placeholder="auto" min="0"></sl-input>
+								<sl-input id="sched-load-concurrent" size="small" type="number" placeholder="auto = fill GPU" min="0"></sl-input>
 							</div>
 							<div id="sched-load-maingpu-wrap">
 								<label class="text-xs text-neutral-400 block mb-1">Main GPU</label>
@@ -180,7 +180,7 @@ templ SchedulerInstanceList(instances []SchedulerInstanceView) {
 			<div class="flex flex-col items-center justify-center py-16 text-center">
 				<sl-icon name="cpu" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>
 				<p class="text-neutral-400 text-sm">No models loaded.</p>
-				<p class="text-neutral-500 text-xs mt-1">Models are loaded when modules start or when requests arrive with model_config.</p>
+				<p class="text-neutral-500 text-xs mt-1">Models are loaded when apps start or when requests arrive with model_config.</p>
 			</div>
 		} else {
 			<div class="space-y-2">
@@ -196,8 +196,8 @@ templ schedulerInstanceRow(inst SchedulerInstanceView) {
 	<div
 		id={ "sched-inst-" + inst.Fingerprint }
 		class="bg-neutral-800/60 rounded-lg border border-neutral-700/50 px-4 py-3 cursor-pointer hover:border-neutral-600/80 transition-colors"
-		data-filter-text={ strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.Type + " " + inst.Source + " " + inst.Mode + " " + inst.Status + " " + inst.AgentName) }
-		data-on:click={ fmt.Sprintf("$selectedSchedulerFp='%s'; @get('/api/scheduler/info?fp=%s')", inst.Fingerprint, inst.Fingerprint) }
+		data-filter-text={ strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.Type + " " + inst.Source + " " + inst.Mode + " " + inst.Status + " " + inst.WorkerName) }
+		data-on:click={ fmt.Sprintf("$selectedSchedulerFp='%s'; @get('/internal/scheduler/info?fp=%s')", inst.Fingerprint, inst.Fingerprint) }
 	>
 		<!-- Top row: filename + evict -->
 		<div class="flex items-center gap-3">
@@ -216,7 +216,7 @@ templ schedulerInstanceRow(inst SchedulerInstanceView) {
 						<sl-icon-button
 							name="x-circle"
 							style="font-size:0.95rem;color:var(--sl-color-danger-400)"
-							data-on:click={ fmt.Sprintf("@delete('/api/scheduler/evict?fp=%s')", inst.Fingerprint) }
+							data-on:click={ fmt.Sprintf("@delete('/internal/scheduler/evict?fp=%s')", inst.Fingerprint) }
 						></sl-icon-button>
 					</sl-tooltip>
 				</div>
@@ -224,27 +224,29 @@ templ schedulerInstanceRow(inst SchedulerInstanceView) {
 		</div>
 		<!-- Bottom row: details + badges -->
 		<div class="flex items-center gap-4 mt-2 text-xs text-neutral-400 overflow-hidden">
-			<span class="font-mono" title="Config fingerprint">{ inst.Fingerprint }</span>
-			if inst.AgentName != "" {
+			<span class="font-mono whitespace-nowrap" title="Config fingerprint">{ inst.Fingerprint }</span>
+			if inst.WorkerName != "" {
 				<span
-					class="text-blue-400 hover:text-blue-300 cursor-pointer"
-					title={ "Running on agent: " + inst.AgentName }
-					onclick={ goToAgent(inst.AgentID) }
+					class="text-blue-400 hover:text-blue-300 cursor-pointer truncate min-w-0"
+					title={ "Running on worker: " + inst.WorkerName }
+					onclick={ goToWorker(inst.WorkerID) }
 				>
 					<sl-icon name="pc-display" style="font-size:0.75rem;vertical-align:-1px;margin-right:2px"></sl-icon>
-					{ inst.AgentName }
+					{ inst.WorkerName }
 				</span>
 				if len(inst.DeviceIDs) > 0 {
-					<span class="text-neutral-500" title="Device(s)">
+					<span class="text-neutral-500 whitespace-nowrap" title="Device(s)">
 						{ strings.Join(inst.DeviceIDs, ", ") }
 					</span>
 				}
 			}
-			@SchedulerInstanceReqs(inst.Fingerprint, inst.ActiveReqs)
-			<span class="ml-auto flex items-center gap-2">
-				<span class={ "text-xs rounded px-1.5 py-0.5 " + sourceBadge(inst.Source) }>{ inst.Source }</span>
-				<span class={ "text-xs rounded px-1.5 py-0.5 " + modeBadge(inst.Mode) }>{ inst.Mode }</span>
-				<span class={ "text-xs font-bold rounded px-1.5 py-0.5 " + instanceTypeBadge(inst.Type) }>{ inst.Type }</span>
+			<span class="whitespace-nowrap">
+				@SchedulerInstanceReqs(inst.Fingerprint, inst.ActiveReqs)
+			</span>
+			<span class="ml-auto flex items-center gap-2 flex-shrink-0">
+				<span class={ "text-xs rounded px-1.5 py-0.5 whitespace-nowrap " + sourceBadge(inst.Source) }>{ inst.Source }</span>
+				<span class={ "text-xs rounded px-1.5 py-0.5 whitespace-nowrap " + modeBadge(inst.Mode) }>{ inst.Mode }</span>
+				<span class={ "text-xs font-bold rounded px-1.5 py-0.5 whitespace-nowrap " + instanceTypeBadge(inst.Type) }>{ inst.Type }</span>
 				@SchedulerInstanceStatusBadge(inst.Fingerprint, inst.Status)
 			</span>
 		</div>
@@ -293,8 +295,8 @@ templ SchedulerInstancePropsPanel(info SchedulerInstancePropsView) {
 			@SchedulerPropsStatus(info.Fingerprint, info.Status)
 			@propRow("Source", info.Source)
 			@propRow("Mode", info.Mode)
-			if info.AgentName != "" {
-				@schedulerPropsAgent(info.AgentID, info.AgentName)
+			if info.WorkerName != "" {
+				@schedulerPropsWorker(info.WorkerID, info.WorkerName)
 			}
 			if len(info.DeviceIDs) > 0 {
 				@propRow("Device", strings.Join(info.DeviceIDs, ", "))
@@ -325,15 +327,15 @@ templ SchedulerPropsReqs(fp string, activeReqs int64) {
 	</div>
 }
 
-templ schedulerPropsAgent(agentID string, agentName string) {
+templ schedulerPropsWorker(workerID string, workerName string) {
 	<div class="flex items-baseline gap-3">
 		<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:8.5rem">Agent</span>
 		<span
 			class="text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono"
-			onclick={ goToAgent(agentID) }
+			onclick={ goToWorker(workerID) }
 		>
 			<sl-icon name="pc-display" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
-			{ agentName }
+			{ workerName }
 		</span>
 	</div>
 }
@@ -370,7 +372,7 @@ func instanceTypeBadge(typ string) string {
 }
 
 func sourceBadge(source string) string {
-	if strings.HasPrefix(source, "module") {
+	if strings.HasPrefix(source, "app") {
 		return "bg-teal-900/60 text-teal-300"
 	}
 	return "mass-badge"
@@ -394,15 +396,15 @@ func instanceStatusBadge(status string) string {
 	}
 }
 
-// goToAgent switches to the Agents tab and opens the specified agent card.
-script goToAgent(agentID string) {
+// goToWorker switches to the Workers tab and opens the specified worker card.
+script goToWorker(workerID string) {
 	event.stopPropagation();
-	// Click the Agents tab button — its data-on:click sets $activeTab via Datastar.
-	var tabBtn = document.querySelector('[data-tab-name="agents"]');
+	// Click the Workers tab button — its data-on:click sets $activeTab via Datastar.
+	var tabBtn = document.querySelector('[data-tab-name="workers"]');
 	if (tabBtn) tabBtn.click();
-	// Open the target agent card after a short delay for DOM update.
+	// Open the target worker card after a short delay for DOM update.
 	setTimeout(function() {
-		var card = document.getElementById('agent-card-' + agentID);
+		var card = document.getElementById('worker-card-' + workerID);
 		if (card) { card.open = true; card.scrollIntoView({behavior:'smooth', block:'nearest'}); }
 	}, 100);
 }

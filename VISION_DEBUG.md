@@ -30,7 +30,7 @@ Any image works for testing. The playground UI has "Attach Image" button. Images
 ## Fixes Applied So Far
 
 ### 1. f16 KV Cache for Vision Models (APPLIED, PARTIAL FIX)
-**File**: `internal/llm/llm.go` → `buildContextOpts()`
+**File**: `pkg/llama/llama.go` → `buildContextOpts()`
 ```go
 if m.mmprojPath != "" {
     opts = append(opts, llama.WithKVCacheType("f16"))
@@ -41,7 +41,7 @@ if m.mmprojPath != "" {
 **Result**: KV cache is confirmed f16 in logs (`K (f16): 2048.00 MiB, V (f16): 2048.00 MiB`). Output changed from pure repetition to garbage-with-some-real-words, suggesting partial improvement.
 
 ### 2. Reverted Forced Flash Attention Disable (APPLIED)
-**File**: `internal/llm/pool.go` → `newPool()`
+**File**: `pkg/llama/pool.go` → `newPool()`
 ```go
 // Before (wrong fix attempt):
 vision, vErr := model.model.NewVisionContext(model.mmprojPath,
@@ -91,7 +91,7 @@ You are a helpful assistant.\n\nUSER: <__media__>What's on this image?\nASSISTAN
 
 ### 4. Flash Attention Mode
 - **CLI**: `LLAMA_FLASH_ATTN_TYPE_AUTO` (checks compatibility, then enables/disables)
-- **Our code**: `"enabled"` (forced on when GPU detected, in `internal/llm/llm.go` line 127)
+- **Our code**: `"enabled"` (forced on when GPU detected, in `pkg/llama/llama.go` line 127)
 - Both result in flash attention being on for GPU models. Shouldn't matter.
 
 ### 5. `add_special` Flag
@@ -116,13 +116,13 @@ Thorough comparison of `llama-mtmd-cli.cpp` vs `wrapper.cpp`:
    - MASS was setting `llama.Float32(0.0)` for all sampling params when user didn't specify them (proto3 zero values). This created non-nil pointers that override llama-go defaults (temp=0.8, top_k=40, top_p=0.95, min_p=0.05) with zeros.
    - With temp=0: greedy (OK for debugging but unusual default). top_p=0, min_p=0: technically doesn't affect greedy but wrong when temp>0.
    - **Fix**: Only set sampling option pointers when value is non-zero.
-   - **File**: `internal/llm/llm.go` → `buildChatArgs()`
+   - **File**: `pkg/llama/llama.go` → `buildChatArgs()`
 
 2. **Vision context flash_attn mismatch (FIXED)**
    - Main context created with `flash_attn="enabled"`, vision context with default `"auto"`.
    - CLI passes the same `flash_attn_type` to both contexts.
    - **Fix**: Pass `model.flashAttn` to `NewVisionContext()`.
-   - **File**: `internal/llm/pool.go` → `newPool()`
+   - **File**: `pkg/llama/pool.go` → `newPool()`
 
 ### Diagnostics Added
 - **Image SHA-256 hash**: Logged at server level (`server.go`) and llama-go level (`chat.go`). Compare hashes at both layers to verify no corruption in transit.
@@ -249,10 +249,10 @@ make build  # Full build (skips libs if already present)
 ### MASS
 | File | Purpose |
 |------|---------|
-| `internal/llm/llm.go` | Model loading, context creation, predict/predictStream |
-| `internal/llm/pool.go` | Worker pool with per-worker VisionContext |
+| `pkg/llama/llama.go` | Model loading, context creation, predict/predictStream |
+| `pkg/llama/pool.go` | Worker pool with per-worker VisionContext |
 | `internal/server/server.go` | RPC → CompletionRequest conversion |
-| `internal/config/config.go` | ChatModelConfig with flash_attn, chat_template, etc. |
+| `internal/config/config.go` | LlamaChatConfig with flash_attn, chat_template, etc. |
 
 ## Logs Location
 ```

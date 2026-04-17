@@ -14,18 +14,30 @@ AI inference and workload scheduling service. Runs LLM inference on [llama.cpp](
 - Prometheus metrics (`/metrics` on port 2112)
 - Bearer token authentication
 
+## Backends
+
+MASS ships one binary per platform/backend combination — pick the one matching your hardware. Each binary statically links the relevant ggml backend (CUDA, ROCm, Metal, or CPU-only) to keep download size small (NVIDIA cuBLAS DLL alone is ~285 MB).
+
+| Platform        | CPU-only | NVIDIA (CUDA) | AMD (ROCm) | Apple (Metal) |
+|-----------------|----------|---------------|------------|---------------|
+| Linux x86_64    | ✅       | ✅            | ✅         | —             |
+| Linux arm64     | ✅       | ✅ (Jetson)   | —          | —             |
+| Windows x86_64  | ⚠️       | ✅            | —          | —             |
+| macOS arm64     | —        | —             | —          | ✅            |
+
+⚠️ Windows CPU-only is not currently produced by `make-win.ps1` (Windows users typically want CUDA). Use Linux for CPU-only deployments.
+
 ## Prerequisites
 
-| Tool | Linux | Windows (native) |
-|------|-------|-------------------|
-| Go 1.26+ | [go.dev](https://go.dev/dl/) or goenv | [go.dev](https://go.dev/dl/) |
-| GCC/G++ | `apt install build-essential` | MSYS2 MinGW-w64: `pacman -S mingw-w64-x86_64-gcc` |
-| CMake | `apt install cmake` | Bundled with VS or [cmake.org](https://cmake.org/download/) |
-| CUDA Toolkit *(for GPU support)* | `apt install cuda-toolkit` | [nvidia.com](https://developer.nvidia.com/cuda-downloads) |
-| Visual Studio | - | 2022 Community, "Desktop C++" workload |
-| Ninja | - | `pacman -S mingw-w64-x86_64-ninja` |
-
-> Set `BUILD_TAGS=cublas` to include GPU acceleration (requires CUDA Toolkit to build). The resulting binary uses GPU when available and falls back to CPU otherwise. Without the tag, the build is CPU-only.
+| Tool | Linux | Windows (native) | macOS |
+|------|-------|-------------------|-------|
+| Go 1.26+ | [go.dev](https://go.dev/dl/) or goenv | [go.dev](https://go.dev/dl/) | `brew install go` |
+| GCC/G++ | `apt install build-essential` | MSYS2 MinGW-w64: `pacman -S mingw-w64-x86_64-gcc` | Xcode CLT (`xcode-select --install`) |
+| CMake | `apt install cmake` | Bundled with VS or [cmake.org](https://cmake.org/download/) | `brew install cmake` |
+| CUDA Toolkit *(NVIDIA)* | `apt install cuda-toolkit` | [nvidia.com](https://developer.nvidia.com/cuda-downloads) | — |
+| ROCm Toolkit *(AMD)* | [rocm.docs.amd.com](https://rocm.docs.amd.com) | — | — |
+| Visual Studio *(NVIDIA only)* | - | 2022 Community, "Desktop C++" workload | — |
+| Ninja | - | `pacman -S mingw-w64-x86_64-ninja` | `brew install ninja` |
 
 ## Quick start
 
@@ -34,11 +46,11 @@ AI inference and workload scheduling service. Runs LLM inference on [llama.cpp](
 git clone https://github.com/chinese-room-solutions/mass.git
 cd mass
 
-# CPU-only build
-make build
-
-# Build with GPU support (falls back to CPU if no GPU available)
-make build BUILD_TAGS=cublas
+# Pick the build matching your hardware (output: bin/mass):
+make build-cpu      # CPU-only
+make build-cuda     # NVIDIA / CUDA
+make build-rocm     # AMD / ROCm        (Linux only)
+make build-metal    # Apple Silicon     (macOS only)
 
 # Run
 make run CONFIG=config/advert.yml
@@ -46,17 +58,20 @@ make run CONFIG=config/advert.yml
 
 ## Build commands
 
-All commands go through the `Makefile`. On Windows, the Makefile delegates build steps to `make-win.ps1` automatically.
+All commands go through the `Makefile`. On Windows, the Makefile delegates build steps to `make-win.ps1` automatically (currently CUDA-only).
 
 | Command | Description |
 |---------|-------------|
-| `make build` | Build mass binary (CPU-only) |
-| `make build BUILD_TAGS=cublas` | Build mass binary with GPU support (auto-detects GPU at runtime) |
-| `make build-libs` | Build llama-go static libraries |
+| `make build-cpu` | CPU-only binary |
+| `make build-cuda` | NVIDIA CUDA binary |
+| `make build-rocm` | AMD ROCm binary (Linux only) |
+| `make build-metal` | Apple Metal binary (macOS only) |
+| `make build BUILD_TAGS=<backend>` | Generic form (`backend` ∈ empty, `cublas`, `hipblas`, `metal`) |
+| `make build-libs` | Build llama-go static libraries only |
 | `make run [CONFIG=...]` | Build and run (default: `config/dev.yml`) |
-| `make docker-build [TAG=...]` | Build Docker image (GPU+CPU) |
-| `make proto` | Regenerate protobuf/Twirp code |
-| `make test` | Run unit tests |
+| `make docker-build [TAG=...]` | Build Docker image |
+| `make proto` | Regenerate protobuf/ConnectRPC code |
+| `make test` | Run full test suite with race detector |
 | `make lint` | Run golangci-lint |
 | `make fmt` | Format Go code |
 | `make tidy` | Tidy go.mod |
@@ -96,7 +111,7 @@ All settings are also editable through the web UI Settings tab.
 
 ### TLS / SSL
 
-MASS supports TLS for encrypted agent and API communication. By default, MASS uses plaintext HTTP/2 (h2c), suitable for localhost and trusted networks.
+MASS supports TLS for encrypted worker and API communication. By default, MASS uses plaintext HTTP/2 (h2c), suitable for localhost and trusted networks.
 
 To enable TLS, provide a PEM file containing both the certificate and private key:
 ```yaml
@@ -105,13 +120,13 @@ tls:
   cert_file: /path/to/server.pem
 ```
 
-**Agent connection with TLS:**
+**Worker connection with TLS:**
 ```bash
-# Self-signed cert: agent must trust the CA
-mass-agent --mass-url https://mass-host:3455 --ca-file /path/to/ca.pem --token mytoken
+# Self-signed cert: worker must trust the CA
+mass-worker --mass-url https://mass-host:3455 --ca-file /path/to/ca.pem --token mytoken
 
 # Trusted CA (e.g. Let's Encrypt): no --ca-file needed
-mass-agent --mass-url https://mass-host:3455 --token mytoken
+mass-worker --mass-url https://mass-host:3455 --token mytoken
 ```
 
 ## Environment variables
@@ -178,15 +193,15 @@ All communication happens over gRPC regardless of runtime — module code is the
 
 ### Inference runtime abstraction
 
-Model loading is abstracted behind a `ModelLoaderInterface`, decoupling the scheduler from any specific inference backend. Today MASS uses [llama.cpp](https://github.com/ggerganov/llama.cpp) via llama-go for GGUF models. The interface allows adding new backends without changing scheduling or module code:
+Model loading is abstracted behind a `ModelLoaderInterface`, decoupling the scheduler from any specific inference runtime. Today MASS uses [llama.cpp](https://github.com/ggerganov/llama.cpp) via llama-go for GGUF models. The interface allows adding new runtimes without changing scheduling or module code:
 
-| Backend | Status | Formats |
+| Runtime | Status | Formats |
 |---------|--------|---------|
-| llama.cpp (`LlamaLoader`) | Current | GGUF (chat + embedding) |
+| llama.cpp (`pkg/llama`) | Current | GGUF (chat + embedding) |
 | ONNX Runtime | Planned | ONNX models |
 | vLLM | Planned | HuggingFace models, tensor-parallel GPU inference |
 
-Modules declare model requirements by type (chat or embedding) — the scheduler picks the right backend based on the model format.
+Modules declare model requirements by type (chat or embedding) — the scheduler picks the right runtime based on the model format.
 
 ### How it works
 

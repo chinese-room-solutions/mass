@@ -6,14 +6,10 @@ import (
 	"strings"
 )
 
-// ResolveModelPath resolves a model reference to an absolute filesystem path.
-//
-// It accepts:
-//   - An absolute path pointing to an existing file (returned as-is).
-//   - A model ID like "publisher/repo/variant" which is resolved relative
-//     to modelsDir with a ".gguf" extension appended.
-//
-// Returns ErrModelNotFound if the reference cannot be resolved.
+// ResolveModelPath resolves a model reference to an absolute path.
+// Accepts an absolute existing path, or a "publisher/repo/variant" model
+// ID resolved under modelsDir (with ".gguf" appended if needed).
+// Returns ErrModelNotFound if neither matches.
 func ResolveModelPath(modelRef string, modelsDir string) (string, error) {
 	if modelRef == "" {
 		return "", ErrModelPathEmpty
@@ -56,13 +52,8 @@ func ResolveModelPath(modelRef string, modelsDir string) (string, error) {
 	return "", ErrModelNotFound
 }
 
-// DetectMmproj scans the directory of the given model path for a vision
-// projector (mmproj) GGUF file. Returns the absolute path if found, or
-// empty string if none is detected.
-//
-// Common mmproj naming patterns:
-//   - mmproj-*.gguf (e.g. mmproj-model-f16.gguf)
-//   - *mmproj*.gguf
+// DetectMmproj scans the model's directory for a vision projector GGUF
+// (mmproj-*.gguf or *mmproj*.gguf). Returns the absolute path or "".
 func DetectMmproj(modelPath string) string {
 	dir := filepath.Dir(modelPath)
 	entries, err := os.ReadDir(dir)
