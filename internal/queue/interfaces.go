@@ -14,7 +14,7 @@ type Message struct {
 	Body []byte
 }
 
-// QueueInterface abstracts the inference request queue.
+// QueueInterface abstracts the durable job queue.
 //
 // **Implementations must be SQL-backed.** The contract assumes:
 //   - Atomic cross-queue operations ([QueueInterface.MoveTo],
@@ -30,12 +30,10 @@ type Message struct {
 //
 // Today: SQLite (goqite). Postgres on the roadmap.
 type QueueInterface interface {
-	// SubmitRaw enqueues a pre-serialized request payload. modelSizeBytes is
-	// the size of the resolved model file (0 if unknown), used by the
-	// scheduler for placement scoring without re-parsing the proto.
-	SubmitRaw(ctx context.Context, reqType RequestType, payload []byte, source, fingerprint string, modelSizeBytes uint64, priority Priority) (SubmitResult, error)
-	// SubmitEnvelope enqueues a complete envelope (preserves all fields including RequestID).
-	SubmitEnvelope(ctx context.Context, env Envelope, priority Priority) (SubmitResult, error)
+	// Submit enqueues a fully-built envelope. The envelope's RequestID and
+	// GlobalMsgID are typically set by the caller; otherwise re-queue
+	// tracking falls back to the goqite message ID.
+	Submit(ctx context.Context, env Envelope) (SubmitResult, error)
 	// Receive retrieves the next message from the queue.
 	// Returns nil, nil if the queue is empty.
 	Receive(ctx context.Context) (*Message, error)
@@ -45,7 +43,7 @@ type QueueInterface interface {
 	Extend(ctx context.Context, id MessageID, d time.Duration) error
 
 	// Peek reads queued messages without consuming them, ordered by priority DESC.
-	// Used for work stealing decisions and fingerprint inspection.
+	// Used for work stealing decisions and affinity inspection.
 	Peek(ctx context.Context, limit int) ([]*Message, error)
 	// ReceiveByID consumes a specific message by ID.
 	// Used for work stealing. Returns nil, nil if already consumed.
@@ -59,10 +57,11 @@ type QueueInterface interface {
 	// to dst in one transaction. Returns leased=false (with no error) when
 	// the source row is missing, already leased, or past its budget — the
 	// caller should treat that as a race-loser. Both queues must be backed
-	// by the same database.
-	LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur time.Duration, dst QueueInterface, env Envelope, priority Priority) (result SubmitResult, leased bool, err error)
+	// by the same database. The destination row's priority is taken from
+	// env.Priority.
+	LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur time.Duration, dst QueueInterface, env Envelope) (result SubmitResult, leased bool, err error)
 	// Requeue returns a message to the queue, preserving original priority.
-	// Used on failure or fingerprint mismatch during batch pull.
+	// Used on failure or affinity mismatch during batch pull.
 	Requeue(ctx context.Context, msg *Message, priority Priority) error
 	// Depth returns the number of pending (unconsumed) messages.
 	Depth(ctx context.Context) (int, error)
@@ -101,7 +100,7 @@ type QueueInterface interface {
 // different interface.
 type ResultStoreInterface interface {
 	// Create inserts a new pending result entry.
-	Create(id, requestHash string) error
+	Create(id string) error
 	// MarkProcessing transitions a result to processing status.
 	MarkProcessing(id string) error
 	// Complete stores the response body and marks the result as done.
@@ -110,8 +109,6 @@ type ResultStoreInterface interface {
 	Fail(id string, errMsg string) error
 	// Get retrieves a result by ID. Returns nil, nil if not found.
 	Get(id string) (*Result, error)
-	// FindByHash looks up a cached result by request hash within the TTL.
-	FindByHash(requestHash string, ttl time.Duration) (*Result, error)
 	// Cleanup removes results older than the given TTL.
 	Cleanup(ttl time.Duration) (int64, error)
 	// WaitForResult polls until the result is completed or done is closed.

@@ -23,12 +23,19 @@ type FleetChangeEvent struct {
 // FleetChangeCallback is called when the fleet changes.
 type FleetChangeCallback func(evt FleetChangeEvent)
 
+// LoadedChangedCallback fires when a worker's loaded-model set or any
+// per-model PoolSize/Active counter actually moves. Distinct from the
+// stats-noisy [FleetChangeCallback] so Scheduler-tab subscribers can wake
+// up only on real changes instead of every heartbeat tick.
+type LoadedChangedCallback func(workerID string)
+
 // Fleet manages the set of currently known workers connected through the [Hub].
 type Fleet struct {
-	mu       sync.RWMutex
-	workers  map[string]WorkerInterface
-	order    []string // insertion order for deterministic iteration
-	onChange []FleetChangeCallback
+	mu              sync.RWMutex
+	workers         map[string]WorkerInterface
+	order           []string // insertion order for deterministic iteration
+	onChange        []FleetChangeCallback
+	onLoadedChanged []LoadedChangedCallback
 }
 
 // NewFleet creates an empty worker fleet.
@@ -133,4 +140,24 @@ func (f *Fleet) AddChangeCallback(cb FleetChangeCallback) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onChange = append(f.onChange, cb)
+}
+
+// NotifyLoadedChanged fires every registered loaded-changed callback for
+// workerID. Hub calls this when ApplyHeartbeat reports a real change in
+// the loaded-model set, and after a successful load/unload.
+func (f *Fleet) NotifyLoadedChanged(workerID string) {
+	f.mu.RLock()
+	cbs := f.onLoadedChanged
+	f.mu.RUnlock()
+	for _, cb := range cbs {
+		cb(workerID)
+	}
+}
+
+// AddLoadedChangedCallback registers a callback for real changes to any
+// worker's loaded-model set / pool counters.
+func (f *Fleet) AddLoadedChangedCallback(cb LoadedChangedCallback) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onLoadedChanged = append(f.onLoadedChanged, cb)
 }

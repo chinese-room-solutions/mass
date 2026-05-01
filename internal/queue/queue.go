@@ -1,6 +1,9 @@
-// Package queue provides a durable, prioritized request queue backed by
-// goqite (SQLite). Results are stored alongside for cache lookups and
-// async retrieval.
+// Package queue provides a durable, prioritized job queue backed by goqite
+// (SQLite). Results are stored alongside for cache lookups and async retrieval.
+//
+// Job payloads are runtime-agnostic opaque bytes — encoded by the runtime
+// gateway that submitted the job, decoded by the worker of the matching
+// runtime kind. MASS treats them as bytes throughout.
 //
 // **Postgres readiness:** SQL-only by design (see [QueueInterface]).
 // Dialect-specific work, when Postgres lands, is in two places:
@@ -21,10 +24,7 @@ import (
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
-	"google.golang.org/protobuf/proto"
 	"maragu.dev/goqite"
-
-	rpc "github.com/chinese-room-solutions/mass-proto/gen/go"
 )
 
 // Priority controls queue ordering (higher = processed first).
@@ -32,23 +32,12 @@ type Priority int
 
 const (
 	PriorityLow      Priority = iota // background/batch jobs
-	PriorityMedium                   // default for all requests (API, app, etc.)
-	PriorityHigh                     // elevated by user or app explicitly
+	PriorityMedium                   // default for scheduled work
+	PriorityHigh                     // elevated by user or gateway explicitly
 	PriorityCritical                 // urgent/real-time, set explicitly
 )
 
-// RequestType identifies the kind of inference request in the queue.
-type RequestType byte
-
-const (
-	RequestTypeChatCompletion      RequestType = 0
-	RequestTypeBatchChatCompletion RequestType = 1
-	RequestTypeEmbedding           RequestType = 2
-	RequestTypeBatchEmbedding      RequestType = 3
-	RequestTypeTokenize            RequestType = 4
-)
-
-// Queue wraps goqite to provide typed inference request queueing.
+// Queue wraps goqite to provide typed job queueing.
 type Queue struct {
 	q      *goqite.Queue
 	db     *sql.DB
@@ -145,48 +134,50 @@ func (q *Queue) Name() string { return q.name }
 // MaxRetries is the maximum number of times a task can be re-queued before being dropped.
 const MaxRetries = 5
 
-// Envelope wraps a serialized proto request with scheduler metadata.
+// Envelope wraps an opaque, gateway-encoded payload with scheduler metadata.
 //
 // Wire format (little-endian):
 //
-//	[1B type][1B priority][1B retries][8B modelSizeBytes]
+//	[1B priority][1B retries][8B difficulty]
+//	[1B runtime_name_len][runtime_name]
+//	[1B model_id_len][model_id]
 //	[1B source_len][source]
-//	[1B fp_len][fp]
 //	[1B reqid_len][reqid]
 //	[1B gmid_len][gmid]
 //	[payload]
 type Envelope struct {
-	Type           RequestType
-	Priority       Priority // preserved across queue hops
-	Retries        uint8    // incremented on each re-queue; dropped at MaxRetries
-	ModelSizeBytes uint64   // cached at submit; used by scheduler scoring
-	Source         string   // who submitted: "direct", "app:<name>"
-	Fingerprint    string   // model config fingerprint (may be empty)
-	RequestID      string   // original request ID for result tracking across queue hops
-	GlobalMsgID    string   // original global queue message ID for durability tracking
-	Payload        []byte
+	Priority    Priority // preserved across queue hops
+	Retries     uint8    // incremented on each re-queue; dropped at MaxRetries
+	Difficulty  uint64   // gateway-supplied weight hint; used by scheduler scoring
+	RuntimeName string   // routes to workers of this kind (e.g. "llama-cpp")
+	ModelID     string   // gateway-defined opaque ID; affinity key (which workers have it loaded)
+	Source      string   // who submitted: "direct", "gateway:<runtime_name>", etc.
+	RequestID   string   // original request ID for result tracking across queue hops
+	GlobalMsgID string   // original global queue message ID for durability tracking
+	Payload     []byte   // gateway-defined opaque job bytes (sent to worker as HubAssignJob.payload)
 }
 
-// envelopeHeaderBytes is the fixed-size prefix in the wire format: type +
-// priority + retries + modelSizeBytes. Variable-length fields follow.
-const envelopeHeaderBytes = 1 + 1 + 1 + 8
+// envelopeHeaderBytes is the fixed-size prefix in the wire format: priority +
+// retries + difficulty. Variable-length fields follow.
+const envelopeHeaderBytes = 1 + 1 + 8
 
 // Marshal serializes the envelope to bytes.
 func (e Envelope) Marshal() []byte {
+	rk := truncate255(e.RuntimeName)
+	mid := truncate255(e.ModelID)
 	src := truncate255(e.Source)
-	fp := truncate255(e.Fingerprint)
 	rid := truncate255(e.RequestID)
 	gmid := truncate255(e.GlobalMsgID)
 
-	buf := make([]byte, envelopeHeaderBytes+4+len(src)+len(fp)+len(rid)+len(gmid)+len(e.Payload))
-	buf[0] = byte(e.Type)
-	buf[1] = byte(e.Priority)
-	buf[2] = e.Retries
-	binary.LittleEndian.PutUint64(buf[3:11], e.ModelSizeBytes)
+	buf := make([]byte, envelopeHeaderBytes+5+len(rk)+len(mid)+len(src)+len(rid)+len(gmid)+len(e.Payload))
+	buf[0] = byte(e.Priority)
+	buf[1] = e.Retries
+	binary.LittleEndian.PutUint64(buf[2:10], e.Difficulty)
 	off := envelopeHeaderBytes
 
+	off = writeLenPrefixed(buf, off, rk)
+	off = writeLenPrefixed(buf, off, mid)
 	off = writeLenPrefixed(buf, off, src)
-	off = writeLenPrefixed(buf, off, fp)
 	off = writeLenPrefixed(buf, off, rid)
 	off = writeLenPrefixed(buf, off, gmid)
 	copy(buf[off:], e.Payload)
@@ -199,18 +190,20 @@ func UnmarshalEnvelope(data []byte) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("envelope too short for header")
 	}
 	env := Envelope{
-		Type:           RequestType(data[0]),
-		Priority:       Priority(data[1]),
-		Retries:        data[2],
-		ModelSizeBytes: binary.LittleEndian.Uint64(data[3:11]),
+		Priority:   Priority(data[0]),
+		Retries:    data[1],
+		Difficulty: binary.LittleEndian.Uint64(data[2:10]),
 	}
 	off := envelopeHeaderBytes
 
 	var err error
-	if env.Source, off, err = readLenPrefixed(data, off, "source"); err != nil {
+	if env.RuntimeName, off, err = readLenPrefixed(data, off, "runtime_name"); err != nil {
 		return Envelope{}, err
 	}
-	if env.Fingerprint, off, err = readLenPrefixed(data, off, "fingerprint"); err != nil {
+	if env.ModelID, off, err = readLenPrefixed(data, off, "model_id"); err != nil {
+		return Envelope{}, err
+	}
+	if env.Source, off, err = readLenPrefixed(data, off, "source"); err != nil {
 		return Envelope{}, err
 	}
 	if env.RequestID, off, err = readLenPrefixed(data, off, "request_id"); err != nil {
@@ -255,90 +248,23 @@ func readLenPrefixed(data []byte, off int, field string) (string, int, error) {
 // SubmitResult contains the queue message ID and request hash for cache lookups.
 type SubmitResult struct {
 	ID          string // goqite message ID
-	RequestHash string // SHA-256 hex of canonical request
+	RequestHash string // SHA-256 hex of canonical (runtime_name, model_id, payload) tuple
 }
 
-// SubmitChatCompletion enqueues a chat completion request.
-func (q *Queue) SubmitChatCompletion(ctx context.Context, req *rpc.ChatCompletionRequest, priority Priority) (SubmitResult, error) {
-	return q.submit(ctx, RequestTypeChatCompletion, req, priority)
-}
-
-// SubmitBatchChatCompletion enqueues a batch chat completion request.
-func (q *Queue) SubmitBatchChatCompletion(ctx context.Context, req *rpc.BatchChatCompletionRequest, priority Priority) (SubmitResult, error) {
-	return q.submit(ctx, RequestTypeBatchChatCompletion, req, priority)
-}
-
-// SubmitEmbedding enqueues an embedding request.
-func (q *Queue) SubmitEmbedding(ctx context.Context, req *rpc.EmbeddingRequest, priority Priority) (SubmitResult, error) {
-	return q.submit(ctx, RequestTypeEmbedding, req, priority)
-}
-
-// SubmitBatchEmbedding enqueues a batch embedding request.
-func (q *Queue) SubmitBatchEmbedding(ctx context.Context, req *rpc.BatchEmbeddingRequest, priority Priority) (SubmitResult, error) {
-	return q.submit(ctx, RequestTypeBatchEmbedding, req, priority)
-}
-
-// SubmitTokenize enqueues a tokenize request.
-func (q *Queue) SubmitTokenize(ctx context.Context, req *rpc.TokenizeRequest, priority Priority) (SubmitResult, error) {
-	return q.submit(ctx, RequestTypeTokenize, req, priority)
-}
-
-// SubmitEnvelope enqueues a complete envelope, preserving all fields including RequestID.
-func (q *Queue) SubmitEnvelope(ctx context.Context, env Envelope, priority Priority) (SubmitResult, error) {
-	reqHash := RequestHash(env.Type, env.Payload)
-
+// Submit enqueues a fully-built envelope. The envelope's RequestID and
+// GlobalMsgID are typically set by the caller; otherwise they remain empty
+// and re-queue tracking falls back to the goqite message ID.
+func (q *Queue) Submit(ctx context.Context, env Envelope) (SubmitResult, error) {
+	hash := EnvelopeHash(env)
 	id, err := q.q.SendAndGetID(ctx, goqite.Message{
 		Body:     env.Marshal(),
-		Priority: int(priority),
+		Priority: int(env.Priority),
 	})
 	if err != nil {
-		return SubmitResult{}, ctxerr.With(fmt.Errorf("enqueuing envelope: %w", err), map[string]any{"queue": q.name})
+		return SubmitResult{}, ctxerr.With(fmt.Errorf("enqueuing envelope: %w", err), map[string]any{"queue": q.name, "runtime_name": env.RuntimeName, "model_id": env.ModelID})
 	}
 	q.signal()
-
-	return SubmitResult{
-		ID:          string(id),
-		RequestHash: reqHash,
-	}, nil
-}
-
-// SubmitRaw enqueues a pre-serialized payload. fingerprint and
-// modelSizeBytes are derived from the request's model_config at submit
-// time so the dispatcher can score placement without re-parsing the proto.
-// modelSizeBytes=0 (unresolved model, e.g. external API) → "no swap cost
-// known."
-func (q *Queue) SubmitRaw(ctx context.Context, reqType RequestType, payload []byte, source, fingerprint string, modelSizeBytes uint64, priority Priority) (SubmitResult, error) {
-	reqHash := RequestHash(reqType, payload)
-	envelope := Envelope{
-		Type:           reqType,
-		Priority:       priority,
-		ModelSizeBytes: modelSizeBytes,
-		Source:         source,
-		Fingerprint:    fingerprint,
-		Payload:        payload,
-	}
-
-	id, err := q.q.SendAndGetID(ctx, goqite.Message{
-		Body:     envelope.Marshal(),
-		Priority: int(priority),
-	})
-	if err != nil {
-		return SubmitResult{}, ctxerr.With(fmt.Errorf("enqueuing request: %w", err), map[string]any{"queue": q.name, "type": reqType, "source": source, "fingerprint": fingerprint})
-	}
-	q.signal()
-
-	return SubmitResult{
-		ID:          string(id),
-		RequestHash: reqHash,
-	}, nil
-}
-
-func (q *Queue) submit(ctx context.Context, reqType RequestType, msg proto.Message, priority Priority) (SubmitResult, error) {
-	payload, err := proto.Marshal(msg)
-	if err != nil {
-		return SubmitResult{}, fmt.Errorf("marshalling request: %w", err)
-	}
-	return q.SubmitRaw(ctx, reqType, payload, "direct", "", 0, priority)
+	return SubmitResult{ID: string(id), RequestHash: hash}, nil
 }
 
 // Receive retrieves the next message from the queue.
@@ -598,7 +524,7 @@ func (q *Queue) ReleaseLeaseAndDelete(ctx context.Context, msgID MessageID, othe
 // error, both queues are unchanged.
 //
 // Panics if dst is on a different database — wiring bug.
-func (q *Queue) LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur time.Duration, dst QueueInterface, env Envelope, priority Priority) (SubmitResult, bool, error) {
+func (q *Queue) LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur time.Duration, dst QueueInterface, env Envelope) (SubmitResult, bool, error) {
 	dq := assertSameDB(q, dst)
 
 	var result SubmitResult
@@ -613,15 +539,12 @@ func (q *Queue) LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur 
 		}
 		id, err := dq.q.SendAndGetIDTx(ctx, tx, goqite.Message{
 			Body:     env.Marshal(),
-			Priority: int(priority),
+			Priority: int(env.Priority),
 		})
 		if err != nil {
 			return ctxerr.With(fmt.Errorf("inserting destination row: %w", err), map[string]any{"queue": dq.name})
 		}
-		result = SubmitResult{
-			ID:          string(id),
-			RequestHash: RequestHash(env.Type, env.Payload),
-		}
+		result = SubmitResult{ID: string(id), RequestHash: EnvelopeHash(env)}
 		leased = true
 		return nil
 	})
@@ -634,16 +557,15 @@ func (q *Queue) LeaseAndSubmit(ctx context.Context, leaseID MessageID, leaseDur 
 	return result, leased, nil
 }
 
-// Requeue returns a message to the queue. All envelope metadata
-// (fingerprint, model size, IDs) is preserved so the requeued task scores
-// identically next time.
+// Requeue returns a message to the queue. All envelope metadata is
+// preserved so the requeued task scores identically next time.
 func (q *Queue) Requeue(ctx context.Context, msg *Message, priority Priority) error {
 	env, err := UnmarshalEnvelope(msg.Body)
 	if err != nil {
 		return fmt.Errorf("unmarshalling envelope for requeue: %w", err)
 	}
 	env.Priority = priority
-	_, err = q.SubmitEnvelope(ctx, env, priority)
+	_, err = q.Submit(ctx, env)
 	return err
 }
 
@@ -659,10 +581,15 @@ func (q *Queue) Depth(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// RequestHash computes a deterministic SHA-256 hash of a request for cache lookups.
-func RequestHash(reqType RequestType, payload []byte) string {
+// EnvelopeHash computes a deterministic SHA-256 hash of an envelope's
+// identity tuple (runtime_name, model_id, payload). Used for cache lookups
+// — same job submitted twice yields the same hash.
+func EnvelopeHash(env Envelope) string {
 	h := sha256.New()
-	h.Write([]byte{byte(reqType)})
-	h.Write(payload)
+	h.Write([]byte(env.RuntimeName))
+	h.Write([]byte{0})
+	h.Write([]byte(env.ModelID))
+	h.Write([]byte{0})
+	h.Write(env.Payload)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

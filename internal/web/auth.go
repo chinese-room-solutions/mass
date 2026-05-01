@@ -57,7 +57,8 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 			strings.HasPrefix(ct, "application/proto") {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			mustHTTPWrite(w, []byte(`{"error":"unauthorized"}`))
+			// Best-effort: tolerate a closed client connection silently.
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 			return
 		}
 

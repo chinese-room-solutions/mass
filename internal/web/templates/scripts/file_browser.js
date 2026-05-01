@@ -9,15 +9,25 @@
 //   entriesElId   — entries container element ID
 //   ext           — file extension filter (empty string = show all)
 //   dirsOnly      — true to hide files and only show directories
-//   onSelect(path) — called when a file/dir is selected (click for files, navigate for dirs)
+//   multiple      — true to allow multi-select (clicking files toggles them
+//                   without unselecting siblings); onSelect is called with an
+//                   array of paths on every change
+//   onSelect(path | paths) — called when selection changes. With multiple=true
+//                            receives the full array of currently-selected paths;
+//                            otherwise receives the single picked path.
 //   onNavigate(dir) — optional, called when the current directory changes
 window.__massFileBrowser = function(opts) {
 	var pathElId = opts.pathElId;
 	var entriesElId = opts.entriesElId;
 	var ext = opts.ext || '';
 	var dirsOnly = opts.dirsOnly || false;
+	var multiple = opts.multiple || false;
 	var onSelect = opts.onSelect || function() {};
 	var onNavigate = opts.onNavigate || function() {};
+	// Multi-select state lives on the browser instance so navigation
+	// across folders preserves selections — pre-refactor MASS only had
+	// single-select so this is fresh ground.
+	var selected = {}; // path -> true
 
 	function esc(s) {
 		var d = document.createElement('div');
@@ -72,17 +82,31 @@ window.__massFileBrowser = function(opts) {
 			var nameSpan = e.name === '..' ? '<span class="text-neutral-400">..</span>' :
 				'<span class="truncate">' + esc(e.name) + '</span>';
 			row.innerHTML = '<sl-icon name="' + icon + '" class="text-neutral-400 flex-shrink-0"></sl-icon>' + nameSpan;
+			if (multiple && !e.is_dir && selected[e.path]) {
+				row.classList.add('mass-fb-selected');
+			}
 			row.onclick = function() {
 				if (e.is_dir) {
 					if (e.path === '__roots__') { loadRoots(); }
 					else { loadDir(e.path); }
-				} else {
-					container.querySelectorAll('.mass-fb-selected').forEach(function(el) {
-						el.classList.remove('mass-fb-selected');
-					});
-					row.classList.add('mass-fb-selected');
-					onSelect(e.path);
+					return;
 				}
+				if (multiple) {
+					if (selected[e.path]) {
+						delete selected[e.path];
+						row.classList.remove('mass-fb-selected');
+					} else {
+						selected[e.path] = true;
+						row.classList.add('mass-fb-selected');
+					}
+					onSelect(Object.keys(selected));
+					return;
+				}
+				container.querySelectorAll('.mass-fb-selected').forEach(function(el) {
+					el.classList.remove('mass-fb-selected');
+				});
+				row.classList.add('mass-fb-selected');
+				onSelect(e.path);
 			};
 			container.appendChild(row);
 		});
@@ -110,10 +134,10 @@ window.__massFileBrowser = function(opts) {
 		var url = '/api/v1/browse?dir=' + encodeURIComponent(dir) + '&ext=' + encodeURIComponent(ext);
 		fetch(url).then(function(r) { return r.json(); }).then(function(data) {
 			if (!Array.isArray(data)) {
-				var msg = (data && data.error) ? data.error : 'unexpected response';
+				var msg = (data && data.error) ? data.error : 'Path does not exist or is not accessible.';
 				renderBreadcrumb(dir);
 				document.getElementById(entriesElId).innerHTML =
-					'<p class="text-red-400 text-sm py-2 px-1">Path does not exist or is not accessible.</p>';
+					'<p class="text-red-400 text-sm py-2 px-1">' + esc(msg) + '</p>';
 				onNavigate(dir);
 				return;
 			}

@@ -1,4 +1,4 @@
-@import "../../mass-module/uikit/theme.css";
+@import "../../mass-sdk/uikit/theme.css";
 
 @tailwind base;
 @tailwind components;
@@ -24,18 +24,6 @@ header                    { background: var(--mass-bg-panel) !important; border-
 .mass-badge     { background: var(--mass-badge-bg)     !important; color: var(--mass-badge-text)     !important; }
 .mass-badge-alt { background: var(--mass-badge-alt-bg) !important; color: var(--mass-badge-alt-text) !important; }
 
-/* Type-specific badge colors */
-html.sl-theme-light .mass-badge-chat      { background: #dbeafe !important; color: #1e40af !important; }
-html.sl-theme-light .mass-badge-embedding { background: #ede9fe !important; color: #6d28d9 !important; }
-html.sl-theme-light .mass-badge-mmproj    { background: #fef3c7 !important; color: #92400e !important; }
-
-html.sl-theme-dark .mass-badge-chat,
-html:not(.sl-theme-light) .mass-badge-chat      { background: #1e3a5f !important; color: #93c5fd !important; }
-html.sl-theme-dark .mass-badge-embedding,
-html:not(.sl-theme-light) .mass-badge-embedding { background: #2e1065 !important; color: #b0a2f0 !important; }
-html.sl-theme-dark .mass-badge-mmproj,
-html:not(.sl-theme-light) .mass-badge-mmproj    { background: #3b2f1e !important; color: #e2c088 !important; }
-
 /* ── Worker cards (sl-details) ───────────────────────────────────────────── */
 sl-details.worker-card::part(base)    { background: var(--mass-bg-panel); border-color: var(--mass-border); }
 sl-details.worker-card::part(header)  { background: var(--mass-bg-panel); color: var(--mass-text); }
@@ -51,7 +39,8 @@ sl-details.worker-card::part(content) { background: var(--mass-bg-base); }
 .mass-sidebar-icon:hover { opacity: 0.8; }
 /* Secondary sidebar icons: hidden until row hover */
 .mass-sidebar-secondary { display: none; }
-.app-row:hover .mass-sidebar-secondary { display: contents; }
+.app-row:hover .mass-sidebar-secondary,
+.runtime-row:hover .mass-sidebar-secondary { display: contents; }
 
 /* ── Tailwind neutral → theme variable mapping (light mode) ──────────────── */
 html.sl-theme-light .bg-neutral-950  { background-color: var(--mass-bg-base)  !important; }
@@ -111,8 +100,10 @@ sl-dialog.sl-theme-dark .text-neutral-400 { color: #a3a3a3 !important; }
 sl-dialog.sl-theme-dark .text-neutral-500 { color: #737373 !important; }
 sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
 
-/* status dot border adapts to panel background */
-html.sl-theme-light [id^="sidebar-dot-"] { border-color: var(--mass-bg-panel) !important; }
+/* Status dot ring matches the avatar it overlaps so the dot reads as
+   "cut out" of the avatar surface (not the panel behind it). Same
+   token the avatar uses → automatic per-theme adaptation. */
+[id^="sidebar-dot-"] { border-color: var(--mass-avatar-bg) !important; }
 
 /* ── Brand color overrides for Tailwind utilities ──────────────────────── */
 /* Active tab underline */
@@ -145,6 +136,24 @@ html.sl-theme-light [id^="sidebar-dot-"] { border-color: var(--mass-bg-panel) !i
 
 /* File browser: selected file highlight */
 .mass-fb-selected { background: var(--mass-fb-selected) !important; }
+
+/* Dialog opt-in: center the header title against the dialog's full width.
+   The close button shares the flex row by default, which shifts the
+   text-center midpoint left. Pull the close button out of flow so the
+   title can claim the full width and center on the dialog's true axis. */
+sl-dialog.mass-dialog-centered-title::part(header) {
+  position: relative;
+}
+sl-dialog.mass-dialog-centered-title::part(title) {
+  text-align: center;
+  width: 100%;
+}
+sl-dialog.mass-dialog-centered-title::part(close-button) {
+  position: absolute;
+  top: 50%;
+  right: var(--sl-spacing-large);
+  transform: translateY(-50%);
+}
 
 /* ── Resize handles ─────────────────────────────────────────────────────── */
 .mass-resize-handle {

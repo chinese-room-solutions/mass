@@ -8,7 +8,7 @@ import (
 	"github.com/KernelPryanic/ctxerr"
 )
 
-// ResultStatus tracks the lifecycle of a queued request.
+// ResultStatus tracks the lifecycle of a queued job.
 type ResultStatus string
 
 const (
@@ -18,18 +18,19 @@ const (
 	ResultStatusError      ResultStatus = "error"
 )
 
-// Result represents a stored inference result.
+// Result represents a stored job result.
 type Result struct {
 	ID          string
-	RequestHash string
 	Status      ResultStatus
-	Body        []byte // serialized proto response
+	Body        []byte // gateway-defined opaque response bytes
 	Error       string
 	CreatedAt   string
 	CompletedAt *time.Time
 }
 
-// ResultStore manages the queue_results table for caching and async retrieval.
+// ResultStore manages the queue_results table for async retrieval and
+// crash-recovery. The body is gateway-defined opaque bytes — MASS does not
+// inspect it. Identity dedup belongs to the gateway, not MASS.
 type ResultStore struct {
 	db *sql.DB
 }
@@ -40,13 +41,13 @@ func NewResultStore(db *sql.DB) *ResultStore {
 }
 
 // Create inserts a new pending result entry. Called when a request is enqueued.
-func (s *ResultStore) Create(id, requestHash string) error {
+func (s *ResultStore) Create(id string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO queue_results (id, request_hash, status) VALUES (?, ?, ?)`,
-		id, requestHash, ResultStatusPending,
+		`INSERT INTO queue_results (id, status) VALUES (?, ?)`,
+		id, ResultStatusPending,
 	)
 	if err != nil {
-		return ctxerr.With(fmt.Errorf("creating result entry: %w", err), map[string]any{"id": id, "request_hash": requestHash})
+		return ctxerr.With(fmt.Errorf("creating result entry: %w", err), map[string]any{"id": id})
 	}
 	return nil
 }
@@ -83,42 +84,14 @@ func (s *ResultStore) Get(id string) (*Result, error) {
 	r := &Result{}
 	var completedAt, errMsg sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, request_hash, status, body, error, created_at, completed_at FROM queue_results WHERE id = ?`,
+		`SELECT id, status, body, error, created_at, completed_at FROM queue_results WHERE id = ?`,
 		id,
-	).Scan(&r.ID, &r.RequestHash, &r.Status, &r.Body, &errMsg, &r.CreatedAt, &completedAt)
+	).Scan(&r.ID, &r.Status, &r.Body, &errMsg, &r.CreatedAt, &completedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, ctxerr.With(fmt.Errorf("getting result: %w", err), map[string]any{"id": id})
-	}
-	r.Error = errMsg.String
-	if completedAt.Valid {
-		t, _ := time.Parse("2006-01-02T15:04:05.000Z", completedAt.String)
-		r.CompletedAt = &t
-	}
-	return r, nil
-}
-
-// FindByHash looks up a cached result by request hash.
-// Returns the most recent completed result within the TTL, or nil if none found.
-func (s *ResultStore) FindByHash(requestHash string, ttl time.Duration) (*Result, error) {
-	cutoff := time.Now().UTC().Add(-ttl).Format("2006-01-02T15:04:05.000Z")
-	r := &Result{}
-	var completedAt, errMsg sql.NullString
-	err := s.db.QueryRow(
-		`SELECT id, request_hash, status, body, error, created_at, completed_at
-		 FROM queue_results
-		 WHERE request_hash = ? AND status = ? AND completed_at >= ?
-		 ORDER BY completed_at DESC
-		 LIMIT 1`,
-		requestHash, ResultStatusDone, cutoff,
-	).Scan(&r.ID, &r.RequestHash, &r.Status, &r.Body, &errMsg, &r.CreatedAt, &completedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, ctxerr.With(fmt.Errorf("finding cached result: %w", err), map[string]any{"request_hash": requestHash})
 	}
 	r.Error = errMsg.String
 	if completedAt.Valid {
@@ -141,7 +114,7 @@ func (s *ResultStore) Cleanup(ttl time.Duration) (int64, error) {
 	return res.RowsAffected()
 }
 
-// WaitForResult polls the result store until the given result is completed or the context is cancelled.
+// WaitForResult polls the result store until the given result is completed or done is closed.
 // Returns the completed result or an error.
 func (s *ResultStore) WaitForResult(id string, pollInterval time.Duration, done <-chan struct{}) (*Result, error) {
 	ticker := time.NewTicker(pollInterval)

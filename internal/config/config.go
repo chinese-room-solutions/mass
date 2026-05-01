@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
-	pkgllm "github.com/chinese-room-solutions/mass/pkg/llm"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
@@ -18,28 +17,17 @@ import (
 // DefaultListenAddr is the default HTTP listen address for the web UI.
 const DefaultListenAddr = ":3455"
 
-// LaunchMode controls how an app starts.
-type LaunchMode string
-
-const (
-	LaunchModeManual   LaunchMode = "manual"    // User must click Start
-	LaunchModeOnDemand LaunchMode = "on_demand" // Start on first request, stop after idle timeout
-)
-
-// DefaultModelIdleTimeout is the default idle timeout for dynamically loaded models.
-const DefaultModelIdleTimeout = 2 * time.Minute
-
-// DefaultAppIdleTimeout is the default idle timeout for on-demand apps.
-const DefaultAppIdleTimeout = 5 * time.Second
-
-// DefaultResultTTL is the default TTL for cached inference results.
+// DefaultResultTTL is the default TTL for cached job results.
 const DefaultResultTTL = 24 * time.Hour
 
-var (
-	ErrModelPathEmpty  = pkgllm.ErrModelPathEmpty
-	ErrModelNotFound   = errors.New("model not found")
-	ErrLogLevelUnknown = errors.New("unsupported log level")
-)
+// DefaultIdleEvictionTTL is the default time a loaded model can sit
+// idle on a worker before MASS evicts it. Short enough that a forgotten
+// model frees its slot quickly; long enough that back-to-back chats
+// don't pay reload cost.
+const DefaultIdleEvictionTTL = 30 * time.Second
+
+// ErrLogLevelUnknown is returned when an unrecognized log level string is parsed.
+var ErrLogLevelUnknown = errors.New("unsupported log level")
 
 // LogLevel wraps zerolog.Level with YAML/text unmarshalling.
 type LogLevel zerolog.Level
@@ -99,21 +87,17 @@ type LoggerConfig struct {
 
 // Config is the unified application configuration.
 type Config struct {
-	ListenAddr       string `yaml:"listen_addr" json:"listen_addr"`
-	AuthToken        string `yaml:"auth_token,omitempty" json:"-" secret:"true"` // Legacy: read from YAML for migration only, never serialized
-	DataDir          string `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
-	Theme            string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
-	DevMode          bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
-	RegistryURL      string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
-	ModelIdleTimeout string `yaml:"model_idle_timeout,omitempty" json:"model_idle_timeout,omitempty"` // Idle timeout before evicting dynamic models (e.g. "5m")
-	AppIdleTimeout   string `yaml:"app_idle_timeout,omitempty" json:"app_idle_timeout,omitempty"`     // Idle timeout before stopping on-demand apps (e.g. "5s")
-	ResultTTL        string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`                 // How long to keep inference results for caching (e.g. "24h")
+	ListenAddr      string `yaml:"listen_addr" json:"listen_addr"`
+	AuthToken       string `yaml:"auth_token,omitempty" json:"-" secret:"true"` // Legacy: read from YAML for migration only, never serialized
+	DataDir         string `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
+	Theme           string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
+	DevMode         bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
+	RegistryURL     string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
+	ResultTTL       string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`               // How long to keep job results (e.g. "24h")
+	IdleEvictionTTL string `yaml:"idle_eviction_ttl,omitempty" json:"idle_eviction_ttl,omitempty"` // How long a loaded model can sit idle before eviction (e.g. "10s")
 
 	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 	TLS    TLSConfig    `yaml:"tls,omitempty" json:"tls,omitempty"`
-
-	// Apps are persisted separately in apps.yml.
-	Apps []AppConfig `yaml:"-" json:"-"`
 }
 
 // TLSConfig holds TLS settings for MASS server and worker communication.
@@ -132,32 +116,6 @@ func (c *Config) EffectiveListenAddr() string {
 	return DefaultListenAddr
 }
 
-// EffectiveModelIdleTimeout returns the idle timeout for dynamic model eviction,
-// defaulting to DefaultModelIdleTimeout if empty or invalid.
-func (c *Config) EffectiveModelIdleTimeout() time.Duration {
-	if c.ModelIdleTimeout == "" {
-		return DefaultModelIdleTimeout
-	}
-	d, err := time.ParseDuration(c.ModelIdleTimeout)
-	if err != nil {
-		return DefaultModelIdleTimeout
-	}
-	return d
-}
-
-// EffectiveAppIdleTimeout returns the idle timeout for on-demand app shutdown,
-// defaulting to DefaultAppIdleTimeout if empty or invalid.
-func (c *Config) EffectiveAppIdleTimeout() time.Duration {
-	if c.AppIdleTimeout == "" {
-		return DefaultAppIdleTimeout
-	}
-	d, err := time.ParseDuration(c.AppIdleTimeout)
-	if err != nil {
-		return DefaultAppIdleTimeout
-	}
-	return d
-}
-
 // EffectiveResultTTL returns the configured result TTL duration,
 // defaulting to DefaultResultTTL if empty or invalid.
 func (c *Config) EffectiveResultTTL() time.Duration {
@@ -171,53 +129,25 @@ func (c *Config) EffectiveResultTTL() time.Duration {
 	return d
 }
 
+// EffectiveIdleEvictionTTL returns the configured idle-eviction TTL
+// duration, defaulting to DefaultIdleEvictionTTL if empty or invalid.
+func (c *Config) EffectiveIdleEvictionTTL() time.Duration {
+	if c.IdleEvictionTTL == "" {
+		return DefaultIdleEvictionTTL
+	}
+	d, err := time.ParseDuration(c.IdleEvictionTTL)
+	if err != nil {
+		return DefaultIdleEvictionTTL
+	}
+	return d
+}
+
 // EffectiveDataDir returns the configured DataDir or the platform default.
 func (c *Config) EffectiveDataDir() (string, error) {
 	if c.DataDir != "" {
 		return c.DataDir, nil
 	}
 	return DefaultDataDir()
-}
-
-// FindApp returns the AppConfig with the given name, or nil.
-func (c *Config) FindApp(name string) *AppConfig {
-	for i := range c.Apps {
-		if c.Apps[i].Name == name {
-			return &c.Apps[i]
-		}
-	}
-	return nil
-}
-
-// RemoveApp removes an app by name. Returns true if found and removed.
-func (c *Config) RemoveApp(name string) bool {
-	for i := range c.Apps {
-		if c.Apps[i].Name == name {
-			c.Apps = append(c.Apps[:i], c.Apps[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// AppConfig describes an app known to MASS (unified superset).
-type AppConfig struct {
-	Name       string     `yaml:"name" json:"name"`
-	Command    string     `yaml:"command" json:"command"`                   // Command to execute, e.g. "./app" or "python main.py"
-	Config     string     `yaml:"config,omitempty" json:"config,omitempty"` // Config file path passed to app as extra arg
-	Source     string     `yaml:"source,omitempty" json:"source,omitempty"` // "local", "url", "github:owner/repo", or registry name
-	Version    string     `yaml:"version,omitempty" json:"version,omitempty"`
-	Debug      bool       `yaml:"debug,omitempty" json:"debug,omitempty"`             // Connect to already-running app via .reattach.json
-	AutoStart  bool       `yaml:"auto_start,omitempty" json:"auto_start,omitempty"`   // Start subprocess when MASS launches
-	LaunchMode LaunchMode `yaml:"launch_mode,omitempty" json:"launch_mode,omitempty"` // manual or on_demand
-}
-
-// EffectiveLaunchMode returns the configured launch mode, defaulting to on_demand.
-func (mc *AppConfig) EffectiveLaunchMode() LaunchMode {
-	if mc.LaunchMode == "" {
-		return LaunchModeOnDemand
-	}
-	return mc.LaunchMode
 }
 
 // Default returns a Config with sensible defaults.
@@ -227,19 +157,15 @@ func Default() *Config {
 			Level:         LogLevel(zerolog.DebugLevel),
 			ConsoleWriter: true,
 		},
-		Apps: []AppConfig{},
 	}
 }
 
-// File names within the MASS config directory.
-const (
-	ConfigFile = "config.yml"
-	AppsFile   = "apps.yml"
-)
+// ConfigFile is the YAML config file name within the MASS config directory.
+const ConfigFile = "config.yml"
 
 // DefaultDir returns the platform-appropriate MASS config directory,
 // creating it if needed (e.g. %APPDATA%/mass on Windows, ~/.config/mass
-// on Linux). Files like ConfigFile and AppsFile live inside it.
+// on Linux). [ConfigFile] lives inside it.
 func DefaultDir() (string, error) {
 	cfgDir, err := os.UserConfigDir()
 	if err != nil {
@@ -275,9 +201,8 @@ func LogsDir(configDir string) string {
 	return filepath.Join(configDir, "logs")
 }
 
-// Load reads ConfigFile and AppsFile from the given config directory.
-// Returns Default() (with overlay from any existing files) and firstRun=true
-// when no ConfigFile exists on disk.
+// Load reads ConfigFile from the given config directory. Returns Default()
+// (overlaid with disk content) and firstRun=true when no file exists yet.
 func Load(configDir string) (cfg *Config, firstRun bool, err error) {
 	cfgPath := filepath.Join(configDir, ConfigFile)
 	errCtx := map[string]any{"path": cfgPath}
@@ -294,20 +219,10 @@ func Load(configDir string) (cfg *Config, firstRun bool, err error) {
 		return nil, false, ctxerr.With(fmt.Errorf("parsing config: %w", err), errCtx)
 	}
 
-	appsPath := filepath.Join(configDir, AppsFile)
-	pdata, readErr := os.ReadFile(appsPath)
-	if readErr == nil {
-		if err := yaml.Unmarshal(pdata, &cfg.Apps); err != nil {
-			return nil, false, ctxerr.With(fmt.Errorf("parsing apps config: %w", err), map[string]any{
-				"apps_path": appsPath,
-			})
-		}
-	}
-
 	return cfg, firstRun, nil
 }
 
-// Save writes ConfigFile and AppsFile to the given config directory.
+// Save writes ConfigFile to the given config directory.
 func Save(cfg *Config, configDir string) error {
 	cfgPath := filepath.Join(configDir, ConfigFile)
 	errCtx := map[string]any{"path": cfgPath}
@@ -318,19 +233,6 @@ func Save(cfg *Config, configDir string) error {
 	}
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		return ctxerr.With(fmt.Errorf("writing config: %w", err), errCtx)
-	}
-
-	appsPath := filepath.Join(configDir, AppsFile)
-	pdata, err := yaml.Marshal(cfg.Apps)
-	if err != nil {
-		return ctxerr.With(fmt.Errorf("marshalling apps config: %w", err), map[string]any{
-			"apps_path": appsPath,
-		})
-	}
-	if err := os.WriteFile(appsPath, pdata, 0644); err != nil {
-		return ctxerr.With(fmt.Errorf("writing apps config: %w", err), map[string]any{
-			"apps_path": appsPath,
-		})
 	}
 	return nil
 }
@@ -366,24 +268,33 @@ func DefaultDataDir() (string, error) {
 	}
 }
 
-// AppInstallDir returns the directory where app binaries are installed.
-func AppInstallDir(dataDir string) string {
-	return filepath.Join(dataDir, "apps")
-}
-
-// AppDir returns the base directory for a specific app (contains version subdirs).
-func AppDir(dataDir, appName string) string {
-	return filepath.Join(dataDir, "apps", appName)
-}
-
-// AppVersionDir returns the install directory for a specific app version.
-func AppVersionDir(dataDir, appName, version string) string {
-	return filepath.Join(dataDir, "apps", appName, version)
-}
-
-// ModelsDir returns the centralized models directory: {dataDir}/models/.
+// ModelsDir returns the centralized models root: {dataDir}/models/.
+// Layout under it is one subdirectory per format ({dataDir}/models/gguf/,
+// {dataDir}/models/onnx/, …), each holding flat canonical-name files. The
+// gateway is given the root (via InitRequest.models_dir) and walks its
+// own format subdir(s).
 func ModelsDir(dataDir string) string {
 	return filepath.Join(dataDir, "models")
+}
+
+// FormatModelsDir returns the directory holding all files for one model
+// format: {dataDir}/models/{format}/. Multiple runtimes that handle the
+// same format share this directory.
+func FormatModelsDir(dataDir, format string) string {
+	return filepath.Join(ModelsDir(dataDir), format)
+}
+
+// RuntimesDir returns the directory where installed runtime gateway packages
+// live: {dataDir}/runtimes/.
+func RuntimesDir(dataDir string) string {
+	return filepath.Join(dataDir, "runtimes")
+}
+
+// RuntimeDir returns the install directory for a specific runtime kind.
+// The gateway's persistent state (e.g. catalogue files) lives inside
+// this dir; uninstall preserves state files (see [Manager.Uninstall]).
+func RuntimeDir(dataDir, runtimeName string) string {
+	return filepath.Join(RuntimesDir(dataDir), runtimeName)
 }
 
 // --- Command string helpers ---
@@ -394,10 +305,7 @@ func ModelsDir(dataDir string) string {
 // QuotePath wraps a path in double quotes if it contains spaces.
 
 // SplitCommand splits a command string into tokens, respecting double-quoted
-// segments. For example:
-//
-//	`"C:\path with spaces\bin.exe" --flag arg` → ["C:\path with spaces\bin.exe", "--flag", "arg"]
-//	`simple.exe arg1 arg2`                     → ["simple.exe", "arg1", "arg2"]
+// segments.
 func SplitCommand(command string) []string {
 	var parts []string
 	var current strings.Builder
@@ -452,13 +360,3 @@ func ExpandCommandVars(command string, vars map[string]string) string {
 	}
 	return strings.Join(parts, " ")
 }
-
-// --- Model configs (canonical definitions in pkg/llm, re-exported here) ---
-
-type LlamaChatConfig = pkgllm.LlamaChatConfig
-type LlamaEmbeddingConfig = pkgllm.LlamaEmbeddingConfig
-type PlacementConfig = pkgllm.PlacementConfig
-
-type ModelConfigInterface = pkgllm.ModelConfigInterface
-type ChatModelConfigInterface = pkgllm.ChatModelConfigInterface
-type EmbeddingModelConfigInterface = pkgllm.EmbeddingModelConfigInterface

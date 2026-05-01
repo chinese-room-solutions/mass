@@ -13,3 +13,6 @@
 - Never `_ =` an error. Return + wrap when a caller can act on it; log at the call site only when a logger is already in scope; `panic` on invariants you don't expect to fail. Compile-time `var _ = X` and multi-return where the err slot is intentional are exempt.
 - Use: `make lint`, `make test` and `make build` for linting, testing and building.
 - Keep code comments/docs consise and clean.
+- Use proper abstraction only where truly required. Abstractions belong at the seams - not mid-code. Prefer plain, direct code so a change stays contained to one or two files.
+- Design for reversibility: keep features self-contained and don't leak concerns across boundaries. Ask "what would it take to delete this?" before committing something.
+- Avoid over-generalizing for hypothetical future use - write the minimal thing first.

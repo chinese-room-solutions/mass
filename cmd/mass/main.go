@@ -16,8 +16,10 @@ import (
 	"github.com/KernelPryanic/golog"
 	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/chinese-room-solutions/mass/internal/config"
+	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/gui"
-	"github.com/chinese-room-solutions/mass/internal/installer"
+	"github.com/chinese-room-solutions/mass/internal/queue"
+	"github.com/chinese-room-solutions/mass/internal/runtimes"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/tlsutil"
@@ -35,7 +37,6 @@ var version = "dev"
 
 func init() {
 	// Respect container memory limits (cgroup) with system fallback.
-	// Safe to ignore the error: on bare hosts the fallback is used.
 	_, _ = memlimit.SetGoMemLimitWithOpts(
 		memlimit.WithProvider(
 			memlimit.ApplyFallback(memlimit.FromCgroup, memlimit.FromSystem),
@@ -53,9 +54,6 @@ func main() {
 		return
 	}
 
-	// In headless mode, attach to the parent console (or allocate one)
-	// so stderr output is visible. In GUI mode the exe is built with
-	// -H windowsgui so no console is created.
 	if *headless {
 		attachOrAllocConsole()
 	}
@@ -66,7 +64,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set up log file with rotation in the config directory.
 	logsDir := config.LogsDir(cfgDir)
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal: creating logs directory:", err)
@@ -74,14 +71,12 @@ func main() {
 	}
 	logFile := &lumberjack.Logger{
 		Filename:   filepath.Join(logsDir, "mass.log"),
-		MaxSize:    2, // megabytes
+		MaxSize:    2,
 		MaxBackups: 3,
 	}
 
 	sysLog := web.NewSystemLogBuffer(1000)
 
-	// Console-formatted output goes to the syslog buffer (web UI)
-	// and to stderr in headless mode. JSON goes to the log file.
 	var consoleWriters []io.Writer
 	if *headless {
 		consoleWriters = []io.Writer{os.Stderr, sysLog}
@@ -98,24 +93,18 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("loading config")
 	}
-
-	// Write defaults on first run so the config file exists on disk.
 	if firstRun {
 		if err := config.Save(cfg, cfgDir); err != nil {
 			logger.Error().Err(err).Msg("writing default config")
 		}
 	}
 
-	// Apply logger settings from config.
 	zerolog.SetGlobalLevel(zerolog.Level(cfg.Logger.Level))
 
 	logger.Info().Str("version", version).Msg("mass starting")
-
-	// Log effective config with secret fields censored (see `secret:"true"` tags in Config).
 	cfgLogger := golog.WithCensoredSecretFields(logger.With(), "config", cfg).Logger()
 	cfgLogger.Debug().Msg("loaded config")
 
-	// Ensure data directory exists.
 	dataDir, err := cfg.EffectiveDataDir()
 	if err != nil {
 		logger.Fatal().Err(err).Msg("resolving data directory")
@@ -130,51 +119,104 @@ func main() {
 		}
 	}
 
-	// MASS is a coordinator — inference happens on workers (local or remote).
-	// Workers register dynamically via the WorkerHub stream; the fleet starts
-	// empty. Inference requests fail with "no device available" until at least
-	// one worker connects.
-	workers := worker.NewFleet()
-
-	orch := scheduler.New(cfg, saveFn, logger, workers)
-
-	// Register saved apps from disk metadata (no subprocess started).
-	for i := range cfg.Apps {
-		if cfg.Apps[i].Command == "" {
-			logger.Warn().Str("app", cfg.Apps[i].Name).Msg("skipping app with empty command")
-			continue
-		}
-		if err := orch.Register(&cfg.Apps[i]); err != nil {
-			logger.Warn().Err(err).Str("app", cfg.Apps[i].Name).Msg("failed to register app")
-		}
-	}
-
-	// Auto-start apps based on config.
-	for i := range cfg.Apps {
-		if cfg.Apps[i].AutoStart {
-			if err := orch.Start(cfg.Apps[i].Name); err != nil {
-				logger.Warn().Err(err).Str("app", cfg.Apps[i].Name).Msg("failed to auto-start app")
-			}
-		} else if cfg.Apps[i].EffectiveLaunchMode() == config.LaunchModeOnDemand {
-			logger.Info().Str("app", cfg.Apps[i].Name).Msg("on-demand app ready")
-		}
-	}
-
-	// Create app installer.
-	inst := installer.NewInstaller("", config.AppInstallDir(dataDir), logger)
-
-	// Open persistent store.
 	dbPath := filepath.Join(dataDir, "mass.db")
-	appStore, err := store.Open(dbPath)
+	st, err := store.Open(dbPath)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("opening database")
 	}
 
-	// Initialize two-level queue subsystem (global + per-device queues).
-	orch.InitQueue(appStore.DB(), appStore)
+	// MASS is a coordinator. Workers register dynamically; the fleet starts
+	// empty. Inference traffic fails until at least one worker connects and
+	// at least one matching runtime gateway is installed.
+	workers := worker.NewFleet()
 
-	// Resolve the auth token hash.
-	// Priority: MASS_AUTH_TOKEN env var > legacy config.yml > SQLite DB.
+	rtMgr, err := runtimes.NewManager(dataDir, st, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("opening runtimes manager")
+	}
+	rtMgr.SetLogLevel(zerolog.GlobalLevel().String())
+
+	orch := scheduler.New(cfg, saveFn, logger, workers)
+	rtMgr.SetScheduler(orch)
+
+	// Models are owned by individual runtime gateways now — each one walks
+	// its own {dataDir}/models/<runtime_name>/ subdir, parses metadata,
+	// renders its own list HTML, and handles deletes via the HTTP-over-gRPC
+	// proxy. MASS just aggregates the per-runtime fragments into the
+	// Models tab.
+
+	// Downloads: persistent in-flight + paused HTTP fetches into the
+	// shared models dir. Recover() restores rows from the previous
+	// session as paused — operator clicks Resume to pick them up.
+	dlMgr := downloads.NewManager(st, config.ModelsDir(dataDir), logger)
+	dlMgr.Recover()
+
+	queuePool := queue.NewPool(st.DB())
+	results := queue.NewResultStore(st.DB())
+	orch.InitQueue(queuePool, results)
+
+	// Worker hub: workers connect here and are gated on having a matching
+	// installed runtime kind.
+	massURL := "http://localhost" + cfg.EffectiveListenAddr()
+	hub := worker.NewHub(workers, massURL, config.ModelsDir(dataDir), nil, rtMgr.IsInstalled, logger)
+	// Resync per-device enable whitelist on every worker reconnect (workers
+	// are stateless; MASS holds the persisted operator intent).
+	hub.SetEnabledDevicesProvider(func(workerID string, advertised []string) []string {
+		rows, err := st.ListWorkerDevicesEnabled(workerID)
+		if err != nil {
+			return advertised
+		}
+		state := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			state[r.DeviceID] = r.Enabled
+		}
+		out := make([]string, 0, len(advertised))
+		for _, id := range advertised {
+			v, ok := state[id]
+			if !ok || v {
+				out = append(out, id)
+			}
+		}
+		return out
+	})
+
+	// Per-worker disable: the scheduler skips a worker only when every
+	// advertised device is explicitly disabled. Devices without a
+	// persisted row default to enabled (mirrors the EnabledDevices
+	// provider above) — toggling one device off must not implicitly
+	// disable the others.
+	orch.SetWorkerEnabledFn(func(workerID string) bool {
+		w := workers.Get(workerID)
+		if w == nil {
+			return true // unknown worker: don't filter (race with disconnect)
+		}
+		devices := w.Devices()
+		if len(devices) == 0 {
+			return true // pre-heartbeat race: assume enabled
+		}
+		rows, err := st.ListWorkerDevicesEnabled(workerID)
+		if err != nil {
+			return true
+		}
+		state := make(map[string]bool, len(rows))
+		for _, r := range rows {
+			state[r.DeviceID] = r.Enabled
+		}
+		for _, d := range devices {
+			v, ok := state[d.ID]
+			if !ok || v {
+				return true
+			}
+		}
+		return false
+	})
+
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	defer cleanupCancel()
+	orch.StartResultCleanup(cleanupCtx)
+	orch.StartIdleEviction(cleanupCtx)
+
+	// Resolve auth token hash. Priority: env > legacy config.yml > DB.
 	var authHash []byte
 	if envToken := os.Getenv("MASS_AUTH_TOKEN"); envToken != "" {
 		authHash, err = bcrypt.GenerateFromPassword([]byte(envToken), bcrypt.DefaultCost)
@@ -182,20 +224,18 @@ func main() {
 			logger.Fatal().Err(err).Msg("hashing env auth token")
 		}
 	} else if cfg.AuthToken != "" {
-		// Migrate legacy plain-text token from config.yml to bcrypt hash in DB.
 		authHash, err = bcrypt.GenerateFromPassword([]byte(cfg.AuthToken), bcrypt.DefaultCost)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("hashing legacy auth token")
 		}
-		if err := appStore.SetSetting("auth_token", string(authHash)); err != nil {
+		if err := st.SetSetting("auth_token", string(authHash)); err != nil {
 			logger.Fatal().Err(err).Msg("storing migrated auth token")
 		}
 		cfg.AuthToken = ""
 		saveFn()
 		logger.Info().Msg("migrated auth token from config.yml to database")
 	} else {
-		// Read bcrypt hash from DB.
-		stored, err := appStore.GetSetting("auth_token")
+		stored, err := st.GetSetting("auth_token")
 		if err != nil {
 			logger.Fatal().Err(err).Msg("reading auth token from database")
 		}
@@ -204,27 +244,29 @@ func main() {
 		}
 	}
 
-	// Create session store for browser cookie sessions.
 	sessions := web.NewSessionStore(30 * 24 * time.Hour)
 
-	// Create web handler.
 	handler, err := web.NewHandler(web.HandlerOptions{
 		Config:    cfg,
 		Scheduler: orch,
-		Installer: inst,
+		Runtimes:  rtMgr,
+		Downloads: dlMgr,
+		Store:     st,
 		SaveFn:    saveFn,
 		Logger:    logger,
-		Store:     appStore,
 		AuthHash:  authHash,
 		Sessions:  sessions,
 		SysLog:    sysLog,
 		Workers:   workers,
+		WorkerHub: hub,
+		ConfigDir: cfgDir,
+		LogsDir:   logsDir,
+		DataDir:   dataDir,
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("creating web handler")
 	}
 
-	// Wrap with auth middleware (reads live authHash from handler on each request).
 	authedHandler := handler.AuthMiddleware(handler)
 
 	addr := cfg.EffectiveListenAddr()
@@ -251,14 +293,15 @@ func main() {
 		}
 	}
 
-	// Graceful shutdown (idempotent via sync.Once).
 	done := make(chan struct{})
 	var shutdownOnce sync.Once
 	shutdown := func() {
 		shutdownOnce.Do(func() {
 			logger.Info().Msg("shutting down")
+			cleanupCancel()
+			rtMgr.Shutdown()
 			orch.ShutdownAll()
-			if err := appStore.Close(); err != nil {
+			if err := st.Close(); err != nil {
 				logger.Error().Err(err).Msg("closing database")
 			}
 			if err := srv.Shutdown(context.Background()); err != nil {
@@ -275,7 +318,6 @@ func main() {
 		shutdown()
 	}()
 
-	// Start server in background.
 	go func() {
 		var listenErr error
 		if useTLS {
@@ -295,14 +337,17 @@ func main() {
 	url := scheme + "://localhost" + addr
 	logger.Info().Str("url", url).Msg("MASS web UI starting")
 
+	// Launch any runtimes flagged auto-start. Done in the background so
+	// gateway handshake latency doesn't block the dashboard from coming
+	// up — operators see the UI immediately and gateways pop in as they
+	// finish initializing.
+	go rtMgr.AutoStartAll(cleanupCtx)
+
 	if *headless {
-		// Block until shutdown completes (triggered by signal handler).
 		<-done
 		return
 	}
 
-	// Open a native webview window on the main thread.
-	// The HTTP server runs in the background; browser access still works.
 	wv := gui.New("MASS", url, 1440, 900, cfg.Theme != "light")
 	if wv == nil {
 		logger.Warn().Msg("could not create webview window, running headless")

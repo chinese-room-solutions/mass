@@ -1,560 +1,739 @@
+// Package web hosts MASS's HTTP surface: the dashboard UI, the management
+// RPC layer, and (in Stage 2) the /mass.<runtime>.* gateway proxy.
+//
+// Stage 1 keeps the surface intentionally minimal: login, theme/auth-token
+// settings, a workers tab, and a runtimes scaffold. Inference + apps live
+// elsewhere now (gateways) and will not return here.
 package web
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/chinese-room-solutions/mass-proto/gen/go/rpcconnect"
+	"github.com/KernelPryanic/ctxerr"
+	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
-	sdkhf "github.com/chinese-room-solutions/mass-sdk/huggingface"
 	"github.com/chinese-room-solutions/mass/internal/config"
-	"github.com/chinese-room-solutions/mass/internal/huggingface"
-	"github.com/chinese-room-solutions/mass/internal/installer"
+	"github.com/chinese-room-solutions/mass/internal/downloads"
+	"github.com/chinese-room-solutions/mass/internal/runtimes"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/store"
+	"github.com/chinese-room-solutions/mass/internal/web/templates"
 	"github.com/chinese-room-solutions/mass/internal/worker"
+	"github.com/chinese-room-solutions/mass/pkg/stats"
 	"github.com/rs/zerolog"
 	"github.com/starfederation/datastar-go/datastar"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// downloadState tracks an in-progress model download for pause/resume/cancel.
-type downloadState struct {
-	RepoID    string
-	Filename  string
-	GroupName string // server-computed display name for the model group
-
-	Downloaded  int64 // current bytes (accessed under mu)
-	Total       int64 // total bytes
-	Paused      bool
-	cancelFn    context.CancelFunc
-	lastPersist time.Time // throttle DB writes
-	mu          sync.Mutex
-}
-
-// Handler serves the MASS web UI and API.
-type Handler struct {
-	cfg       *config.Config
-	orch      *scheduler.Scheduler
-	installer *installer.Installer
-	store     store.StoreInterface
-	saveFn    func() // persists current config to disk
-	logger    zerolog.Logger
-	broker    *SSEBroker
-	mux       *http.ServeMux
-	hfMu      sync.Mutex
-	hfState   *hfSearchState // server-side HF search pagination (Models tab)
-	dlMu      sync.RWMutex
-	downloads map[string]*downloadState // key: filename
-
-	authHashMu sync.RWMutex
-	authHash   []byte        // bcrypt hash of the auth token (nil = no auth)
-	sessions   *SessionStore // browser session management
-
-	sysLog *SystemLogBuffer // MASS system log ring buffer (nil = disabled)
-
-	workers       *worker.Fleet
-	onThemeChange func(dark bool) // optional: update native window title bar theme
-}
-
-// HandlerOptions bundles the dependencies needed to construct a Handler.
-// All fields are required unless noted otherwise.
+// HandlerOptions wires Handler to the rest of the process.
 type HandlerOptions struct {
 	Config    *config.Config
 	Scheduler *scheduler.Scheduler
-	Installer *installer.Installer
-	SaveFn    func() // persists current config to disk
-	Logger    zerolog.Logger
+	Runtimes  *runtimes.Manager
+	Downloads *downloads.Manager
 	Store     store.StoreInterface
-	AuthHash  []byte // bcrypt hash of the auth token; nil disables auth
+	SaveFn    func()
+	Logger    zerolog.Logger
+	AuthHash  []byte
 	Sessions  *SessionStore
-	SysLog    *SystemLogBuffer // nil disables system log streaming
+	SysLog    *SystemLogBuffer
 	Workers   *worker.Fleet
+	WorkerHub *worker.Hub
+	ConfigDir string
+	LogsDir   string
+	DataDir   string
 }
 
-// NewHandler creates the main HTTP handler for the MASS web UI.
+// Handler implements http.Handler for the MASS web UI and management API.
+type Handler struct {
+	cfg       *config.Config
+	orch      *scheduler.Scheduler
+	runtimes  *runtimes.Manager
+	downloads *downloads.Manager
+	store     store.StoreInterface
+	saveFn    func()
+	logger    zerolog.Logger
+	sessions  *SessionStore
+	sysLog    *SystemLogBuffer
+	workers   *worker.Fleet
+	workerHub *worker.Hub
+	configDir string
+	logsDir   string
+	dataDir   string
+
+	authHashMu sync.RWMutex
+	authHash   []byte
+
+	themeMu       sync.RWMutex
+	onThemeChange func(dark bool)
+
+	workersBroker   *WorkersBroker
+	schedulerBroker *SchedulerBroker
+
+	mux *http.ServeMux
+}
+
+// NewHandler builds the web handler.
 func NewHandler(opts HandlerOptions) (*Handler, error) {
-	// Migrate legacy "owner--repo" model directories to "owner/repo" structure.
-	if dataDir, err := opts.Config.EffectiveDataDir(); err == nil {
-		MigrateModelDirs(config.ModelsDir(dataDir), opts.Logger)
-	}
-
 	h := &Handler{
-		cfg:       opts.Config,
-		orch:      opts.Scheduler,
-		installer: opts.Installer,
-		store:     opts.Store,
-		saveFn:    opts.SaveFn,
-		logger:    opts.Logger,
-		broker:    NewSSEBroker(opts.Logger),
-		downloads: make(map[string]*downloadState),
-		authHash:  opts.AuthHash,
-		sessions:  opts.Sessions,
-		sysLog:    opts.SysLog,
-		workers:   opts.Workers,
+		cfg:             opts.Config,
+		orch:            opts.Scheduler,
+		runtimes:        opts.Runtimes,
+		downloads:       opts.Downloads,
+		store:           opts.Store,
+		saveFn:          opts.SaveFn,
+		logger:          opts.Logger.With().Str("component", "web").Logger(),
+		sessions:        opts.Sessions,
+		sysLog:          opts.SysLog,
+		workers:         opts.Workers,
+		workerHub:       opts.WorkerHub,
+		configDir:       opts.ConfigDir,
+		logsDir:         opts.LogsDir,
+		dataDir:         opts.DataDir,
+		authHash:        opts.AuthHash,
+		workersBroker:   NewWorkersBroker(opts.Logger),
+		schedulerBroker: NewSchedulerBroker(opts.Logger),
 	}
-	orch := opts.Scheduler
-	sysLog := opts.SysLog
-	workers := opts.Workers
-
-	// Wire scheduler callbacks to SSE broker.
-	orch.AddStatusCallback(func(name string, state scheduler.AppState, err error) {
-		h.broker.Broadcast(SSEEvent{
-			Type:    EventTypeStatus,
-			AppName: name,
-			State:   state,
-			Error:   err,
-		})
-	})
-	orch.AddLogCallback(func(name, line string) {
-		if evt, ok := parseDownloadLine(name, line); ok {
-			h.broker.Broadcast(evt)
-			return
-		}
-		h.broker.Broadcast(SSEEvent{
-			Type:    EventTypeLog,
-			AppName: name,
-			LogLine: line,
-		})
-	})
-
-	// Wire model pool changes to SSE broker.
-	orch.AddPoolChangeCallback(func(evt scheduler.PoolChangeEvent) {
-		h.broker.Broadcast(SSEEvent{
-			Type:        EventTypePoolChange,
-			PoolChange:  evt.Kind,
-			Fingerprint: evt.Fingerprint,
-		})
-	})
-
-	// Wire system log buffer to SSE broker.
-	if sysLog != nil {
-		go func() {
-			ch := sysLog.Subscribe()
-			for line := range ch {
-				h.broker.Broadcast(SSEEvent{
-					Type:       EventTypeSystemLog,
-					SysLogLine: line,
-				})
+	if h.workers != nil {
+		h.workers.AddChangeCallback(func(evt worker.FleetChangeEvent) {
+			// Updated = heartbeat tick; covered by the periodic stats SSE,
+			// no need to refetch the whole list (would collapse open cards).
+			if evt.Kind == worker.FleetChangeUpdated {
+				return
 			}
-		}()
+			h.workersBroker.Broadcast(WorkersEvent{Kind: WorkersEventChange})
+			// Add/remove also moves rows on the Scheduler tab — when a
+			// worker drops, every model loaded on it disappears.
+			h.schedulerBroker.Broadcast(SchedulerEvent{})
+			// Auto-bench newly-connected workers in the background so the
+			// UI fills in numbers without an operator click. Devices that
+			// already have stored results are skipped.
+			if evt.Kind == worker.FleetChangeAdded {
+				go h.autoBenchmarkWorker(evt.WorkerID)
+			}
+		})
+		// Loaded-set / pool-counter changes wake every Scheduler-tab
+		// subscriber. Models tab no longer needs a fan-out here — its
+		// per-row SSE stream is sourced directly from each runtime gateway.
+		h.workers.AddLoadedChangedCallback(func(_ string) {
+			h.schedulerBroker.Broadcast(SchedulerEvent{})
+		})
 	}
-
-	// Wire worker fleet changes to SSE broker.
-	workers.AddChangeCallback(func(evt worker.FleetChangeEvent) {
-		h.broker.Broadcast(SSEEvent{Type: EventTypeWorkerChange})
-		// Auto-benchmark newly connected workers' unbenchmarked devices.
-		if evt.Kind == worker.FleetChangeAdded {
-			go h.autoBenchmarkWorker(evt.WorkerID)
-		}
-	})
-
-	// Periodic agent stats refresh for live utilization gauges.
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			h.broker.Broadcast(SSEEvent{Type: EventTypeWorkerStats})
-		}
-	}()
-
-	// Auto-benchmark devices on workers registered before callbacks were wired
-	// (e.g. the local worker). Remote workers trigger via FleetChangeAdded.
-	go func() {
-		for _, ag := range workers.All() {
-			h.autoBenchmarkWorker(ag.ID())
-		}
-	}()
-
-	// Restore persisted downloads from the database. Downloads whose temp
-	// files no longer exist on disk are cleaned up from the DB.
-	h.loadPersistedDownloads()
-
-	mux, err := h.buildMux()
-	if err != nil {
-		return nil, fmt.Errorf("building mux: %w", err)
-	}
-	h.mux = mux
+	h.mux = h.buildRoutes()
 	return h, nil
 }
 
-// loadPersistedDownloads restores download state from the database on startup.
-// Downloads whose temp files no longer exist on disk have their DB rows removed.
-// Surviving downloads are loaded as paused so the user can resume them manually.
-func (h *Handler) loadPersistedDownloads() {
-	if h.store == nil {
-		return
-	}
-	rows, err := h.store.ListDownloads()
-	if err != nil {
-		h.logger.Error().Err(err).Msg("loading persisted downloads")
-		return
-	}
-
-	dir := h.modelsDir()
-	for _, row := range rows {
-		// Check if the temp file still exists on disk.
-		tempPath := huggingface.TempFilePath(row.RepoID, row.Filename, dir)
-		if _, err := os.Stat(tempPath); err != nil {
-			// Also check if the final file exists (download completed while DB wasn't updated).
-			finalPath := filepath.Join(dir, sdkhf.SanitizeRepoID(row.RepoID), row.Filename)
-			if _, err2 := os.Stat(finalPath); err2 != nil {
-				h.logger.Info().Str("file", row.Filename).Msg("removing stale download DB entry (temp file missing)")
-			} else {
-				h.logger.Info().Str("file", row.Filename).Msg("removing stale download DB entry (already completed)")
-			}
-			if err := h.store.DeleteDownload(row.Filename); err != nil {
-				h.logger.Warn().Err(err).Str("file", row.Filename).Msg("failed to delete stale download record")
-			}
-			continue
-		}
-
-		// Restore as paused — user must explicitly resume.
-		ds := &downloadState{
-			RepoID:     row.RepoID,
-			Filename:   row.Filename,
-			GroupName:  row.GroupName,
-			Downloaded: row.Downloaded,
-			Total:      row.Total,
-			Paused:     true,
-			cancelFn:   func() {}, // no-op until resumed
-		}
-		h.dlMu.Lock()
-		h.downloads[row.Filename] = ds
-		h.dlMu.Unlock()
-
-		h.logger.Info().
-			Str("file", row.Filename).
-			Int64("downloaded", row.Downloaded).
-			Int64("total", row.Total).
-			Msg("restored persisted download (paused)")
-
-		// Ensure DB status reflects paused state.
-		if row.Status != "paused" {
-			if err := h.store.SetStatus(row.Filename, "paused"); err != nil {
-				h.logger.Warn().Err(err).Str("file", row.Filename).Msg("failed to update download status")
-			}
-		}
-	}
-}
-
-func (h *Handler) buildMux() (*http.ServeMux, error) {
-	mux := http.NewServeMux()
-
-	// Static files (embedded in binary, overridable via MASS_PUBLIC_DIR).
-	pfs, err := publicFS()
-	if err != nil {
-		return nil, err
-	}
-	mux.Handle("GET /public/", http.StripPrefix("/public/", http.FileServer(pfs)))
-
-	// Page routes.
-	mux.HandleFunc("GET /", h.handlePageDashboard)
-	mux.HandleFunc("GET /login", h.handlePageLogin)
-	mux.HandleFunc("POST /login", h.handlePostLogin)
-	// --- /internal/ — UI-only plumbing: SSE event streams, HTML/Datastar
-	// fragments, binary assets, browser state toggles. NOT part of the
-	// public mass.v1 contract; can change shape without notice. External
-	// callers should use ConnectRPC under /mass.v1.Mass/* instead.
-
-	// SSE event streams.
-	mux.HandleFunc("GET /internal/events", h.handleSSEEvents)
-	mux.HandleFunc("GET /internal/sync-logs", h.handleSyncLogs)
-
-	// App UI (icons, log streaming, deselection — purely browser concerns).
-	mux.HandleFunc("GET /internal/apps/deselect", h.handleDeselectApp)
-	mux.HandleFunc("GET /internal/apps/{name}/icon", h.handleAppIcon)
-	mux.HandleFunc("GET /internal/apps/{name}/logs", h.handleAppRenderLogs)
-
-	// Settings UI toggle.
-	mux.HandleFunc("POST /internal/settings/theme", h.handleToggleTheme)
-
-	// Scheduler tab UI (Datastar HTML rendering).
-	mux.HandleFunc("GET /internal/scheduler", h.handleSchedulerInstances)
-	mux.HandleFunc("GET /internal/scheduler/info", h.handleSchedulerInstanceInfo)
-
-	// Workers benchmark progress (SSE wrapper around RunBenchmark).
-	mux.HandleFunc("POST /internal/workers/benchmark", h.handleBenchmarkSSE)
-
-	// --- /api/* — management endpoints, transitional (Phase 4 migrates
-	// the dual-implemented ones to ConnectRPC). New external callers
-	// should prefer ConnectRPC.
-
-	// App lifecycle.
-	mux.HandleFunc("POST /api/apps/install", h.handleInstallApp)
-	mux.HandleFunc("POST /api/apps/{name}/start", h.handleStartApp)
-	mux.HandleFunc("POST /api/apps/{name}/stop", h.handleStopApp)
-	mux.HandleFunc("DELETE /api/apps/{name}", h.handleRemoveApp)
-	mux.HandleFunc("POST /api/apps/{name}/launch-mode", h.handleSetLaunchMode)
-	mux.HandleFunc("POST /api/apps/{name}/auto-start", h.handleToggleAutoStart)
-	mux.HandleFunc("POST /api/apps/{name}/debug", h.handleToggleDebug)
-
-	// Settings update.
-	mux.HandleFunc("POST /api/settings", h.handleUpdateSettings)
-
-	// Workers / devices (UI plumbing — rendered HTML cards + toggle-shape).
-	mux.HandleFunc("GET /internal/workers", h.handleListWorkers)
-	mux.HandleFunc("POST /internal/workers/toggle", h.handleToggleWorkerScheduling)
-	mux.HandleFunc("POST /internal/workers/devices/toggle", h.handleToggleDeviceScheduling)
-	mux.HandleFunc("POST /api/v1/benchmark", h.handleBenchmarkAPI)
-
-	// WorkerHub: bidirectional stream for remote workers.
-	// ConnectRPC uses POST for all RPCs, so prefix with POST to avoid
-	// conflict with the GET / catch-all route.
-	canonicalFn := func() map[string]struct{} { return CanonicalModelFiles(h.modelsDir()) }
-	_, hubHandler := workerconnect.NewWorkerHubHandler(
-		worker.NewHub(h.workers, "http://"+h.cfg.EffectiveListenAddr(), h.modelsDir(), canonicalFn, h.logger),
-	)
-	mux.Handle("POST "+workerconnect.WorkerHubConnectProcedure, hubHandler)
-
-	// Worker model file fetch — public coordination endpoint that remote
-	// workers hit to download model files MASS owns. Versioned because
-	// it's a stable cross-process URL, not UI plumbing.
-	mux.HandleFunc("GET /api/v1/models/fetch/{path...}", h.handleFetchModel)
-
-	// Models tab UI (Datastar SSE / HTML rendering).
-	mux.HandleFunc("GET /internal/models", h.handleListModels)
-	mux.HandleFunc("DELETE /internal/models", h.handleDeleteModel)
-	mux.HandleFunc("POST /internal/models/download", h.handleDownloadModel)
-	mux.HandleFunc("POST /internal/models/download/pause", h.handleDownloadPause)
-	mux.HandleFunc("POST /internal/models/download/resume", h.handleDownloadResume)
-	mux.HandleFunc("POST /internal/models/download/cancel", h.handleDownloadCancel)
-	mux.HandleFunc("GET /internal/models/info", h.handleModelInfo)
-
-	// Scheduler tab UI eviction (Datastar).
-	mux.HandleFunc("DELETE /internal/scheduler/evict", h.handleSchedulerEvict)
-
-	// Public API v1 — JSON endpoints + embeddable HTML widgets that apps
-	// reuse (model picker dialog, HF search results). Both shapes share
-	// the same stability promise as ConnectRPC under /mass.v1.Mass/*.
-	mux.HandleFunc("GET /api/v1/models", h.handleAPIListModels)
-	mux.HandleFunc("POST /api/v1/models/load", h.handleLoadModel)
-	mux.HandleFunc("POST /api/v1/models/import", h.handleImportModel)
-	mux.HandleFunc("GET /api/v1/models/select", h.handleModelsSelect)
-	mux.HandleFunc("POST /api/v1/models/search", h.handleSearchHF)
-	mux.HandleFunc("POST /api/v1/models/search/more", h.handleSearchHFMore)
-	mux.HandleFunc("GET /api/v1/browse/roots", h.handleBrowseRoots)
-	mux.HandleFunc("GET /api/v1/browse", h.handleBrowseFiles)
-
-	// ConnectRPC endpoints — public mass.v1 contract handled directly by
-	// the web handler (not proxied to scheduler).
-	mux.HandleFunc("POST "+rpcconnect.MassListModelsProcedure, h.handleRPCListModels)
-	mux.HandleFunc("POST "+rpcconnect.MassListLoadedModelsProcedure, h.handleRPCListLoadedModels)
-	mux.HandleFunc("POST "+rpcconnect.MassLoadModelProcedure, h.handleRPCLoadModel)
-	mux.HandleFunc("POST "+rpcconnect.MassDownloadModelProcedure, h.handleRPCDownloadModel)
-	mux.HandleFunc("POST "+rpcconnect.MassRunBenchmarkProcedure, h.handleRPCRunBenchmark)
-	mux.HandleFunc("POST "+rpcconnect.MassSetDeviceEnabledProcedure, h.handleRPCSetDeviceEnabled)
-
-	// Proxy remaining ConnectRPC (inference) and ping endpoints to scheduler.
-	// App-registered services use paths like "/mass.<app>.v1.<Service>/<Method>"
-	// and are routed by ServeHTTP before reaching this mux.
-	mux.HandleFunc("POST /mass.v1.Mass/", h.handleAPIProxy)
-	mux.HandleFunc("GET /ping", h.handlePing)
-
-	return mux, nil
-}
-
-// SetOnThemeChange registers a callback invoked when the UI theme toggles.
-// dark is true for dark mode, false for light mode.
+// SetOnThemeChange registers a callback fired whenever the theme changes
+// (used by the GUI to update the native window).
 func (h *Handler) SetOnThemeChange(fn func(dark bool)) {
+	h.themeMu.Lock()
 	h.onThemeChange = fn
+	h.themeMu.Unlock()
 }
 
+// SetAuthHash atomically swaps the active auth-token hash. Empty disables auth.
+func (h *Handler) SetAuthHash(hash []byte) {
+	h.authHashMu.Lock()
+	h.authHash = hash
+	h.authHashMu.Unlock()
+}
+
+// ServeHTTP delegates to the internal mux.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// App-registered services use paths "/mass.<app>.v1.<Service>/<Method>"
-	// — anything under /mass. that isn't a core MASS RPC. Routed straight
-	// to the scheduler (ServeMux can't express this as a single literal).
-	// Exclusions: /mass.v1.Mass/ (public inference API, on the mux) and
-	// /mass.v1.worker.WorkerHub/ (worker bidi stream, also on the mux).
-	if r.Method == http.MethodPost &&
-		strings.HasPrefix(r.URL.Path, "/mass.") &&
-		!strings.HasPrefix(r.URL.Path, "/mass.v1.Mass/") &&
-		!strings.HasPrefix(r.URL.Path, "/mass.v1.worker.") {
-		h.orch.ServeHTTP(w, r)
-		return
-	}
 	h.mux.ServeHTTP(w, r)
 }
 
-// SSEBroker fans out SSE events to connected browser clients.
-type SSEBroker struct {
-	mu      sync.Mutex
-	clients map[chan SSEEvent]struct{}
-	logger  zerolog.Logger
-}
+func (h *Handler) buildRoutes() *http.ServeMux {
+	mux := http.NewServeMux()
 
-// EventKind distinguishes event types.
-type EventKind int
-
-const (
-	EventTypeStatus       EventKind = iota
-	EventTypeProgress               // model loading progress
-	EventTypeLog                    // app stderr log line
-	EventTypeDownload               // model download progress
-	EventTypeSystemLog              // MASS system log line
-	EventTypePoolChange             // model pool changed (model loaded/evicted)
-	EventTypeWorkerChange           // worker fleet changed (agent connected/disconnected)
-	EventTypeWorkerStats            // agent stats update (gauges only, no DOM replace)
-)
-
-// SSEEvent is an event broadcast to SSE clients.
-type SSEEvent struct {
-	Type     EventKind
-	AppName  string
-	State    scheduler.AppState
-	Error    error
-	Progress string
-	LogLine  string
-	// Download progress fields (EventTypeDownload).
-	DlFilename   string
-	DlDownloaded int64
-	DlTotal      int64
-	DlDone       bool
-	DlPath       string
-	DlRepoID     string // for JS to find/create the correct group
-	DlGroupName  string // server-computed group display name
-	DlStart      bool   // download just started (insert row)
-	DlPaused     bool   // download paused
-	DlCancelled  bool   // download cancelled (remove row)
-	SysLogLine   string // MASS system log line (EventTypeSystemLog)
-	// Pool change fields (EventTypePoolChange).
-	PoolChange  scheduler.PoolChangeKind // list vs status change
-	Fingerprint string                   // set for PoolChangeStatus
-}
-
-// NewSSEBroker creates a new broker.
-func NewSSEBroker(logger zerolog.Logger) *SSEBroker {
-	return &SSEBroker{
-		clients: make(map[chan SSEEvent]struct{}),
-		logger:  logger,
+	// Static assets (no auth).
+	if pubFS, err := publicFS(); err == nil {
+		mux.Handle("GET /public/", http.StripPrefix("/public/", http.FileServer(pubFS)))
 	}
-}
 
-// Subscribe returns a channel that receives SSE events.
-func (b *SSEBroker) Subscribe() chan SSEEvent {
-	ch := make(chan SSEEvent, 32)
-	b.mu.Lock()
-	b.clients[ch] = struct{}{}
-	b.mu.Unlock()
-	return ch
-}
+	// Login.
+	mux.HandleFunc("GET /login", h.handleLoginPage)
+	mux.HandleFunc("POST /login", h.handleLoginSubmit)
+	mux.HandleFunc("POST /logout", h.handleLogout)
 
-// Unsubscribe removes and closes a subscriber channel.
-func (b *SSEBroker) Unsubscribe(ch chan SSEEvent) {
-	b.mu.Lock()
-	delete(b.clients, ch)
-	b.mu.Unlock()
-	close(ch)
-}
+	// Dashboard. {$} pins this to exactly "/" so it doesn't shadow the
+	// /mass. gateway proxy below.
+	mux.HandleFunc("GET /{$}", h.handleDashboard)
 
-// Broadcast sends an event to all connected clients.
-func (b *SSEBroker) Broadcast(evt SSEEvent) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for ch := range b.clients {
-		select {
-		case ch <- evt:
-		default: // drop if client is slow
-			b.logger.Warn().Msg("SSE client slow, event dropped")
+	// Internal browser-only HTML/SSE — not part of the public mass.v1 contract.
+	mux.HandleFunc("POST /internal/settings/theme", h.handleToggleTheme)
+
+	// Runtime gateway management.
+	mux.HandleFunc("GET /api/runtimes", h.handleListRuntimes)
+	mux.HandleFunc("POST /api/runtimes/install", h.handleInstallRuntime)
+	mux.HandleFunc("DELETE /api/runtimes/{kind}", h.handleUninstallRuntime)
+	mux.HandleFunc("POST /api/runtimes/{kind}/start", h.handleStartRuntime)
+	mux.HandleFunc("POST /api/runtimes/{kind}/stop", h.handleStopRuntime)
+	mux.HandleFunc("POST /api/runtimes/{kind}/auto-start", h.handleRuntimeAutoStartToggle)
+	mux.HandleFunc("GET /api/runtimes/{kind}/logs", h.handleRuntimeLogsSSE)
+
+	// Models tab refetch trigger. Each runtime gateway owns its own model
+	// list (rendered via /mass.<kind>.v1/Models/List); MASS just notifies
+	// the browser when something changed (install completed, runtime
+	// state shifted) so the JS aggregator re-fans the list.
+	mux.HandleFunc("GET /api/models/stream", h.handleModelsStreamSSE)
+
+	// Install / download lifecycle.
+	mux.HandleFunc("POST /api/models/install", h.handleInstallModel)
+	mux.HandleFunc("POST /api/models/import", h.handleImportLocalModel)
+	mux.HandleFunc("GET /api/groups/names", h.handleListGroupNames)
+	mux.HandleFunc("POST /api/groups/rename", h.handleRenameGroup)
+	mux.HandleFunc("POST /api/models/download/pause", h.handleDownloadPause)
+	mux.HandleFunc("POST /api/models/download/resume", h.handleDownloadResume)
+	mux.HandleFunc("POST /api/models/download/cancel", h.handleDownloadCancel)
+	mux.HandleFunc("GET /api/models/downloads/events", h.handleDownloadsEventsSSE)
+	mux.HandleFunc("POST /api/models/search", h.handleSearchHF)
+	mux.HandleFunc("POST /api/models/search/more", h.handleSearchHFMore)
+
+	// Scheduler view.
+	mux.HandleFunc("GET /api/scheduler/list", h.handleSchedulerList)
+	mux.HandleFunc("GET /api/scheduler/detail", h.handleSchedulerDetail)
+	mux.HandleFunc("GET /api/scheduler/events", h.handleSchedulerEventsSSE)
+	mux.HandleFunc("POST /api/scheduler/evict", h.handleSchedulerEvict)
+
+	// Workers tab.
+	mux.HandleFunc("GET /api/workers/list", h.handleWorkersList)
+	mux.HandleFunc("GET /api/workers/events", h.handleWorkersEventsSSE)
+	mux.HandleFunc("POST /api/workers/benchmark", h.handleWorkersBenchmark)
+	mux.HandleFunc("POST /api/workers/{id}/toggle", h.handleToggleWorker)
+	mux.HandleFunc("POST /api/workers/{id}/devices/{devID}/toggle", h.handleToggleDevice)
+
+	// File browser (used by Settings + Install dialogs).
+	mux.HandleFunc("GET /api/v1/browse/roots", h.handleBrowseRoots)
+	mux.HandleFunc("GET /api/v1/browse", h.handleBrowseFiles)
+
+	// Settings tab + system logs.
+	mux.HandleFunc("POST /api/settings", h.handleSettingsSave)
+	mux.HandleFunc("GET /api/sync-logs", h.handleSyncLogs)
+	mux.HandleFunc("GET /api/syslogs", h.handleSysLogsSSE)
+
+	// Runtime gateway proxy: HTTP → gateway HandleRequest stream.
+	//
+	// Go's ServeMux matches "/mass." exactly (no prefix semantics for non-"/"
+	// patterns); the gateway URLs are "/mass.<kind>{.|/}<rest>", which would
+	// never match. Use the catch-all and prefix-check inside.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/mass.") {
+			h.handleRuntimeProxy(w, r)
+			return
 		}
+		http.NotFound(w, r)
+	})
+
+	// Worker hub: bidi gRPC stream that workers connect to. ConnectRPC
+	// serves both the Connect protocol and plain gRPC over the same path.
+	if h.workerHub != nil {
+		path, handler := workerconnect.NewWorkerHubHandler(h.workerHub)
+		mux.Handle(path, handler)
+	}
+
+	return mux
+}
+
+// --- Pages ---
+
+func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	// Render the shell with empty Models / Scheduler / Workers. The browser
+	// fetches each tab's content lazily via /api/{tab}/list when first
+	// activated, keeping initial dashboard render O(1) regardless of model
+	// count or worker fleet size. Runtimes is rendered inline because it's
+	// already cheap (just a manifest list, no RPCs).
+	data := templates.DashboardData{
+		Theme:           h.cfg.Theme,
+		ConfigDir:       h.configDir,
+		LogsDir:         h.logsDir,
+		DataDir:         h.cfg.DataDir,
+		ListenAddr:      h.cfg.ListenAddr,
+		AuthTokenSet:    func() bool { h.authHashMu.RLock(); defer h.authHashMu.RUnlock(); return len(h.authHash) > 0 }(),
+		LogLevel:        logLevelString(h.cfg.Logger.Level),
+		DevMode:         h.cfg.DevMode,
+		ResultTTL:       h.cfg.ResultTTL,
+		IdleEvictionTTL: h.cfg.IdleEvictionTTL,
+		RegistryURL:     h.cfg.RegistryURL,
+		TLSEnabled:      h.cfg.TLS.Enabled,
+		TLSCertFile:     h.cfg.TLS.CertFile,
+		Runtimes:        h.runtimeViews(),
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.Layout("MASS", templates.Shell(data), h.cfg.Theme).Render(r.Context(), w); err != nil {
+		h.logger.Warn().Err(err).Msg("rendering dashboard")
 	}
 }
 
-// isPathUnder returns the absolute form of path and true if it is inside dir.
-func isPathUnder(path, dir string) (string, bool) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", false
-	}
-	return abs, strings.HasPrefix(filepath.ToSlash(abs), filepath.ToSlash(dir))
-}
-
-// decodeJSON decodes a JSON request body into v. Returns nil if the body is nil.
-func decodeJSON(r *http.Request, v any) error {
-	if r.Body == nil {
+func (h *Handler) runtimeViews() []templates.RuntimeViewData {
+	if h.runtimes == nil {
 		return nil
 	}
-	return json.NewDecoder(r.Body).Decode(v)
-}
-
-// writeJSON writes a JSON response. Panics on unmarshalable v (programmer bug);
-// tolerates client-disconnect errors silently.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil && !expectedClientDisconnect(err) {
-		panic(err)
-	}
-}
-
-// addDownload registers a new active download and returns its state.
-func (h *Handler) addDownload(repoID, filename string, cancelFn context.CancelFunc) *downloadState {
-	ds := &downloadState{
-		RepoID:   repoID,
-		Filename: filename,
-		cancelFn: cancelFn,
-	}
-	h.dlMu.Lock()
-	h.downloads[filename] = ds
-	h.dlMu.Unlock()
-	return ds
-}
-
-// getDownload returns the download state for a filename, or nil.
-func (h *Handler) getDownload(filename string) *downloadState {
-	h.dlMu.RLock()
-	defer h.dlMu.RUnlock()
-	return h.downloads[filename]
-}
-
-// removeDownload removes a download from the tracking map.
-func (h *Handler) removeDownload(filename string) {
-	h.dlMu.Lock()
-	delete(h.downloads, filename)
-	h.dlMu.Unlock()
-}
-
-// listActiveDownloads returns a snapshot of all active downloads.
-func (h *Handler) listActiveDownloads() []*downloadState {
-	h.dlMu.RLock()
-	defer h.dlMu.RUnlock()
-	out := make([]*downloadState, 0, len(h.downloads))
-	for _, ds := range h.downloads {
-		out = append(out, ds)
+	mfs := h.runtimes.List()
+	out := make([]templates.RuntimeViewData, len(mfs))
+	for i, mf := range mfs {
+		out[i] = templates.RuntimeViewData{
+			RuntimeName: mf.RuntimeName,
+			DisplayName: mf.DisplayName,
+			Version:     mf.Version,
+			Description: mf.Description,
+			AutoStart:   mf.AutoStart,
+			Running:     h.runtimes.IsRunning(mf.RuntimeName),
+		}
 	}
 	return out
 }
 
-// replayDownloads emits ExecuteScript calls on the given SSE connection to
-// insert download rows for all active/paused downloads. Called from
-// handleListModels after the model list is rendered, so the download rows
-// are inserted into the freshly patched DOM (no race with list load).
-func (h *Handler) replayDownloads(sse *datastar.ServerSentEventGenerator) {
-	downloads := h.listActiveDownloads()
-	if len(downloads) == 0 {
+// schedulerInstances builds the typed Scheduler-tab views from the live
+// worker fleet. One instance per (worker, loaded-model) pair.
+func (h *Handler) schedulerInstances() []templates.SchedulerInstanceView {
+	if h.workers == nil {
+		return nil
+	}
+	var out []templates.SchedulerInstanceView
+	for _, w := range h.workers.All() {
+		sw, ok := w.(*worker.StreamWorker)
+		if !ok {
+			continue
+		}
+		// Pick the first device as a compact display chip.
+		deviceID := ""
+		if devs := sw.Devices(); len(devs) > 0 {
+			deviceID = devs[0].ID
+		}
+		for _, lm := range sw.LoadedModels() {
+			status := "Active"
+			if lm.Active == 0 {
+				status = "Idle"
+			}
+			filename, fingerprint := splitModelID(lm.ModelID)
+			source := lm.Source
+			if source == "" {
+				source = "direct"
+			}
+			out = append(out, templates.SchedulerInstanceView{
+				Key:         sw.ID() + ":" + lm.ModelID,
+				ModelID:     lm.ModelID,
+				Filename:    filename,
+				Fingerprint: fingerprint,
+				WorkerID:    sw.ID(),
+				WorkerName:  sw.Name(),
+				RuntimeName: sw.RuntimeName(),
+				DeviceID:    deviceID,
+				Source:      source,
+				Mode:        "dynamic", // gateway-driven loads are dynamic by definition
+				PoolSize:    lm.PoolSize,
+				Active:      lm.Active,
+				Status:      status,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// logLevelString renders the configured zerolog level as a lowercase token
+// matching the values the Settings <sl-select> exposes.
+func logLevelString(l config.LogLevel) string {
+	b, _ := l.MarshalText()
+	return string(b)
+}
+
+// splitModelID splits a gateway-built model ID at its trailing
+// "#<fingerprint>" suffix, returning the prefix as filename and the
+// fingerprint separately. Shape is gateway-defined and opaque to MASS;
+// today llama-cpp emits "<filename>#<sha-prefix>". Returns the full ID
+// as filename when no '#' is present.
+func splitModelID(id string) (filename, fingerprint string) {
+	if i := strings.LastIndexByte(id, '#'); i >= 0 {
+		return id[:i], id[i+1:]
+	}
+	return id, ""
+}
+
+func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.Layout("MASS - Login", templates.LoginPage(""), h.cfg.Theme).Render(r.Context(), w); err != nil {
+		h.logger.Warn().Err(err).Msg("rendering login page")
+	}
+}
+
+func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	for _, ds := range downloads {
-		ds.mu.Lock()
-		jsFile := jsStringEscape(ds.Filename)
-		jsGroup := jsStringEscape(ds.GroupName)
-		downloaded := ds.Downloaded
-		total := ds.Total
-		paused := ds.Paused
-		ds.mu.Unlock()
-		mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlStart('%s','%s')`, jsFile, jsGroup)))
-		if total > 0 {
-			pct := int(100 * downloaded / total)
-			mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlProgress('%s',%d,%d,%d)`, jsFile, pct, downloaded, total)))
-		}
-		if paused {
-			mustSSE(sse.ExecuteScript(fmt.Sprintf(`window.__massModelDlPaused('%s')`, jsFile)))
+	token := r.PostFormValue("token")
+
+	h.authHashMu.RLock()
+	hash := h.authHash
+	h.authHashMu.RUnlock()
+
+	if len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(token)) != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = templates.Layout("MASS - Login", templates.LoginPage("Invalid token."), h.cfg.Theme).Render(r.Context(), w)
+		return
+	}
+
+	id, err := h.sessions.Create()
+	if err != nil {
+		http.Error(w, "session error", http.StatusInternalServerError)
+		return
+	}
+	setSessionCookie(w, id)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("mass_session"); err == nil && h.sessions != nil {
+		h.sessions.Invalidate(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: "mass_session", Value: "", Path: "/", MaxAge: -1})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// --- Internal endpoints ---
+
+func (h *Handler) handleToggleTheme(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Theme == "light" {
+		h.cfg.Theme = "dark"
+	} else {
+		h.cfg.Theme = "light"
+	}
+	if h.saveFn != nil {
+		h.saveFn()
+	}
+	h.themeMu.RLock()
+	cb := h.onThemeChange
+	h.themeMu.RUnlock()
+	if cb != nil {
+		cb(h.cfg.Theme != "light")
+	}
+	// Patch the $theme Datastar signal so every data-attr-bound element
+	// (page background, logo image, sl-icon glyph, dialog tints) flips
+	// alongside the OS window. The native window callback above only
+	// affects the host chrome — the page itself listens for this signal.
+	sse := datastar.NewSSE(w, r)
+	if b, err := json.Marshal(map[string]any{"theme": h.cfg.Theme}); err == nil {
+		if err := sse.PatchSignals(b); err != nil {
+			h.logger.Debug().Err(err).Msg("patching theme signal")
 		}
 	}
 }
+
+// --- Workers tab ---
+
+// buildWorkerViews assembles per-worker render data from the live fleet
+// plus any stored benchmark rows. Returned in fleet enumeration order.
+func (h *Handler) buildWorkerViews() []templates.WorkerView {
+	all := h.workers.All()
+	views := make([]templates.WorkerView, 0, len(all))
+	for _, wkr := range all {
+		status := wkr.Status()
+
+		statsMap := make(map[string]stats.DeviceStats)
+		for _, s := range wkr.Stats() {
+			statsMap[s.DeviceID] = s
+		}
+
+		// Snapshot the operator's per-device toggle state once per worker
+		// — absent rows mean "enabled" (sane default for newly-connected
+		// workers without any persisted intent).
+		enabledByDev := map[string]bool{}
+		if h.store != nil {
+			if rows, err := h.store.ListWorkerDevicesEnabled(wkr.ID()); err == nil {
+				for _, r := range rows {
+					enabledByDev[r.DeviceID] = r.Enabled
+				}
+			}
+		}
+
+		var devices []templates.ComputeView
+		anyEnabled := false
+		for _, dev := range safeDevices(wkr) {
+			devEnabled := true
+			if v, ok := enabledByDev[dev.ID]; ok {
+				devEnabled = v
+			}
+			if devEnabled {
+				anyEnabled = true
+			}
+			cv := templates.ComputeView{
+				DeviceID:   dev.ID,
+				DeviceName: dev.Name,
+				Type:       string(dev.Type),
+				Enabled:    devEnabled,
+				MemoryMB:   dev.TotalMemoryMB,
+			}
+			if row, err := h.store.GetBenchmark(wkr.ID(), dev.ID); err == nil {
+				cv.MemoryGBs = row.MemoryGBs
+				cv.ComputeGFlops = row.ComputeGFlops
+				cv.HasBenchmark = true
+			}
+			if s, ok := statsMap[dev.ID]; ok {
+				if s.TotalMemoryMB > 0 {
+					cv.UsedMemoryMB = s.UsedMemoryMB
+					cv.MemoryMB = s.TotalMemoryMB
+					cv.HasStats = true
+				}
+				cv.UtilizationPct = s.UtilizationPct
+				cv.HasUtilization = true
+			}
+			devices = append(devices, cv)
+		}
+		// "Worker enabled" is derived: any non-disabled device counts.
+		// A worker with no devices yet (race window before first heartbeat)
+		// is treated as enabled.
+		workerEnabled := anyEnabled || len(devices) == 0
+
+		views = append(views, templates.WorkerView{
+			ID:          wkr.ID(),
+			Name:        wkr.Name(),
+			RuntimeName: wkr.RuntimeName(),
+			Online:      status.Online,
+			Enabled:     workerEnabled,
+			Devices:     devices,
+			ActiveJobs:  wkr.ActiveJobs(),
+			Capacity:    wkr.AvailableCapacity(),
+		})
+	}
+	return views
+}
+
+// safeDevices calls Devices() with panic recovery — a misbehaving worker
+// implementation must not bring the dashboard down.
+func safeDevices(wkr worker.WorkerInterface) (devices []stats.Device) {
+	defer func() {
+		if r := recover(); r != nil {
+			devices = nil
+		}
+	}()
+	return wkr.Devices()
+}
+
+// --- Runtime proxy ---
+//
+// /mass.<runtime_name>.<rest> is forwarded to the matching runtime gateway
+// over its go-plugin gRPC stream. The HTTP body is streamed in as
+// HTTPRequestChunk frames; the gateway streams HTTPResponseChunk frames
+// back, the first of which carries the status code + headers.
+
+func (h *Handler) handleRuntimeProxy(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/mass.")
+	// Two route shapes share this proxy:
+	//   /mass.<kind>.<rest>   — typed HTTP + OpenAI-compat (kind is followed by '.')
+	//   /mass.<kind>/<rest>   — typed gRPC (kind is followed by '/')
+	// The kind ends at whichever separator appears first.
+	sepIdx := -1
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == '.' || rest[i] == '/' {
+			sepIdx = i
+			break
+		}
+	}
+	if sepIdx <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	kind := rest[:sepIdx]
+	subPath := rest[sepIdx:] // includes the leading separator; gateway routes on it
+	if h.runtimes == nil || !h.runtimes.IsInstalled(kind) {
+		h.writeJSONError(w, http.StatusServiceUnavailable, "runtime gateway not installed", kind)
+		return
+	}
+	gw, err := h.runtimes.Start(r.Context(), kind)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("starting runtime gateway")
+		h.writeJSONError(w, http.StatusBadGateway, "runtime gateway unavailable: "+err.Error(), kind)
+		return
+	}
+	if err := proxyToGateway(r.Context(), gw, subPath, w, r); err != nil {
+		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("proxying to runtime gateway")
+		return
+	}
+	// DELETE on a runtime path mutates the catalogue (model file
+	// removed) — wake the Models SSE renderer so the affected group
+	// card re-renders (or disappears, when its last file leaves)
+	// without a manual refresh. Other methods (GET for reads, POST
+	// for inference) leave the catalogue alone so we don't fire on
+	// them — would be wasteful to re-walk on every chat message.
+	if r.Method == http.MethodDelete {
+		h.runtimes.FireStateChange(kind)
+	}
+}
+
+// proxyToGateway streams the HTTP request into a HandleRequest gRPC stream
+// and writes the response back to the client as the gateway emits frames.
+func proxyToGateway(ctx context.Context, gw *runtimes.LoadedGateway, subPath string, w http.ResponseWriter, r *http.Request) error {
+	stream, err := gw.Client().HandleRequest(ctx)
+	if err != nil {
+		return fmt.Errorf("opening gateway stream: %w", err)
+	}
+
+	// Send the request: first frame carries metadata + (optionally) body
+	// bytes; subsequent frames carry body bytes only.
+	path := subPath
+	if r.URL.RawQuery != "" {
+		path = subPath + "?" + r.URL.RawQuery
+	}
+	first := &gatewaypb.HTTPRequestChunk{
+		Method:  r.Method,
+		Path:    path,
+		Headers: flattenHeaders(r.Header),
+	}
+
+	// Streaming send: header chunk first, then body chunks. We split body
+	// reads at a generous 64 KiB to keep individual frames small enough for
+	// most gRPC defaults.
+	if err := stream.Send(first); err != nil {
+		return fmt.Errorf("sending request header chunk: %w", err)
+	}
+	if err := streamRequestBody(stream, r.Body); err != nil {
+		return fmt.Errorf("streaming request body: %w", err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		return fmt.Errorf("closing request stream: %w", err)
+	}
+
+	// Read response: the first frame is expected to set status + headers.
+	// The final frame may carry trailers (used by gRPC to convey grpc-status /
+	// grpc-message). HTTP/2 trailers travel via the "Trailer:" pseudo-prefix
+	// on http.Header — net/http rewrites them into real HTTP/2 trailer frames.
+	headerWritten := false
+	flusher, _ := w.(http.Flusher)
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			if !headerWritten {
+				return fmt.Errorf("receiving response header: %w", err)
+			}
+			return fmt.Errorf("receiving response body: %w", err)
+		}
+		if !headerWritten {
+			for k, v := range resp.Headers {
+				w.Header().Set(k, v)
+			}
+			status := int(resp.Status)
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			headerWritten = true
+		}
+		if len(resp.Body) > 0 {
+			if _, err := w.Write(resp.Body); err != nil {
+				if expectedClientDisconnect(err) {
+					return nil
+				}
+				return fmt.Errorf("writing response body: %w", err)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if resp.EndOfStream {
+			for k, v := range resp.GetTrailers() {
+				w.Header().Set(http.TrailerPrefix+k, v)
+			}
+			return nil
+		}
+	}
+}
+
+// streamRequestBody copies the request body into a sequence of HTTPRequestChunk
+// frames. The final frame has end_of_stream=true.
+func streamRequestBody(stream gatewaypb.RuntimeGateway_HandleRequestClient, body io.ReadCloser) error {
+	defer func() { _ = body.Close() }()
+	if body == nil {
+		return stream.Send(&gatewaypb.HTTPRequestChunk{EndOfStream: true})
+	}
+	const chunkSize = 64 * 1024
+	buf := make([]byte, chunkSize)
+	for {
+		n, rerr := body.Read(buf)
+		if n > 0 {
+			if err := stream.Send(&gatewaypb.HTTPRequestChunk{Body: buf[:n]}); err != nil {
+				return err
+			}
+		}
+		if rerr == io.EOF {
+			return stream.Send(&gatewaypb.HTTPRequestChunk{EndOfStream: true})
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+}
+
+// flattenHeaders flattens an http.Header into a single-value map. Multi-value
+// headers are joined with commas — fine for HTTP semantics on every header
+// gateways are likely to inspect.
+func flattenHeaders(in http.Header) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, vs := range in {
+		out[k] = strings.Join(vs, ",")
+	}
+	return out
+}
+
+// expectedClientDisconnect reports whether err is a "client went away" error
+// we should swallow when writing to a response.
+func expectedClientDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// http.ErrAbortHandler is a panic value, not an error; everything else
+	// flows through as a network-level error. Stage 2 keeps this minimal —
+	// add tighter classification when real bug reports demand it.
+	return false
+}
+
+// writeJSONError writes a small JSON error body. Tolerates client disconnects
+// silently so a closed write isn't logged as an internal failure. Marshalling
+// is over a tiny map[string]string and cannot fail.
+func (h *Handler) writeJSONError(w http.ResponseWriter, status int, msg, runtimeName string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	body, err := json.Marshal(map[string]string{"error": msg, "runtime_name": runtimeName})
+	if err != nil {
+		h.logger.Debug().Err(err).Msg("marshalling runtime proxy error response")
+		return
+	}
+	if _, err := w.Write(body); err != nil {
+		h.logger.Debug().Err(err).Msg("writing runtime proxy error response")
+	}
+}
+
+// --- Misc ---
+
+// Bcrypt is re-exported so cmd/mass can hash tokens without importing
+// the underlying package directly.
+func Bcrypt(token string) ([]byte, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, ctxerr.With(fmt.Errorf("hashing token: %w", err), nil)
+	}
+	return hash, nil
+}
+
+// Ensure unused imports don't break builds while routes are stubbed.
+var (
+	_ = context.Background
+	_ = time.Now
+	_ = json.Marshal
+)

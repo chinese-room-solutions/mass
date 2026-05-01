@@ -1,3 +1,5 @@
+// Package templates contains the templ-generated views and a few small Go
+// helpers shared by them.
 package templates
 
 import (
@@ -11,10 +13,37 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/chinese-room-solutions/mass/internal/config"
-	"github.com/chinese-room-solutions/mass/internal/scheduler"
-	"github.com/chinese-room-solutions/mass/pkg/stats"
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
 )
+
+// PropEntry is one row in a properties panel. Shared by the Scheduler
+// instance-props view (and historically by the Models tab props panel,
+// before models moved to per-runtime ownership).
+type PropEntry struct {
+	Key   string
+	Value string
+}
+
+// pluralS returns "s" when n != 1. Tiny helper used by templ files for
+// English plural suffixes.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// modelsTabStyles applies once per page: rotates the <details> chevron
+// when the group expands. The model-list rows themselves come from each
+// runtime gateway's HTML fragment, which uses these classes verbatim.
+const modelsTabStyles = `<style>
+details.group-card[open] > summary sl-icon[name="chevron-right"] {
+  transform: rotate(90deg);
+}
+details.hf-files[open] > summary sl-icon.hf-files-chev {
+  transform: rotate(90deg);
+}
+</style>`
 
 var (
 	//go:embed scripts/file_browser.js
@@ -34,141 +63,56 @@ var (
 
 	//go:embed scripts/models.js
 	modelsTabJS string
+
+	//go:embed scripts/runtimes.js
+	runtimesJS string
+
+	//go:embed scripts/install.js
+	installJS string
 )
 
-// fileBrowserScript is the shared file browser logic used by both the app
-// file picker and the settings directory picker. Must load before shellScripts.
-var fileBrowserScript string
-
-// shellScripts contains the inline JS for the main shell:
-// app search filter, auto-save debounce, and resizable left panel.
-var shellScripts string
-
-// settingsAutoSaveScript adds debounced auto-save for settings inputs.
-// Datastar's data-on:sl-change doesn't work with Shoelace custom events,
-// so we use a global event listener (same pattern as app config auto-save).
-var settingsAutoSaveScript string
-
-// settingsBrowseScript is the inline JS for the directory browser dialog on the Settings page.
-var settingsBrowseScript string
-
-// schedulerScript is the inline JS for the scheduler tab: spacer sync, deselect,
-// and load-model dialog logic.
-var schedulerScript string
-
-// modelsTabScript is the inline JS for the models tab: spacer sync, download
-// row management, progress tracking, and model loading/import.
-var modelsTabScript string
-
-func init() {
-	fileBrowserScript = "<script>" + fileBrowserJS + "</script>"
-	shellScripts = "<script>" + shellScriptsJS + "</script>"
+// Wrapped script blobs used by the templates.
+var (
+	fileBrowserScript      = "<script>" + fileBrowserJS + "</script>"
+	shellScripts           = "<script>" + shellScriptsJS + "</script>"
 	settingsAutoSaveScript = "<script>" + settingsAutoSaveJS + "</script>"
-	settingsBrowseScript = "<script>" + settingsBrowseJS + "</script>"
-	schedulerScript = "<script>" + schedulerJS + "</script>"
-	modelsTabScript = "<script>" + modelsTabJS + "</script>"
-}
+	settingsBrowseScript   = "<script>" + settingsBrowseJS + "</script>"
+	schedulerScript        = "<script>" + schedulerJS + "</script>"
+	modelsTabScript        = "<script>" + modelsTabJS + "</script>"
+	runtimesScript         = "<script>" + runtimesJS + "</script>"
+	installScript          = "<script>" + installJS + "</script>"
+	alertScript            = "<script>" + uikit.AlertJS + "</script>"
+)
 
 // DashboardData holds all data needed to render the main dashboard shell.
+// Models, Scheduler and Workers are fetched lazily by the browser on first
+// tab activation — the shell ships their bodies as a spinner placeholder.
 type DashboardData struct {
-	Apps             []AppViewData
-	ActiveApp        string
-	ListenAddr       string
-	DataDir          string
-	AuthTokenSet     bool
-	ModelIdleTimeout string // idle timeout for dynamic model eviction (e.g. "5m")
-	AppIdleTimeout   string // idle timeout for on-demand app shutdown (e.g. "5s")
-	ResultTTL        string // how long to keep cached inference results (e.g. "24h")
-	LogLevel         string // zerolog level name (e.g. "debug", "info")
-	Theme            string // "dark" or "light"
-	DevMode          bool
-	ConfigDir        string // directory containing config.yml (shown on Settings tab)
-	LogsDir          string // path to logs directory (shown on Settings tab)
-	AgentsHTML       string // pre-rendered agents list for initial page load
-	TLSEnabled       bool
-	TLSCertFile      string
+	Runtimes        []RuntimeViewData
+	ActiveRuntime   string
+	ListenAddr      string
+	DataDir         string
+	AuthTokenSet    bool
+	LogLevel        string // zerolog level name (e.g. "debug", "info")
+	Theme           string // "dark" or "light"
+	DevMode         bool
+	ConfigDir       string // directory containing config.yml (shown on Settings tab)
+	LogsDir         string // path to logs directory (shown on Settings tab)
+	TLSEnabled      bool
+	TLSCertFile     string
+	ResultTTL       string // job result cache TTL (e.g. "24h")
+	IdleEvictionTTL string // loaded-model idle eviction TTL (e.g. "10s")
+	RegistryURL     string // future: package registry
 }
 
-// AppViewData holds template data for a single app.
-type AppViewData struct {
-	Name       string
-	State      scheduler.AppState
-	Version    string
-	Error      error
-	LaunchMode config.LaunchMode
-	AutoStart  bool
-	Debug      bool
-	HasIcon    bool
-}
-
-// ModelGroupView holds template data for a model group in the Models tab.
-type ModelGroupView struct {
-	BaseName    string
-	ModelType   string // "Chat", "Embedding"
-	HasVision   bool   // true if any variant has a sibling mmproj
-	HasThinking bool   // true if any variant supports thinking/reasoning
-	Variants    []ModelVariantView
-}
-
-// ModelVariantView holds template data for a single model file.
-type ModelVariantView struct {
-	Filename      string
-	DisplayName   string // e.g. "unsloth/Qwen3.5-4B-UD-Q4_K_XL.gguf"
-	Path          string // absolute path (for delete action)
-	Quantization  string
-	SizeFormatted string // e.g. "4.2 GB"
-	IsMmproj      bool   // true for vision projector files
-}
-
-// SchedulerInstanceView holds template data for a single loaded model instance.
-type SchedulerInstanceView struct {
-	Fingerprint string
-	Path        string
-	Filename    string   // base filename extracted from Path
-	Type        string   // "Chat" or "Embedding"
-	Source      string   // caller identity: "direct", "app: <name>", or custom value
-	Mode        string   // "dynamic" or "static"
-	WorkerID    string   // ID of the agent running this model
-	WorkerName  string   // human-readable name of the agent
-	DeviceIDs   []string // device(s) the model is loaded on
-	ActiveReqs  int64
-	Status      string // "Active", "Idle", or "Loading"
-}
-
-// SchedulerInstancePropsView holds template data for the scheduler instance properties panel.
-type SchedulerInstancePropsView struct {
-	Fingerprint string
-	Filename    string
-	Path        string
-	Type        string // "Chat" or "Embedding"
-	Source      string
-	Mode        string   // "dynamic" or "static"
-	WorkerID    string   // ID of the agent running this model
-	WorkerName  string   // human-readable name of the agent
-	DeviceIDs   []string // device(s) the model is loaded on
-	Status      string
-	ActiveReqs  int64
-	Config      []SchedulerConfigEntry
-}
-
-// SchedulerConfigEntry is a key-value pair for display in the properties panel.
-type SchedulerConfigEntry struct {
-	Key   string
-	Value string
-}
-
-// badgeClass returns the CSS class for a model type badge.
-func badgeClass(modelType string) string {
-	switch strings.ToLower(modelType) {
-	case "chat":
-		return "mass-badge mass-badge-chat"
-	case "embedding":
-		return "mass-badge mass-badge-embedding"
-	case "mmproj":
-		return "mass-badge mass-badge-mmproj"
-	default:
-		return "mass-badge"
-	}
+// RuntimeViewData holds template data for one installed runtime gateway.
+type RuntimeViewData struct {
+	RuntimeName string
+	DisplayName string
+	Version     string
+	Description string
+	Running     bool
+	AutoStart   bool
 }
 
 // dashboardSignals returns the JSON data-signals string for the dashboard.
@@ -178,44 +122,45 @@ func dashboardSignals(data DashboardData) string {
 		theme = "dark"
 	}
 	signals := map[string]any{
-		"activeTab":        "apps",
-		"activeApp":        data.ActiveApp,
-		"sidebarCollapsed": false,
-		"appSearch":        "",
-		"addAppOpen":       false,
-		"confirmOpen":      false,
-		"confirmUninstall": "",
-		"packagePath":      "",
-		"installing":       false,
-		"listenAddr":       data.ListenAddr,
-		"dataDir":          data.DataDir,
+		"activeTab":          "runtimes",
+		"activeRuntime":      data.ActiveRuntime,
+		"sidebarCollapsed":   false,
+		"runtimeSearch":      "",
+		"installRuntimeOpen": false,
+		"confirmOpen":        false,
+		"confirmUninstall":   "",
+		"packagePath":        "",
+		"installing":         false,
+		// Runtimes-tab signals other than the dialog state.
+		"listenAddr": data.ListenAddr,
+		"dataDir":    data.DataDir,
 		"authToken": func() string {
 			if data.AuthTokenSet {
-				return "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+				return "••••••••"
 			}
 			return ""
 		}(),
-		"authTokenSet":           data.AuthTokenSet,
-		"authTokenEdited":        false,
-		"theme":                  theme,
-		"devMode":                data.DevMode,
-		"modelsHfQuery":          "",
-		"modelsFilter":           "",
-		"selectedModelPath":      "",
-		"modelsInstallOpen":      false,
-		"confirmDeleteModelPath": "",
-		"confirmDeleteModelName": "",
-		"selectedSchedulerFp":    "",
-		"modelIdleTimeout":       data.ModelIdleTimeout,
-		"appIdleTimeout":         data.AppIdleTimeout,
-		"resultTtl":              data.ResultTTL,
-		"logLevel":               data.LogLevel,
-		"tlsEnabled":             data.TLSEnabled,
-		"tlsCertFile":            data.TLSCertFile,
-	}
-	// Per-app debug signals.
-	for _, p := range data.Apps {
-		signals["debug_"+p.Name] = p.Debug
+		"authTokenSet":              data.AuthTokenSet,
+		"authTokenEdited":           false,
+		"theme":                     theme,
+		"devMode":                   data.DevMode,
+		"resultTTL":                 data.ResultTTL,
+		"idleEvictionTTL":           data.IdleEvictionTTL,
+		"registryURL":               data.RegistryURL,
+		"logLevel":                  data.LogLevel,
+		"tlsEnabled":                data.TLSEnabled,
+		"tlsCertFile":               data.TLSCertFile,
+		"modelsFilter":              "",
+		"selectedModelID":           "",
+		"selectedModelRuntime":      "",
+		"confirmDeleteModelID":      "",
+		"confirmDeleteModelKind":    "",
+		"confirmDeleteModelOpen":    false,
+		"confirmDeleteGroupOpen":    false,
+		"confirmDeleteGroupPayload": "",
+		"confirmDeleteGroupLabel":   "",
+		"confirmDeleteGroupCount":   0,
+		"selectedSchedulerKey":      "",
 	}
 	b, err := json.Marshal(signals)
 	if err != nil {
@@ -224,29 +169,33 @@ func dashboardSignals(data DashboardData) string {
 	return string(b)
 }
 
-// HtmlThemeClass returns the <html> class string for the given theme.
-func HtmlThemeClass(theme string) string {
+// htmlThemeClass returns the <html> class string for the given theme.
+func htmlThemeClass(theme string) string {
 	if theme == "light" {
 		return "sl-theme-light"
 	}
 	return "sl-theme-dark dark"
 }
 
-// htmlThemeClass is the unexported alias used by templ templates.
-func htmlThemeClass(theme string) string { return HtmlThemeClass(theme) }
-
-// BodyThemeClass returns the <body> class string for the given theme.
-func BodyThemeClass(theme string) string {
+// bodyThemeClass returns the <body> class string for the given theme.
+func bodyThemeClass(theme string) string {
 	if theme == "light" {
 		return "bg-neutral-100 text-neutral-900"
 	}
 	return "bg-neutral-950 text-neutral-100"
 }
 
-// bodyThemeClass is the unexported alias used by templ templates.
-func bodyThemeClass(theme string) string { return BodyThemeClass(theme) }
+// displayPath normalises a filesystem path for display in the UI. Windows
+// data dirs come through with backslashes, which read as escape sequences
+// in monospace contexts and clash with the rest-of-codebase forward-slash
+// convention. We render with forward slashes everywhere; the OS still
+// accepts both forms when the operator copies the path.
+func displayPath(p string) string {
+	return strings.ReplaceAll(p, `\`, `/`)
+}
 
-// initial returns the first letter of name, uppercased.
+// initial returns the first letter of name, uppercased. Used for letter
+// avatars when no icon is supplied.
 func initial(name string) string {
 	runes := []rune(name)
 	if len(runes) == 0 {
@@ -255,153 +204,74 @@ func initial(name string) string {
 	return strings.ToUpper(string(runes[0]))
 }
 
-// statusDotClass returns Tailwind classes for the status dot.
-func statusDotClass(state scheduler.AppState, launchMode config.LaunchMode) string {
+// runtimeStatusDotClass returns Tailwind classes for a runtime row's status
+// dot. Running gateways are green; stopped ones are neutral; auto-start
+// runtimes that aren't yet up render blue (they will start on demand).
+func runtimeStatusDotClass(running, autoStart bool) string {
 	base := "w-2.5 h-2.5 rounded-full flex-shrink-0"
-	switch state {
-	case scheduler.StateRunning:
+	switch {
+	case running:
 		return base + " bg-green-400"
-	case scheduler.StateStarting, scheduler.StateStopping:
-		return base + " bg-yellow-400 animate-pulse"
-	case scheduler.StateError:
-		return base + " bg-red-400"
+	case autoStart:
+		return base + " bg-blue-400"
 	default:
-		if launchMode == config.LaunchModeOnDemand {
-			return base + " bg-blue-400"
-		}
 		return base + " bg-neutral-600"
 	}
 }
 
-// statusBadgeVariant returns the Shoelace badge variant for a app state.
-func statusBadgeVariant(state scheduler.AppState) string {
-	switch state {
-	case scheduler.StateRunning:
-		return "success"
-	case scheduler.StateStarting, scheduler.StateStopping:
-		return "warning"
-	case scheduler.StateError:
-		return "danger"
-	default:
-		return "neutral"
-	}
+// RenderRuntimeRowActions returns the HTML for the Start/Stop button area
+// keyed by runtime kind. Patched independently via SSE.
+func RenderRuntimeRowActions(kind string, running bool) string {
+	var buf bytes.Buffer
+	_ = runtimeRowActions(kind, running).Render(context.Background(), &buf)
+	return fmt.Sprintf(`<span id="runtime-actions-%s">`, html.EscapeString(kind)) + buf.String() + `</span>`
 }
 
-// RenderError returns an error alert HTML fragment.
-func RenderError(msg string) string {
+// RenderRuntimeAutoStartButton renders just the auto-start lightning toggle
+// for a runtime row. Patched after the toggle endpoint flips the flag.
+func RenderRuntimeAutoStartButton(kind string, autoStart bool) string {
+	var buf bytes.Buffer
+	_ = runtimeAutoStartButton(kind, autoStart).Render(context.Background(), &buf)
+	return fmt.Sprintf(`<span id="runtime-autostart-%s">`, html.EscapeString(kind)) + buf.String() + `</span>`
+}
+
+// RenderRuntimeSidebarDot returns the sidebar status-dot for a runtime row.
+func RenderRuntimeSidebarDot(kind string, running, autoStart bool) string {
 	return fmt.Sprintf(
-		`<div id="error-display"><sl-alert variant="danger" open>%s</sl-alert></div>`,
-		html.EscapeString(msg),
+		`<span id="sidebar-dot-%s" class="%s absolute -bottom-0.5 -right-0.5 border-2 border-neutral-900"></span>`,
+		html.EscapeString(kind), runtimeStatusDotClass(running, autoStart),
 	)
 }
 
-// RenderAppStatus returns HTML for the app status area (used by SSE updates).
-func RenderAppStatus(name string, state scheduler.AppState, err error, progress string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, `<div id="app-status-%s" class="flex items-center gap-2">`, html.EscapeString(name))
-	fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`,
-		statusBadgeVariant(state), html.EscapeString(state.String()))
-	if progress != "" {
-		fmt.Fprintf(&b, `<span class="text-sm text-neutral-400">%s</span>`, html.EscapeString(progress))
-	}
-	if err != nil {
-		fmt.Fprintf(&b, `<span class="text-sm text-red-400">%s</span>`, html.EscapeString(err.Error()))
-	}
-	b.WriteString(`</div>`)
-	return b.String()
-}
-
-// RenderSidebarDot returns HTML for the status dot (SSE update).
-func RenderSidebarDot(name string, state scheduler.AppState, launchMode config.LaunchMode) string {
-	return fmt.Sprintf(
-		`<span id="sidebar-dot-%s" class="%s absolute -bottom-0.5 -right-0.5 border border-neutral-900"></span>`,
-		html.EscapeString(name), statusDotClass(state, launchMode))
-}
-
-// launchModeIcon returns the Bootstrap icon name for a launch mode.
-func launchModeIcon(mode config.LaunchMode) string {
-	switch mode {
-	case config.LaunchModeOnDemand:
-		return "activity"
-	default:
-		return "hand-index"
-	}
-}
-
-// launchModeIconColor returns a CSS color style for the launch mode icon.
-func launchModeIconColor(mode config.LaunchMode) string {
-	switch mode {
-	case config.LaunchModeOnDemand:
-		return "opacity:1;color:var(--sl-color-primary-400)"
-	default:
-		return ""
-	}
-}
-
-// launchModeTooltip returns the tooltip text for a launch mode icon.
-func launchModeTooltip(mode config.LaunchMode) string {
-	switch mode {
-	case config.LaunchModeOnDemand:
-		return "On Demand"
-	default:
-		return "Manual"
-	}
-}
-
-// RenderLaunchModeDropdown returns the launch mode dropdown HTML for a app.
-func RenderLaunchModeDropdown(name string, mode config.LaunchMode) string {
+// RenderRuntimeList returns the full HTML of #runtime-list for SSE updates
+// after install or uninstall.
+func RenderRuntimeList(rs []RuntimeViewData, active string) string {
 	var buf bytes.Buffer
-	_ = launchModeDropdown(name, mode).Render(context.Background(), &buf)
-	return buf.String()
+	_ = runtimeListItems(rs, active).Render(context.Background(), &buf)
+	return `<div id="runtime-list" class="flex-1 overflow-y-auto py-1">` + buf.String() + `</div>`
 }
 
-// RenderAppActions returns the Start/Stop icon button area with a stable ID
-// so it can be patched independently via SSE status events.
-// Delegates to the appActionIcons templ component as the single source of truth.
-func RenderAppActions(name string, state scheduler.AppState) string {
-	var buf bytes.Buffer
-	_ = appActionIcons(name, state).Render(context.Background(), &buf)
-	return fmt.Sprintf(`<div id="app-actions-%s" class="flex items-center justify-center" style="min-width:2rem">`,
-		html.EscapeString(name)) + buf.String() + `</div>`
-}
-
-// RenderWelcomeState returns the welcome/empty state HTML for #app-content.
-// When empty is true, it shows "No apps installed"; otherwise "Select an app".
+// RenderWelcomeState returns the Runtimes-tab right-pane welcome state.
 func RenderWelcomeState(empty bool) string {
-	heading := "Select an app"
-	subtext := "Choose an app from the sidebar, or install a new one."
+	heading := "Select a runtime"
+	subtext := "Choose a runtime from the sidebar, or install a new one."
 	if empty {
-		heading = "No apps installed"
-		subtext = "Install an app to get started."
+		heading = "No runtimes installed"
+		subtext = "Install a runtime gateway package (.mass) to get started."
 	}
 	return `<div class="flex flex-col items-center justify-center h-64 text-center">` +
 		`<h2 class="text-lg font-semibold mb-2">` + heading + `</h2>` +
 		`<p class="text-neutral-400 text-sm mb-4">` + subtext + `</p>` +
-		`<sl-button variant="primary" size="small" data-on:click="$addAppOpen = true">` +
-		`<sl-icon slot="prefix" name="plus-lg"></sl-icon>Install New App</sl-button></div>`
+		`<sl-button variant="primary" size="small" data-on:click="$installRuntimeOpen = true">` +
+		`<sl-icon slot="prefix" name="plus-lg"></sl-icon>Install Runtime</sl-button></div>`
 }
 
-// RenderRestartNotice returns the yellow restart-needed banner for pe-restart-notice.
-func RenderRestartNotice() string {
-	return `<div id="pe-restart-notice">` +
-		`<sl-alert variant="warning" open style="--sl-spacing-large:0.5rem;font-size:0.8rem">` +
-		`<sl-icon slot="icon" name="exclamation-triangle" style="font-size:1rem"></sl-icon>` +
-		`Configuration saved. Restart the app to apply changes.` +
-		`</sl-alert></div>`
-}
+// --- Models tab text helpers ---------------------------------------------
+// View construction (modelstore.Entry → []ModelGroupView) lives in handler.go
+// to avoid pulling modelstore into the templates package. The format/group
+// helpers below are pure text and shared by both layers.
 
-// RenderRestartNoticeClear returns an empty pe-restart-notice div to clear the banner.
-func RenderRestartNoticeClear() string {
-	return `<div id="pe-restart-notice"></div>`
-}
-
-// pluralS returns "s" if n != 1, for pluralization.
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
+// --- Logs (gateway + system) ---------------------------------------------
 
 // ansiRe matches ANSI SGR escape sequences: ESC [ <params> m
 var ansiRe = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
@@ -409,11 +279,8 @@ var ansiRe = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
 // urlRe matches http:// and https:// URLs in text.
 var urlRe = regexp.MustCompile(`https?://[^\s<>"` + "`" + `]+`)
 
-// logLevelColor returns a CSS color for a plain-text log line based on the
-// level token (INF, DBG, WRN, ERR, FTL, TRC) found after the timestamp.
+// logLevelColor returns a CSS color for a console-formatted log line.
 func logLevelColor(line string) string {
-	// Fast scan: level token appears right after the timestamp, separated by a space.
-	// Format: "2026-03-10T00:54:16+01:00 INF message..."
 	idx := strings.IndexByte(line, ' ')
 	if idx > 0 && idx+4 <= len(line) {
 		token := line[idx+1:]
@@ -430,23 +297,15 @@ func logLevelColor(line string) string {
 			}
 		}
 	}
-	return "var(--mass-log-inf)" // default green
+	return "var(--mass-log-inf)"
 }
 
-// renderStructuredLogLine colors a plain-text structured log line
-// "timestamp LEVEL message key=value...": dim gray timestamp, severity-
-// colored level, white message, dim cyan keys, neutral values.
 func renderStructuredLogLine(raw string) string {
 	esc := html.EscapeString
-
-	// Try to parse: "timestamp LEVEL message key=value..."
-	// Find first space (after timestamp).
 	sp1 := strings.IndexByte(raw, ' ')
 	if sp1 < 0 {
 		return `<p class="whitespace-pre-wrap leading-tight" style="color:var(--mass-log-inf)">` + esc(raw) + `</p>`
 	}
-
-	// Check if next token is a known level.
 	rest := raw[sp1+1:]
 	sp2 := strings.IndexByte(rest, ' ')
 	var level, after string
@@ -455,25 +314,17 @@ func renderStructuredLogLine(raw string) string {
 		after = rest[sp2+1:]
 	} else {
 		level = rest
-		after = ""
 	}
-
 	levelColor := logLevelColor(raw)
 	knownLevel := false
 	switch level {
 	case "DBG", "TRC", "INF", "WRN", "ERR", "FTL":
 		knownLevel = true
 	}
-
 	if !knownLevel {
 		return `<p class="whitespace-pre-wrap leading-tight" style="color:` + levelColor + `">` + esc(raw) + `</p>`
 	}
-
 	timestamp := raw[:sp1]
-
-	// Split "after" into message and key=value pairs.
-	// Key=value pairs are tokens containing '=' with no spaces in the key.
-	// Scan from the end to find where key=value pairs start.
 	parts := strings.Split(after, " ")
 	msgEnd := len(parts)
 	for i := len(parts) - 1; i >= 0; i-- {
@@ -483,21 +334,16 @@ func renderStructuredLogLine(raw string) string {
 			break
 		}
 	}
-
 	msg := strings.Join(parts[:msgEnd], " ")
 	kvParts := parts[msgEnd:]
 
 	var b strings.Builder
 	b.WriteString(`<p class="whitespace-pre-wrap leading-tight">`)
-	// Timestamp in dim gray.
 	fmt.Fprintf(&b, `<span style="color:var(--mass-log-time)">%s</span> `, esc(timestamp))
-	// Level token in its color.
 	fmt.Fprintf(&b, `<span style="color:%s;font-weight:bold">%s</span>`, levelColor, esc(level))
-	// Message.
 	if msg != "" {
 		fmt.Fprintf(&b, ` <span style="color:var(--mass-log-msg)">%s</span>`, esc(msg))
 	}
-	// Key=value pairs with dim styling.
 	for _, kv := range kvParts {
 		eqIdx := strings.IndexByte(kv, '=')
 		if eqIdx > 0 {
@@ -512,27 +358,27 @@ func renderStructuredLogLine(raw string) string {
 	return b.String()
 }
 
-// linkifyURLs replaces http/https URLs in HTML text content with clickable <a> tags.
 func linkifyURLs(htmlStr string) string {
 	return urlRe.ReplaceAllStringFunc(htmlStr, func(u string) string {
-		return fmt.Sprintf(`<a href="%s" target="_blank" class="underline hover:text-white">%s</a>`, u, u)
+		return fmt.Sprintf(`<a href="%s" target="_blank" class="underline hover:text-white">%s</a>`,
+			html.EscapeString(u), html.EscapeString(u))
 	})
 }
 
-// RenderLogLine converts a raw log line into an HTML <p> element with
-// consistent colored parts. ANSI escape codes are stripped first so that
-// all lines go through the same structured renderer.
+// RenderLogLine converts a raw log line into a styled HTML <p>.
 func RenderLogLine(raw string) string {
-	// Strip ANSI escape codes so all lines render with the same style.
 	plain := ansiRe.ReplaceAllString(raw, "")
 	return linkifyURLs(renderStructuredLogLine(plain))
 }
 
-// RenderLogView returns the HTML for the live log stream view.
-// The caller patches this into #app-content using inner mode.
-// If history is non-empty, the buffered lines are pre-rendered instead of
-// the "Waiting for log output..." placeholder.
-func RenderLogView(name string, history []string) string {
+// RenderSystemLogLine renders one MASS system log line.
+func RenderSystemLogLine(raw string) string {
+	return RenderLogLine(raw)
+}
+
+// RenderRuntimeLogView returns the live-logs panel for a runtime kind.
+// History is the buffered tail to pre-render.
+func RenderRuntimeLogView(kind string, history []string) string {
 	esc := html.EscapeString
 	var entries string
 	if len(history) > 0 {
@@ -544,236 +390,219 @@ func RenderLogView(name string, history []string) string {
 	} else {
 		entries = `<p id="log-placeholder" class="text-neutral-500">Waiting for log output...</p>`
 	}
-	return fmt.Sprintf(`<div class="space-y-3">
+	return fmt.Sprintf(`<div class="space-y-3 p-4">
 <div class="flex items-center gap-2 text-sm font-medium text-neutral-300">
-  <sl-icon name="terminal"></sl-icon>
-  <span>%s — Live Logs</span>
+	<sl-icon name="terminal"></sl-icon>
+	<span>%s — Live Logs</span>
 </div>
-<div id="log-entries" class="font-mono text-xs bg-neutral-900 rounded-lg p-4 border border-neutral-800 min-h-64 max-h-[70vh] overflow-y-auto space-y-px">
-  %s
+<div id="log-entries" class="font-mono text-xs rounded-lg p-4 min-h-64 max-h-[calc(100vh-12rem)] overflow-y-auto space-y-px"
+		style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)">
+	%s
 </div>
 <script>
-(function(){var el=document.getElementById('log-entries');if(el)el.scrollTop=el.scrollHeight;
-var obs=new MutationObserver(function(){
-  var ph=document.getElementById('log-placeholder');if(ph)ph.remove();
-  el.scrollTop=el.scrollHeight});
-obs.observe(el,{childList:true})})();
+(function(){var el=document.getElementById('log-entries');if(el)el.scrollTop=el.scrollHeight})();
 </script>
-</div>`, esc(name), entries)
+</div>`, esc(kind), entries)
 }
 
-// RenderSystemLogLine renders a MASS system log line (console-formatted with ANSI codes)
-// into an HTML <p> element. Uses the same ANSI parser as app logs.
-func RenderSystemLogLine(raw string) string {
-	return RenderLogLine(raw)
-}
+// --- Workers tab view models ----------------------------------------------
 
-// RenderAppList returns the outer HTML of #app-list for SSE updates
-// after app discovery or removal.
-// Delegates to the appListItems templ component as the single source of truth.
-func RenderAppList(apps []AppViewData, activeApp string) string {
-	var buf bytes.Buffer
-	_ = appListItems(apps, activeApp).Render(context.Background(), &buf)
-	return `<div id="app-list" class="flex-1 overflow-y-auto py-1">` + buf.String() + `</div>`
-}
-
-// WorkerView holds data for rendering an agent row in the Workers tab.
+// WorkerView is the per-worker render shape for the Workers tab.
 type WorkerView struct {
 	ID          string
 	Name        string
+	RuntimeName string
 	Online      bool
-	AllDisabled bool // true when every device on this agent is disabled
+	Enabled     bool // operator toggle: any device on this worker enabled
 	Devices     []ComputeView
+	ActiveJobs  int
+	Capacity    int
 }
 
-// RenderAgentsList returns the full HTML for the agents list area (with wrapper div).
-func RenderAgentsList(agents []WorkerView) string {
-	return `<div id="workers-list" class="space-y-3">` + RenderAgentsListInner(agents) + `</div>`
+// ComputeView is a per-device row inside a worker card.
+type ComputeView struct {
+	DeviceID       string
+	DeviceName     string
+	Type           string  // "CPU" / "GPU"
+	Enabled        bool    // operator toggle: device allowed for new model loads
+	MemoryMB       int     // total RAM/VRAM in MB
+	UsedMemoryMB   int     // currently used
+	UtilizationPct float64 // 0-100
+	HasUtilization bool
+	HasStats       bool
+	MemoryGBs      float64 // benchmarked memory bandwidth
+	ComputeGFlops  float64 // benchmarked Q4_K matmul throughput
+	HasBenchmark   bool
 }
 
-// RenderAgentsListInner returns just the inner HTML of the agents list (no wrapper).
-func RenderAgentsListInner(agents []WorkerView) string {
+// RenderWorkersList returns the inner HTML of #workers-list (no wrapper).
+func RenderWorkersList(workers []WorkerView) string {
 	var b strings.Builder
-	b.WriteString(`<style>.agent-stats-row{display:grid;font-family:var(--sl-font-mono);grid-template-columns:10ch 6rem 12ch 6rem;align-items:center;gap:0 2rem}.agent-stats-row .bench-val{white-space:nowrap}.agent-stats-row>div.text-xs{text-align:center}</style>`)
-	if len(agents) == 0 {
-		b.WriteString(`<p class="text-xs text-neutral-500 text-center py-8">No agents registered.</p>`)
+	b.WriteString(`<style>.worker-stats-row{display:grid;font-family:var(--sl-font-mono);grid-template-columns:10ch 6rem 12ch 6rem;align-items:center;gap:0 2rem}.worker-stats-row .bench-val{white-space:nowrap}.worker-stats-row>div.text-xs{text-align:center}</style>`)
+	if len(workers) == 0 {
+		b.WriteString(`<div class="flex flex-col items-center justify-center py-16 text-center">` +
+			`<sl-icon name="pc-display-horizontal" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>` +
+			`<p class="text-sm" style="color:var(--mass-text-muted)">No workers connected.</p>` +
+			`<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Start a <span class="font-mono">mass-worker-*</span> binary that points at this MASS instance.</p>` +
+			`</div>`)
+		return b.String()
 	}
-	for _, ag := range agents {
+	for _, w := range workers {
 		statusColor := "var(--sl-color-success-400)"
 		statusIcon := "circle-fill"
 		statusText := "Online"
-		if !ag.Online {
+		if !w.Online {
 			statusColor = "var(--sl-color-neutral-400)"
 			statusIcon = "circle"
 			statusText = "Offline"
 		}
-
-		workerIDSafe := html.EscapeString(ag.ID)
-		// Build filter text: agent name + status + device names/types.
-		filterText := strings.ToLower(ag.Name + " " + statusText)
-		for _, d := range ag.Devices {
-			filterText += " " + strings.ToLower(d.DeviceName+" "+string(d.Type))
+		idSafe := html.EscapeString(w.ID)
+		filterText := strings.ToLower(w.Name + " " + statusText + " " + w.RuntimeName)
+		for _, d := range w.Devices {
+			filterText += " " + strings.ToLower(d.DeviceName+" "+d.Type)
 		}
-		workerCardStyle := ""
-		if ag.AllDisabled {
-			workerCardStyle = ` style="--mass-border:rgba(133,77,14,0.5)"`
-		}
-		fmt.Fprintf(&b, `<sl-details class="worker-card" id="worker-card-%s" data-filter-text="%s"%s>`,
-			workerIDSafe, html.EscapeString(filterText), workerCardStyle)
+		fmt.Fprintf(&b, `<sl-details class="worker-card" id="worker-card-%s" data-filter-text="%s">`,
+			idSafe, html.EscapeString(filterText))
 		b.WriteString(`<div slot="summary" class="flex items-center gap-3 w-full">`)
-		fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon name="%s" style="font-size:0.5rem;color:%s"></sl-icon></sl-tooltip>`, statusText, statusIcon, statusColor)
-		fmt.Fprintf(&b, `<span class="text-sm font-medium" style="color:var(--mass-text)">%s</span>`, html.EscapeString(ag.Name))
-		fmt.Fprintf(&b, `<span class="text-xs text-neutral-500 ml-auto mr-2">%d device(s)</span>`, len(ag.Devices))
-		if ag.Online && len(ag.Devices) > 0 {
-			workerID := html.EscapeString(ag.ID)
-			agToggleIcon := "toggle2-on"
-			agToggleColor := "var(--sl-color-success-500)"
-			agToggleTip := "Pause all devices"
-			if ag.AllDisabled {
-				agToggleIcon = "toggle2-off"
-				agToggleColor = "var(--sl-color-neutral-500)"
-				agToggleTip = "Resume all devices"
+		fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon name="%s" style="font-size:0.5rem;color:%s"></sl-icon></sl-tooltip>`,
+			statusText, statusIcon, statusColor)
+		fmt.Fprintf(&b, `<span class="text-sm font-medium" style="color:var(--mass-text)">%s</span>`, html.EscapeString(w.Name))
+		fmt.Fprintf(&b, `<sl-badge variant="primary" pill style="font-size:0.65rem">%s</sl-badge>`, html.EscapeString(w.RuntimeName))
+		fmt.Fprintf(&b, `<span class="text-xs text-neutral-500 ml-auto mr-2">%d device(s) · %d/%d active</span>`,
+			len(w.Devices), w.ActiveJobs, w.ActiveJobs+w.Capacity)
+		if len(w.Devices) > 0 {
+			workerToggleIcon := "toggle2-on"
+			workerToggleColor := "var(--sl-color-success-500)"
+			workerToggleTip := "Disable all devices on this worker"
+			if !w.Enabled {
+				workerToggleIcon = "toggle2-off"
+				workerToggleColor = "var(--sl-color-neutral-500)"
+				workerToggleTip = "Enable all devices on this worker"
 			}
-			// See devtog comment below: id includes icon state so morphdom
-			// replaces instead of attr-patching the sl-icon-button.
-			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button id="workertog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
-				`onclick="event.stopPropagation();fetch('/internal/workers/toggle?worker=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
-				agToggleTip, workerIDSafe, agToggleIcon, agToggleIcon, agToggleColor, url.QueryEscape(workerID))
+			// Inline fetch — mirrors the pre-refactor commit's pattern.
+			// Encoding the icon name into the id forces a full element
+			// swap on every flip; Shoelace caches the SVG and in-place
+			// `name` mutations sometimes fail to refresh.
+			fmt.Fprintf(&b,
+				`<sl-tooltip content="%s"><sl-icon-button id="workertog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
+					`onclick="event.stopPropagation();fetch('/api/workers/%s/toggle',{method:'POST'}).then(window.__massRefetchWorkers).catch(function(){})"></sl-icon-button></sl-tooltip>`,
+				workerToggleTip, idSafe, workerToggleIcon, workerToggleIcon, workerToggleColor,
+				url.QueryEscape(w.ID))
+		}
+		if w.Online && len(w.Devices) > 0 {
 			fmt.Fprintf(&b, `<sl-button size="small" variant="text" id="bench-all-%s" `+
 				`onclick="event.stopPropagation()" `+
-				`data-on:click="@post('/internal/workers/benchmark?workerIds=%s')">`,
-				workerID, workerID)
+				`data-on:click="@post('/api/workers/benchmark?workerIds=%s')">`,
+				idSafe, url.QueryEscape(w.ID))
 			b.WriteString(`<sl-icon slot="prefix" name="speedometer2"></sl-icon>Bench All</sl-button>`)
 		}
 		b.WriteString(`</div>`)
-
-		// Expanded content: device cards
-		if len(ag.Devices) == 0 {
-			b.WriteString(`<p class="text-xs text-neutral-500 py-2">No compute devices detected.</p>`)
+		if len(w.Devices) == 0 {
+			b.WriteString(`<p class="text-xs text-neutral-500 py-2">No compute devices reported.</p>`)
 		}
-		for _, d := range ag.Devices {
+		for _, d := range w.Devices {
 			icon := "cpu"
 			iconColor := "var(--mass-blue)"
 			badgeVariant := "primary"
-			if d.Type == stats.DeviceTypeGPU {
+			if d.Type == "GPU" {
 				icon = "gpu-card"
 				iconColor = "var(--mass-green)"
 				badgeVariant = "success"
 			}
-			// Prefix device IDs with agent ID to ensure uniqueness across agents.
-			scopedID := workerIDSafe + "_" + html.EscapeString(d.DeviceID)
-			devIDSafe := scopedID
-			cardBorder := "border-neutral-800"
+			scopedID := idSafe + "_" + html.EscapeString(d.DeviceID)
+			border := "border-neutral-800"
 			if !d.Enabled {
-				cardBorder = "border-yellow-900/50"
+				border = "border-yellow-700/60"
 			}
-			fmt.Fprintf(&b, `<div class="relative bg-neutral-900 rounded-lg border %s p-3 mb-2 space-y-2">`, cardBorder)
-			// Device ID overlay in the bottom-right corner — useful for matching
-			// "loaded on gpu:0" in the Loaded Models panel to a physical device.
+			fmt.Fprintf(&b, `<div class="relative bg-neutral-900 rounded-lg border %s p-3 mb-2 space-y-2">`, border)
 			fmt.Fprintf(&b, `<span class="absolute bottom-1.5 right-2 text-xs text-neutral-500 font-mono pointer-events-none">%s</span>`, html.EscapeString(d.DeviceID))
 
-			// Header row: icon + name + badge + toggle + bench button.
 			b.WriteString(`<div class="flex items-center gap-3">`)
 			fmt.Fprintf(&b, `<sl-icon name="%s" style="font-size:1.1rem;color:%s"></sl-icon>`, icon, iconColor)
 			fmt.Fprintf(&b, `<span class="text-sm font-medium text-white">%s</span>`, html.EscapeString(d.DeviceName))
-			fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`, badgeVariant, html.EscapeString(string(d.Type)))
+			fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`, badgeVariant, html.EscapeString(d.Type))
 			b.WriteString(`<span class="ml-auto"></span>`)
 			devToggleIcon := "toggle2-on"
 			devToggleColor := "var(--sl-color-success-500)"
-			devToggleTip := "Pause scheduling"
+			devToggleTip := "Disable this device for new model loads"
 			if !d.Enabled {
 				devToggleIcon = "toggle2-off"
 				devToggleColor = "var(--sl-color-neutral-500)"
-				devToggleTip = "Resume scheduling"
+				devToggleTip = "Enable this device for new model loads"
 			}
-			// ID includes the icon name so the DOM morpher treats an on→off
-			// transition as a replacement rather than an in-place attribute
-			// update. Shoelace's sl-icon-button caches its SVG; mutating the
-			// `name` attribute on the same element sometimes fails to refresh
-			// the rendered icon.
-			fmt.Fprintf(&b, `<sl-tooltip content="%s"><sl-icon-button id="devtog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
-				`onclick="event.stopPropagation();fetch('/internal/workers/devices/toggle?queue=%s',{method:'POST'})"></sl-icon-button></sl-tooltip>`,
-				devToggleTip, devIDSafe, devToggleIcon, devToggleIcon, devToggleColor, url.QueryEscape(d.QueueName))
-			fmt.Fprintf(&b, `<sl-button size="small" variant="text" data-on:click="@post('/internal/workers/benchmark?workerIds=%s&deviceIds=%s')">`,
-				html.EscapeString(ag.ID), html.EscapeString(d.DeviceID))
+			// Inline fetch — see the worker-toggle comment above.
+			fmt.Fprintf(&b,
+				`<sl-tooltip content="%s"><sl-icon-button id="devtog-%s-%s" name="%s" style="font-size:1.2rem;color:%s" `+
+					`onclick="event.stopPropagation();fetch('/api/workers/%s/devices/%s/toggle',{method:'POST'}).then(window.__massRefetchWorkers).catch(function(){})"></sl-icon-button></sl-tooltip>`,
+				devToggleTip, scopedID, devToggleIcon, devToggleIcon, devToggleColor,
+				url.QueryEscape(w.ID), url.QueryEscape(d.DeviceID))
+			fmt.Fprintf(&b, `<sl-button size="small" variant="text" data-on:click="@post('/api/workers/benchmark?workerIds=%s&deviceIds=%s')">`,
+				url.QueryEscape(w.ID), url.QueryEscape(d.DeviceID))
 			b.WriteString(`<sl-icon slot="prefix" name="speedometer2"></sl-icon>Bench</sl-button>`)
 			b.WriteString(`</div>`)
 
-			// Stats row: Bandwidth, RAM gauge, Compute, CPU/GPU gauge.
-			if d.Loading {
-				b.WriteString(`<div class="flex items-center justify-center gap-2 text-xs">`)
-				b.WriteString(`<sl-spinner style="font-size:0.875rem;--track-width:2px"></sl-spinner>`)
-				b.WriteString(`<span class="text-neutral-500">Benchmarking...</span>`)
+			hasGauges := d.HasStats || d.HasUtilization
+			if hasGauges || d.HasBenchmark {
+				b.WriteString(`<div class="worker-stats-row">`)
+
+				memTip := "RAM throughput"
+				if d.Type == "GPU" {
+					memTip = "VRAM throughput"
+				}
+				b.WriteString(`<div class="text-xs">`)
+				fmt.Fprintf(&b, `<sl-tooltip content="%s"><span class="text-neutral-500" style="cursor:help">Memory</span></sl-tooltip>`, memTip)
+				fmt.Fprintf(&b, `<div class="text-neutral-200 font-mono mt-0.5 bench-val" id="bench-bw-%s">`, scopedID)
+				if d.HasBenchmark {
+					b.WriteString(formatMemoryBW(d.MemoryGBs))
+				} else {
+					b.WriteString(`<span class="text-neutral-500">—</span>`)
+				}
+				b.WriteString(`</div></div>`)
+
+				memLabel := "RAM"
+				if d.Type == "GPU" {
+					memLabel = "VRAM"
+				}
+				if d.HasStats && d.MemoryMB > 0 {
+					pct := float64(d.UsedMemoryMB) / float64(d.MemoryMB) * 100
+					if pct > 100 {
+						pct = 100
+					}
+					writeGauge(&b, scopedID+"-mem", memLabel, pct,
+						fmt.Sprintf("%s / %s", FormatMemMB(d.UsedMemoryMB), FormatMemMB(d.MemoryMB)))
+				} else if d.MemoryMB > 0 {
+					fmt.Fprintf(&b, `<div class="text-xs"><span class="text-neutral-500">%s</span><div class="text-neutral-200 font-mono mt-0.5">%s</div></div>`, memLabel, FormatMemMB(d.MemoryMB))
+				} else {
+					b.WriteString(`<div></div>`)
+				}
+
+				b.WriteString(`<div class="text-xs">`)
+				b.WriteString(`<sl-tooltip content="Q4_K matmul throughput"><span class="text-neutral-500" style="cursor:help">Compute</span></sl-tooltip>`)
+				fmt.Fprintf(&b, `<div class="text-neutral-200 font-mono mt-0.5 bench-val" id="bench-comp-%s">`, scopedID)
+				if d.HasBenchmark {
+					b.WriteString(formatFlops(d.ComputeGFlops))
+				} else {
+					b.WriteString(`<span class="text-neutral-500">—</span>`)
+				}
+				b.WriteString(`</div></div>`)
+
+				if d.HasUtilization {
+					computeLabel := "CPU"
+					if d.Type == "GPU" {
+						computeLabel = "GPU"
+					}
+					pct := d.UtilizationPct
+					if pct > 100 {
+						pct = 100
+					}
+					writeGauge(&b, scopedID+"-util", computeLabel, pct, fmt.Sprintf("%.0f%%", pct))
+				} else {
+					b.WriteString(`<div></div>`)
+				}
+
 				b.WriteString(`</div>`)
 			} else {
-				hasGauges := d.HasStats || d.HasUtilization
-				if hasGauges || d.HasBenchmark {
-					b.WriteString(`<div class="agent-stats-row">`)
-
-					// Memory bandwidth.
-					memTip := "RAM throughput (ggml device-local add)"
-					if d.Type == stats.DeviceTypeGPU {
-						memTip = "VRAM throughput (ggml device-local add)"
-					}
-					b.WriteString(`<div class="text-xs">`)
-					fmt.Fprintf(&b, `<sl-tooltip content="%s"><span class="text-neutral-500" style="cursor:help">Memory</span></sl-tooltip>`, memTip)
-					fmt.Fprintf(&b, `<div class="text-neutral-200 font-mono mt-0.5 bench-val" id="bench-bw-%s">`, devIDSafe)
-					if d.HasBenchmark {
-						b.WriteString(formatMemoryBW(d.MemoryGBs))
-					} else {
-						b.WriteString(`<span class="text-neutral-500">—</span>`)
-					}
-					b.WriteString(`</div></div>`)
-
-					// Memory gauge (always emit a grid item for alignment).
-					memLabel := "RAM"
-					if d.Type == stats.DeviceTypeGPU {
-						memLabel = "VRAM"
-					}
-					if d.HasStats && d.MemoryMB > 0 {
-						pct := float64(d.UsedMemoryMB) / float64(d.MemoryMB) * 100
-						if pct > 100 {
-							pct = 100
-						}
-						writeGauge(&b, scopedID+"-mem", memLabel, pct,
-							fmt.Sprintf("%s / %s", FormatMemMB(d.UsedMemoryMB), FormatMemMB(d.MemoryMB)))
-					} else if d.MemoryMB > 0 {
-						fmt.Fprintf(&b, `<div class="text-xs"><span class="text-neutral-500">%s</span><div class="text-neutral-200 font-mono mt-0.5">%s</div></div>`, memLabel, FormatMemMB(d.MemoryMB))
-					} else {
-						b.WriteString(`<div></div>`)
-					}
-
-					// Compute (Q4_K matmul throughput).
-					b.WriteString(`<div class="text-xs">`)
-					b.WriteString(`<sl-tooltip content="Q4_K quantized matmul throughput (comparable across devices)"><span class="text-neutral-500" style="cursor:help">Compute</span></sl-tooltip>`)
-					fmt.Fprintf(&b, `<div class="text-neutral-200 font-mono mt-0.5 bench-val" id="bench-comp-%s">`, devIDSafe)
-					if d.HasBenchmark {
-						b.WriteString(formatFlops(d.ComputeGFlops))
-					} else {
-						b.WriteString(`<span class="text-neutral-500">—</span>`)
-					}
-					b.WriteString(`</div></div>`)
-
-					// Utilization gauge (always emit a grid item for alignment).
-					if d.HasUtilization {
-						computeLabel := "CPU"
-						if d.Type == stats.DeviceTypeGPU {
-							computeLabel = "GPU"
-						}
-						pct := d.UtilizationPct
-						if pct > 100 {
-							pct = 100
-						}
-						writeGauge(&b, scopedID+"-util", computeLabel, pct,
-							fmt.Sprintf("%.0f%%", pct))
-					} else {
-						b.WriteString(`<div></div>`)
-					}
-
-					b.WriteString(`</div>`)
-				} else {
-					b.WriteString(`<div class="text-xs"><span class="text-neutral-500 italic">No benchmark data — click Bench</span></div>`)
-				}
+				b.WriteString(`<div class="text-xs"><span class="text-neutral-500 italic">No benchmark data — click Bench</span></div>`)
 			}
 
 			b.WriteString(`</div>`)
@@ -783,41 +612,16 @@ func RenderAgentsListInner(agents []WorkerView) string {
 	return b.String()
 }
 
-// ComputeView holds data for rendering a device card in the Compute tab.
-type ComputeView struct {
-	DeviceID       string
-	DeviceName     string
-	Type           stats.DeviceType
-	MemoryMB       int     // total RAM/VRAM in MB (0 = unknown)
-	UsedMemoryMB   int     // currently used RAM/VRAM in MB (0 = unknown)
-	UtilizationPct float64 // 0-100, compute utilization
-	HasUtilization bool    // true = show compute utilization bar
-	MemoryGBs      float64
-	ComputeGFlops  float64 // Q4_K matmul GFLOPS (comparable across CPU/GPU)
-	HasBenchmark   bool
-	HasStats       bool   // true = show memory utilization bar
-	Loading        bool   // true = show spinner instead of benchmark values
-	Enabled        bool   // true = participates in scheduling
-	QueueName      string // device queue name for toggle URL
-}
-
 // writeGauge renders an SVG ring gauge with a label, percentage, and subtitle.
-// The ring uses stroke-dashoffset for the fill arc. Animation is handled by JS
-// after DOM patching (see patchWorkersList ExecuteScript).
 func writeGauge(b *strings.Builder, id, label string, pct float64, subtitle string) {
-	// SVG ring parameters: radius=28, stroke=5, viewBox 66x66 centered at 33,33.
 	const r = 28
-	circumference := 2 * 3.14159265 * r // ~175.93
+	circumference := 2 * 3.14159265 * r
 	offset := circumference * (1 - pct/100)
 	color := BarColor(pct)
-
 	b.WriteString(`<div class="flex flex-col items-center" style="width:58px">`)
 	fmt.Fprintf(b, `<svg width="58" height="58" viewBox="0 0 66 66" class="gauge-ring" id="gauge-%s" data-gauge-pct="%.1f">`, html.EscapeString(id), pct)
-	// Track ring (theme-aware).
 	b.WriteString(`<circle cx="33" cy="33" r="28" fill="none" stroke="var(--sl-color-neutral-300)" stroke-width="5" opacity="0.25"/>`)
-	// Value ring (rotated -90deg so 0% starts at top).
 	fmt.Fprintf(b, `<circle cx="33" cy="33" r="28" fill="none" stroke="%s" stroke-width="5" stroke-linecap="round" stroke-dasharray="%.2f" stroke-dashoffset="%.2f" transform="rotate(-90 33 33)" style="transition:stroke-dashoffset .8s ease,stroke .4s ease"/>`, color, circumference, offset)
-	// Center text (theme-aware).
 	fmt.Fprintf(b, `<text x="33" y="33" text-anchor="middle" dominant-baseline="central" fill="var(--mass-text)" font-size="12" font-family="monospace" font-weight="600">%.0f%%</text>`, pct)
 	b.WriteString(`</svg>`)
 	fmt.Fprintf(b, `<span class="text-xs text-neutral-500 mt-0.5">%s</span>`, label)
@@ -825,8 +629,7 @@ func writeGauge(b *strings.Builder, id, label string, pct float64, subtitle stri
 	b.WriteString(`</div>`)
 }
 
-// BarColor returns an HSL color string that transitions from green to red.
-// 0% = green (hsl(120,70%,45%)), 100% = red (hsl(0,70%,50%)).
+// BarColor returns an HSL color string transitioning green → red over 0–100%.
 func BarColor(pct float64) string {
 	if pct < 0 {
 		pct = 0
@@ -834,7 +637,7 @@ func BarColor(pct float64) string {
 	if pct > 100 {
 		pct = 100
 	}
-	hue := 120 * (1 - pct/100) // 120 (green) → 0 (red)
+	hue := 120 * (1 - pct/100)
 	return fmt.Sprintf("hsl(%.0f,70%%,45%%)", hue)
 }
 
@@ -846,7 +649,6 @@ func FormatMemMB(mb int) string {
 	return fmt.Sprintf("%d MB", mb)
 }
 
-// formatFlops formats GFLOPS into a human-readable string with appropriate unit.
 func formatFlops(gflops float64) string {
 	switch {
 	case gflops >= 1000:
@@ -860,7 +662,6 @@ func formatFlops(gflops float64) string {
 	}
 }
 
-// formatMemoryBW formats GB/s into a human-readable string with appropriate unit.
 func formatMemoryBW(gbs float64) string {
 	switch {
 	case gbs >= 1000:
@@ -872,4 +673,10 @@ func formatMemoryBW(gbs float64) string {
 	default:
 		return fmt.Sprintf("%.1f KB/s", gbs*1e6)
 	}
+}
+
+// jsStringEscape escapes for embedding in a JS single-quoted string literal.
+func jsStringEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", `\r`)
+	return r.Replace(s)
 }
