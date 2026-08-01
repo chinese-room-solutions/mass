@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -223,6 +224,130 @@ func TestManager_ProgressValues(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(len(content)), lastDownloaded)
 	require.Equal(t, int64(len(content)), lastTotal)
+}
+
+// withStallTimeout shortens the stall watchdog. Test-only: production has
+// no reason to tune it, so it stays off the package's Option surface.
+func withStallTimeout(d time.Duration) Option {
+	return func(o *options) { o.stallTimeout = d }
+}
+
+// A server that sends headers and then goes silent must not hang the
+// download forever — no HTTP client timeout covers a body that started and
+// then stopped.
+func TestManager_StalledTransferAborts(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1024")
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release) // runs first: never leave the handler parked
+
+	done := make(chan error, 1)
+	go func() {
+		mgr := NewManager(srv.Client())
+		done <- mgr.Download(context.Background(), srv.URL+"/f", filepath.Join(t.TempDir(), "f"),
+			WithMaxRetries(0), withStallTimeout(100*time.Millisecond))
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrStalled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("stalled download never aborted")
+	}
+}
+
+// A local filesystem failure must surface on the first attempt: retrying it
+// costs a full re-download and ends in the same error.
+func TestManager_LocalFileErrorIsNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer srv.Close()
+
+	destPath := filepath.Join(t.TempDir(), "file.bin")
+	// Occupy the temp path with a directory so the temp-file open fails.
+	require.NoError(t, os.MkdirAll(TempFilePath(destPath, ".downloading"), 0755))
+
+	mgr := NewManager(srv.Client())
+	err := mgr.Download(context.Background(), srv.URL+"/file.bin", destPath,
+		WithMaxRetries(3), WithBaseDelay(time.Millisecond))
+	require.ErrorIs(t, err, ErrWriteFile)
+	require.Equal(t, int32(1), calls.Load(), "local filesystem failures must not re-download")
+}
+
+func TestIsRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"local file", fmt.Errorf("%w: opening temp file: %w", ErrWriteFile, os.ErrPermission), false}, //nolint:errorlint // wrapping sentinel
+		{"4xx", fmt.Errorf("%w: 404", ErrHTTPClientError), false},
+		{"5xx", fmt.Errorf("%w: 503", ErrHTTPServerError), true},
+		{"stalled", fmt.Errorf("%w: no data", ErrStalled), true},
+		{"network", errors.New("connection reset by peer"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isRetryable(tt.err))
+		})
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    time.Duration
+		attempt int
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{"first attempt", time.Second, 0, 750 * time.Millisecond, 1250 * time.Millisecond},
+		{"doubles", time.Second, 2, 3 * time.Second, 5 * time.Second},
+		{"capped", time.Second, 9, 22500 * time.Millisecond, 37500 * time.Millisecond},
+		{"huge base is capped", time.Hour, 0, 22500 * time.Millisecond, 37500 * time.Millisecond},
+		{"overflowing attempt is capped", time.Duration(1) << 40, maxRetriesLimit, 22500 * time.Millisecond, 37500 * time.Millisecond},
+		{"zero base", 0, 5, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for range 50 { // jittered: sample it
+				got := retryDelay(tt.base, tt.attempt)
+				require.GreaterOrEqual(t, got, tt.wantMin)
+				require.LessOrEqual(t, got, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestWithMaxRetries_Clamps(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{"negative", -5, 0},
+		{"zero", 0, 0},
+		{"in range", 4, 4},
+		{"over limit", 1 << 40, maxRetriesLimit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := defaultOptions()
+			WithMaxRetries(tt.n)(&o)
+			require.Equal(t, tt.want, o.maxRetries)
+		})
+	}
 }
 
 func TestTempFilePath(t *testing.T) {

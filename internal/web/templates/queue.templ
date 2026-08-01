@@ -1,0 +1,269 @@
+package templates
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/chinese-room-solutions/mass-sdk/format"
+)
+
+// QueueRowView is one peekable row on the Queue tab. Captures the envelope
+// fields an operator can reason about, plus the queue identity (MsgID +
+// QueueName, supplied separately by the parent section) used for the
+// cancel POST. Running=true means the row is currently in flight on the
+// worker (LoadModel-or-streaming) — Phase A renders it read-only.
+type QueueRowView struct {
+	MsgID         string
+	RequestID     string
+	RuntimeName   string
+	ModelID       string
+	Source        string
+	Priority      int
+	QueuedSeconds float64
+	PayloadBytes  int
+	Running       bool
+}
+
+// QueueSectionView is one collapsible card on the Queue tab — global queue
+// or a single worker's queue. PendingCount excludes Running rows so the
+// summary chip ("N pending · M running") reflects actionable depth.
+// DepthSeconds is the section's worst-case wall-clock to drain (sum of
+// every row's per-task QueuedSeconds); rendered in the header so per-row
+// chips can stay stable per-task estimates while the section still
+// surfaces a backpressure signal.
+type QueueSectionView struct {
+	QueueName    string // canonical queue name passed to the cancel RPC
+	WorkerID     string // empty for global
+	Title        string // operator-facing header
+	RowCount     int    // total rows (pending + running)
+	PendingCount int    // unleased rows
+	RunningCount int    // leased rows (in flight)
+	DepthSeconds float64
+	Rows         []QueueRowView
+}
+
+// QueueSections renders the full Queue tab body. Same outer pattern as the
+// Workers tab — collapsible cards (sl-details), one per source.
+templ QueueSections(sections []QueueSectionView) {
+	if totalRows(sections) == 0 {
+		<div class="flex flex-col items-center justify-center py-16 text-center">
+			<sl-icon name="list-task" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>
+			<p class="text-sm" style="color:var(--mass-text-muted)">No queued jobs.</p>
+			<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Pending jobs from gateways appear here. In-flight jobs aren't shown.</p>
+		</div>
+	} else {
+		<div class="space-y-3">
+			for _, sec := range sections {
+				@queueSectionCard(sec)
+			}
+		</div>
+	}
+}
+
+// queueSectionCard renders one section. The card stays collapsed by
+// default; the header summarises depth so the operator can scan many
+// sections quickly. Unfolding reveals the per-row table with cancel
+// buttons. data-filter-text aggregates every row's searchable text so
+// typing a model, source label, runtime, or request id matches even
+// while the card is collapsed.
+templ queueSectionCard(sec QueueSectionView) {
+	<sl-details
+		class="queue-card"
+		id={ "queue-card-" + format.JSEscape(sec.QueueName) }
+		data-filter-text={ sectionFilterText(sec) }
+	>
+		<div slot="summary" class="flex items-center gap-3 w-full">
+			<sl-icon name={ queueIconName(sec) } style="font-size:0.95rem;color:var(--mass-text-muted)"></sl-icon>
+			if sec.WorkerID != "" {
+				<span
+					class="text-sm font-medium text-blue-400 hover:text-blue-300 cursor-pointer"
+					title={ "Open in Workers tab: " + sec.WorkerID }
+					onclick="event.stopPropagation()"
+					data-on:click={ fmt.Sprintf("window.__massGoToWorker('%s')", format.JSEscape(sec.WorkerID)) }
+				>{ sec.Title }</span>
+			} else {
+				<span class="text-sm font-medium" style="color:var(--mass-text)">{ sec.Title }</span>
+			}
+			<span class="ml-auto text-xs" style="color:var(--mass-text-muted)">
+				{ queueSummary(sec) }
+			</span>
+		</div>
+		if sec.RowCount == 0 {
+			<p class="text-xs text-neutral-500 py-2">Queue is empty.</p>
+		} else {
+			<div class="space-y-1.5">
+				for _, row := range sec.Rows {
+					@queueRowItem(sec.QueueName, row)
+				}
+			</div>
+		}
+	</sl-details>
+}
+
+// queueRowItem renders a single row. Compact two-line layout — top: model
+// id + cancel button; bottom: source / runtime / payload size / queued
+// seconds. Running rows skip the cancel button and show a "running" badge
+// — Phase A can't cancel in-flight jobs.
+templ queueRowItem(queueName string, row QueueRowView) {
+	<div class="bg-neutral-800/60 rounded border border-neutral-700/50 px-3 py-2">
+		<div class="flex items-center gap-2">
+			if row.ModelID != "" {
+				<span
+					class="text-xs font-mono truncate text-blue-400 hover:text-blue-300 cursor-pointer"
+					title={ "Open in Models tab: " + row.ModelID }
+					data-on:click={ fmt.Sprintf("window.__massGoToModel('%s')", format.JSEscape(row.ModelID)) }
+				>
+					<sl-icon name="box" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
+					{ row.ModelID }
+				</span>
+			} else {
+				<span class="text-xs text-neutral-500 italic">unspecified model</span>
+			}
+			<div class="flex-1"></div>
+			if row.Running {
+				<sl-tooltip content="Running">
+					<span class="text-xs rounded px-1.5 py-0.5 bg-yellow-900/60 text-yellow-300">running</span>
+				</sl-tooltip>
+				if row.RequestID != "" {
+					<sl-tooltip content="Cancel this running job (worker observes between sampler steps)">
+						<sl-icon-button
+							class="queue-row-action"
+							name="x-circle"
+							style="font-size:0.95rem;color:var(--mass-danger)"
+							data-on:click={ fmt.Sprintf("@post('/api/queue/cancel-running?requestID=%s')", url.QueryEscape(row.RequestID)) }
+						></sl-icon-button>
+					</sl-tooltip>
+				}
+			} else {
+				if queueName != "global" {
+					<sl-tooltip content="Evict back to global queue for re-placement">
+						<sl-icon-button
+							class="queue-row-action"
+							name="arrow-counterclockwise"
+							style="font-size:0.95rem;color:var(--mass-warning)"
+							data-on:click={ fmt.Sprintf("@post('/api/queue/evict?queue=%s&msgID=%s')", url.QueryEscape(queueName), url.QueryEscape(row.MsgID)) }
+						></sl-icon-button>
+					</sl-tooltip>
+				}
+				<sl-tooltip content="Cancel this queued job">
+					<sl-icon-button
+						class="queue-row-action"
+						name="x-circle"
+						style="font-size:0.95rem;color:var(--mass-danger)"
+						data-on:click={ fmt.Sprintf("@post('/api/queue/cancel?queue=%s&msgID=%s')", url.QueryEscape(queueName), url.QueryEscape(row.MsgID)) }
+					></sl-icon-button>
+				</sl-tooltip>
+			}
+		</div>
+		<div class="flex items-center gap-3 mt-1 text-xs text-neutral-400">
+			if row.RuntimeName != "" {
+				<span class={ "rounded px-1.5 py-0.5 " + runtimeNameBadge(row.RuntimeName) }>{ row.RuntimeName }</span>
+			}
+			if row.Source != "" {
+				<span class={ "rounded px-1.5 py-0.5 " + sourceBadge(row.Source) }>{ row.Source }</span>
+			}
+			<span class="font-mono" title="Request ID">{ shortRequestID(row.RequestID) }</span>
+			if row.PayloadBytes > 0 {
+				<span title="Payload bytes">{ format.Bytes(int64(row.PayloadBytes)) }</span>
+			}
+			if row.QueuedSeconds > 0 {
+				<span title="Estimated queued seconds">{ formatQueuedSeconds(row.QueuedSeconds) }</span>
+			}
+			<span class="ml-auto" title="Priority">{ fmt.Sprintf("P%d", row.Priority) }</span>
+		</div>
+	</div>
+}
+
+// formatQueuedSeconds renders a wall-clock estimate at a precision that
+// stays informative across the full range. Sub-second values round to
+// `0.0s` with the default `%.1f`, which makes the chip read "0.0s" for
+// any chat shorter than ~50ms of prefill — useless. Step up precision
+// for small values, step down once we're past a minute.
+func formatQueuedSeconds(sec float64) string {
+	switch {
+	case sec >= 60:
+		return fmt.Sprintf("~%dm%02ds", int(sec)/60, int(sec)%60)
+	case sec >= 1:
+		return fmt.Sprintf("~%.1fs", sec)
+	case sec >= 0.001:
+		return fmt.Sprintf("~%dms", int(sec*1000))
+	default:
+		return "~<1ms"
+	}
+}
+
+// sectionFilterText builds the haystack the operator's filter input
+// searches against. Aggregates every row's searchable surfaces so a
+// term matches even when the card is collapsed:
+//
+//   - section title (queue name + linked worker id)
+//   - every row's runtime name, model id, source label, request id
+//
+// Returned lowercased — the JS filter normalises the needle the same
+// way so casing on either side doesn't matter.
+func sectionFilterText(sec QueueSectionView) string {
+	var b strings.Builder
+	b.WriteString(sec.Title)
+	for _, row := range sec.Rows {
+		b.WriteByte(' ')
+		b.WriteString(row.RuntimeName)
+		b.WriteByte(' ')
+		b.WriteString(row.ModelID)
+		b.WriteByte(' ')
+		b.WriteString(row.Source)
+		b.WriteByte(' ')
+		b.WriteString(row.RequestID)
+	}
+	return strings.ToLower(b.String())
+}
+
+// totalRows sums RowCount across sections. Used to pick the empty-state
+// placeholder without nesting templ conditionals.
+func totalRows(sections []QueueSectionView) int {
+	total := 0
+	for _, s := range sections {
+		total += s.RowCount
+	}
+	return total
+}
+
+// queueIconName returns the sl-icon name for a section header — globe for
+// the durability anchor, pc-display for worker queues.
+func queueIconName(sec QueueSectionView) string {
+	if sec.WorkerID == "" {
+		return "globe"
+	}
+	return "pc-display"
+}
+
+// queueSummary renders the header chip. Counts come first ("N pending ·
+// M running"); when the section has a non-zero DepthSeconds we append
+// "· ~Xs deep" so operators get a worst-case drain estimate without
+// having to read every row's per-task chip.
+func queueSummary(sec QueueSectionView) string {
+	var counts string
+	switch {
+	case sec.RunningCount == 0:
+		counts = fmt.Sprintf("%d pending", sec.PendingCount)
+	case sec.PendingCount == 0:
+		counts = fmt.Sprintf("%d running", sec.RunningCount)
+	default:
+		counts = fmt.Sprintf("%d pending · %d running", sec.PendingCount, sec.RunningCount)
+	}
+	if sec.DepthSeconds > 0 {
+		return counts + " · " + formatQueuedSeconds(sec.DepthSeconds) + " deep"
+	}
+	return counts
+}
+
+// shortRequestID returns the first 8 characters of a UUID-style request id,
+// or the whole string for shorter ids. UUIDs are 36 chars; the rest of the
+// row is dense enough that the full id would push other fields off-screen.
+func shortRequestID(id string) string {
+	if len(id) > 8 {
+		return id[:8] + "…"
+	}
+	return id
+}
+

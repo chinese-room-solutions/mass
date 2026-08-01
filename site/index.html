@@ -1,0 +1,248 @@
+<!doctype html>
+<html class="sl-theme-dark" lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MASS — Modular AI Scheduling Service</title>
+<meta name="description" content="MASS is a pure-Go orchestrator for self-hosted AI inference: durable queues, latency-aware scheduling, pluggable runtimes. llama.cpp today — vLLM, TTS, diffusion next.">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="stylesheet" href="vendor/theme.css">
+<link rel="stylesheet" href="vendor/synthwave.css">
+<link rel="stylesheet" href="site.css">
+<script type="module" src="vendor/datastar.js"></script>
+<script defer src="site.js"></script>
+</head>
+<!-- $os drives the "your platform" hint in the download tables (Datastar signal). -->
+<body data-signals="{os: /Mac/.test(navigator.platform) ? 'darwin' : /Win/.test(navigator.platform) ? 'windows' : 'linux',
+                     qs: /Mac/.test(navigator.platform) ? 'darwin' : /Win/.test(navigator.platform) ? 'windows' : 'linux'}">
+<!-- Deep-space backdrop: drifting starfield canvas (site.js) under a CSS
+     nebula, fixed behind the page. Sits at z-index -1 above the root canvas
+     background (body's background propagates to the root), below content. -->
+<div class="space" aria-hidden="true"><canvas data-starfield></canvas></div>
+<header>
+  <div class="wrap">
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#downloads">Downloads</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#ecosystem">Ecosystem</a>
+      <a href="https://github.com/chinese-room-solutions/mass">GitHub</a>
+    </nav>
+    <div class="themes" role="group" aria-label="Theme">
+      <button class="swatch" data-theme-pick="dark" title="Carbon" style="--sw:#171616"></button>
+      <button class="swatch" data-theme-pick="synthwave" title="Synthwave" style="--sw:#241b2f"></button>
+    </div>
+  </div>
+</header>
+
+<div class="hero wrap">
+  <div class="brand-cycle" data-brand-cycle aria-label="MASS">MASS</div>
+  <h1>The orchestrator for self-hosted AI inference</h1>
+  <p class="sub">One hub for your AI fleet: MASS stores your models, installs pluggable runtimes,
+  and schedules work across your machines — any model format, any API, one dashboard.</p>
+  <div class="cta">
+    <a class="btn primary" href="#downloads">Download <span data-version>MASS</span></a>
+    <a class="btn ghost" href="#quickstart">Quickstart</a>
+  </div>
+  <span class="pill">llama.cpp today — vLLM, TTS, diffusion next</span>
+</div>
+
+<section id="how"><div class="wrap">
+  <h2>One coordinator, pluggable edges</h2>
+  <!-- Fleet map: the hub relaying jobs to workers, drawn as a sector map
+       (site.js builds the nodes; CSS motion paths drive the job pulses). -->
+  <div class="fleet-frame" aria-hidden="true">
+    <svg class="fleet" viewBox="0 0 720 300" data-fleet></svg>
+  </div>
+  <div class="cards">
+    <div class="card"><h3>MASS coordinates</h3><p>Durable job queues, latency-aware placement,
+      streamed results, an operator dashboard. It routes bytes it never interprets.</p></div>
+    <div class="card"><h3>Gateways translate</h3><p>Installable <code>.mass</code> packages teach MASS a runtime:
+      its model formats, its API (OpenAI-compatible or typed), its job payloads.</p></div>
+    <div class="card"><h3>Workers execute</h3><p>Native binaries hold models resident on your
+      GPUs (Vulkan, Metal) and join the fleet over one gRPC stream.</p></div>
+  </div>
+</div></section>
+
+<section id="features"><div class="wrap">
+  <h2>Features</h2>
+  <div class="cards">
+    <div class="card"><h3>Pure-Go core</h3><p>Inference toolchains stay in the workers. One static server binary.</p></div>
+    <div class="card"><h3>Live runtime installs</h3><p>Install, start, stop gateway packages from the dashboard. No rebuilds.</p></div>
+    <div class="card"><h3>One model store</h3><p>Import from Hugging Face or disk. Workers pull what they run, deletes propagate.</p></div>
+    <div class="card"><h3>Latency-aware scheduling</h3><p>Placement by predicted wall-clock cost. Streams survive reconnects.</p></div>
+    <div class="card"><h3>Fleet control</h3><p>Enable workers and devices individually. New workers benchmark themselves.</p></div>
+    <div class="card"><h3>Operator dashboard</h3><p>Live view of runtimes, models, queues, and workers. Prometheus metrics, TLS.</p></div>
+    <div class="card"><h3>SQLite or Postgres</h3><p>One config flag. Queues and results survive restarts either way.</p></div>
+  </div>
+</div></section>
+
+<section id="downloads"><div class="wrap">
+  <h2>Downloads</h2>
+
+  <div class="dl-group">
+    <h3>MASS</h3>
+    <p class="d">The hub: scheduler, model storage, dashboard. The only download you need —
+    runtimes and workers are installed from inside MASS.</p>
+    <table>
+      <tr><th>Platform</th><th>Installer</th></tr>
+      <tr data-class="{'os-mine': $os === 'linux'}">
+        <td>Linux x86-64</td>
+        <td><a href="https://github.com/chinese-room-solutions/mass/releases/latest/download/mass-setup_linux_amd64.AppImage"
+               data-asset="mass/mass-setup_linux_amd64.AppImage">mass-setup_linux_amd64.AppImage</a></td></tr>
+      <tr data-class="{'os-mine': $os === 'darwin'}">
+        <td>macOS Apple Silicon</td>
+        <td><a href="https://github.com/chinese-room-solutions/mass/releases/latest/download/mass-setup_darwin_arm64.zip"
+               data-asset="mass/mass-setup_darwin_arm64.zip">mass-setup_darwin_arm64.zip</a></td></tr>
+      <tr data-class="{'os-mine': $os === 'windows'}">
+        <td>Windows x86-64</td>
+        <td><a href="https://github.com/chinese-room-solutions/mass/releases/latest/download/mass-setup_windows_amd64.exe"
+               data-asset="mass/mass-setup_windows_amd64.exe">mass-setup_windows_amd64.exe</a></td></tr>
+    </table>
+  </div>
+
+  <p class="d">All releases, checksums, and older versions live on the
+  <a href="https://github.com/chinese-room-solutions/mass/releases">GitHub releases pages</a>.</p>
+</div></section>
+
+<section id="quickstart"><div class="wrap">
+  <h2>Quickstart</h2>
+  <div class="tabs" role="tablist" aria-label="Platform">
+    <button class="tab" data-class="{active: $qs === 'linux'}" data-on:click="$qs = 'linux'">Linux</button>
+    <button class="tab" data-class="{active: $qs === 'darwin'}" data-on:click="$qs = 'darwin'">macOS</button>
+    <button class="tab" data-class="{active: $qs === 'windows'}" data-on:click="$qs = 'windows'">Windows</button>
+  </div>
+
+<pre data-show="$qs === 'linux'"><span class="c"># 1 — install MASS on your main machine: make the installer executable, then double-click it</span>
+<span class="c">#     in your file manager — or run it from a terminal</span>
+<span class="k">$</span> <span class="cmd">chmod +x mass-setup_linux_amd64.AppImage && ./mass-setup_linux_amd64.AppImage</span>
+
+<span class="c"># 2 — in a new terminal: confirm the hub is up — dashboard at :3455</span>
+<span class="k">$</span> <span class="cmd">mass status</span>
+
+<span class="c"># 3 — install the llama.cpp runtime; it starts on install (or do it from the dashboard)</span>
+<span class="k">$</span> <span class="cmd">mass runtimes install mass-runtime-gateway-llama-cpp</span>
+
+<span class="c"># 4 — add a worker on this machine — or print the commands to paste on each GPU machine</span>
+<span class="k">$</span> <span class="cmd">mass workers install-local</span>
+<span class="k">$</span> <span class="cmd">mass workers join-command</span>
+
+<span class="c"># 5 — watch the fleet come up</span>
+<span class="k">$</span> <span class="cmd">mass workers list</span>
+
+<span class="c"># 6 — import a model into MASS — workers fetch what they run from the hub's store.</span>
+<span class="c">#     The import returns at once and downloads in the background; list shows the model id</span>
+<span class="k">$</span> <span class="cmd">mass models import-remote --runtime llama-cpp --repo ggml-org/Qwen3.5-0.8B-GGUF --file Qwen3.5-0.8B-Q4_0.gguf</span>
+<span class="k">$</span> <span class="cmd">mass models list</span>
+
+<span class="c"># 7 — inference, OpenAI-style, through MASS</span>
+<span class="k">$</span> <span class="cmd">curl -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions -d '{"model":"cli/Qwen3.5-0.8B-Q4_0.gguf","messages":[{"role":"user","content":"hi"}]}'</span></pre>
+
+<pre data-show="$qs === 'darwin'"><span class="c"># 1 — install MASS on your main machine: unzip, then double-click "MASS Setup" in Finder —</span>
+<span class="c">#     right-click → Open the first time, the app is signed but not notarized. Or from a terminal,</span>
+<span class="c">#     clearing the quarantine flag first:</span>
+<span class="k">$</span> <span class="cmd">unzip mass-setup_darwin_arm64.zip && xattr -dr com.apple.quarantine "MASS Setup.app" && open "MASS Setup.app"</span>
+
+<span class="c"># 2 — in a new terminal: confirm the hub is up — dashboard at :3455</span>
+<span class="k">$</span> <span class="cmd">mass status</span>
+
+<span class="c"># 3 — install the llama.cpp runtime; it starts on install (or do it from the dashboard)</span>
+<span class="k">$</span> <span class="cmd">mass runtimes install mass-runtime-gateway-llama-cpp</span>
+
+<span class="c"># 4 — add a worker on this machine — or print the commands to paste on each GPU machine</span>
+<span class="k">$</span> <span class="cmd">mass workers install-local</span>
+<span class="k">$</span> <span class="cmd">mass workers join-command</span>
+
+<span class="c"># 5 — watch the fleet come up</span>
+<span class="k">$</span> <span class="cmd">mass workers list</span>
+
+<span class="c"># 6 — import a model into MASS — workers fetch what they run from the hub's store.</span>
+<span class="c">#     The import returns at once and downloads in the background; list shows the model id</span>
+<span class="k">$</span> <span class="cmd">mass models import-remote --runtime llama-cpp --repo ggml-org/Qwen3.5-0.8B-GGUF --file Qwen3.5-0.8B-Q4_0.gguf</span>
+<span class="k">$</span> <span class="cmd">mass models list</span>
+
+<span class="c"># 7 — inference, OpenAI-style, through MASS</span>
+<span class="k">$</span> <span class="cmd">curl -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions -d '{"model":"cli/Qwen3.5-0.8B-Q4_0.gguf","messages":[{"role":"user","content":"hi"}]}'</span></pre>
+
+<pre data-show="$qs === 'windows'"><span class="c"># 1 — install MASS on your main machine: double-click the .exe in Explorer — or run it</span>
+<span class="c">#     from PowerShell. SmartScreen may warn on the unsigned installer: More info → Run anyway</span>
+<span class="k">&gt;</span> <span class="cmd">.\mass-setup_windows_amd64.exe</span>
+
+<span class="c"># 2 — in a new terminal: confirm the hub is up — dashboard at :3455</span>
+<span class="k">&gt;</span> <span class="cmd">mass status</span>
+
+<span class="c"># 3 — install the llama.cpp runtime; it starts on install (or do it from the dashboard)</span>
+<span class="k">&gt;</span> <span class="cmd">mass runtimes install mass-runtime-gateway-llama-cpp</span>
+
+<span class="c"># 4 — add a worker on this machine — or print the commands to paste on each GPU machine</span>
+<span class="k">&gt;</span> <span class="cmd">mass workers install-local</span>
+<span class="k">&gt;</span> <span class="cmd">mass workers join-command</span>
+
+<span class="c"># 5 — watch the fleet come up</span>
+<span class="k">&gt;</span> <span class="cmd">mass workers list</span>
+
+<span class="c"># 6 — import a model into MASS — workers fetch what they run from the hub's store.</span>
+<span class="c">#     The import returns at once and downloads in the background; list shows the model id</span>
+<span class="k">&gt;</span> <span class="cmd">mass models import-remote --runtime llama-cpp --repo ggml-org/Qwen3.5-0.8B-GGUF --file Qwen3.5-0.8B-Q4_0.gguf</span>
+<span class="k">&gt;</span> <span class="cmd">mass models list</span>
+
+<span class="c"># 7 — inference, OpenAI-style, through MASS</span>
+<span class="k">&gt;</span> <span class="cmd">curl.exe -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions -d '{"model":"cli/Qwen3.5-0.8B-Q4_0.gguf","messages":[{"role":"user","content":"hi"}]}'</span></pre>
+
+  <p class="d">The <code>mass</code> binary doubles as a CLI for the whole management API —
+  <code>status</code>, <code>models</code>, <code>runtimes</code>, <code>workers</code>,
+  <code>scheduler</code>, <code>queue</code> — so everything the dashboard does is scriptable.
+  It is agent-native too: the repo ships a ready-made
+  <a href="https://github.com/chinese-room-solutions/mass/tree/main/.claude/skills/mass-cli">CLI skill</a>
+  that teaches coding agents the verbs, and the same <code>mass.v1</code> API speaks gRPC and
+  plain HTTP/JSON for anything else you build on top.</p>
+</div></section>
+
+<section id="ecosystem"><div class="wrap">
+  <h2>Ecosystem</h2>
+
+  <div class="dl-group">
+    <h3>Runtime stack — llama.cpp</h3>
+    <p class="d">A runtime comes in two halves: the gateway package MASS installs, and the worker binary your GPU machines run.</p>
+    <div class="cards">
+      <div class="card"><h3><a href="https://github.com/chinese-room-solutions/mass-runtime-gateway-llama-cpp">llama.cpp runtime</a></h3>
+        <p>The <code>.mass</code> gateway package that teaches MASS the llama.cpp ecosystem: model formats, APIs, job payloads.</p></div>
+      <div class="card"><h3><a href="https://github.com/chinese-room-solutions/mass-worker-llama-cpp">llama.cpp worker</a></h3>
+        <p>The native binary that holds models resident on your GPUs and executes the jobs.
+        Installable on Linux and Windows (Vulkan) and macOS Apple Silicon (Metal).</p></div>
+    </div>
+  </div>
+
+  <div class="dl-group">
+    <h3>Libraries</h3>
+    <p class="d">The building blocks — use them to write your own runtime, worker, or client.</p>
+    <div class="cards">
+      <div class="card"><h3>Contracts &amp; SDK</h3>
+        <p><a href="https://github.com/chinese-room-solutions/mass-proto">mass-proto</a> — the gRPC contracts every
+        component speaks. <a href="https://github.com/chinese-room-solutions/mass-sdk">mass-sdk</a> — shared Go
+        toolkit: UI kit, themes, installers.</p></div>
+      <div class="card"><h3>Go clients</h3>
+        <p><a href="https://github.com/chinese-room-solutions/llama-cpp-openai-client-go">OpenAI-compatible</a> and
+        <a href="https://github.com/chinese-room-solutions/llama-cpp-rpc-client-go">typed gRPC</a> clients for
+        llama.cpp servers.</p></div>
+    </div>
+  </div>
+
+  <div class="dl-group">
+    <h3>Built on MASS</h3>
+    <div class="cards">
+      <div class="card"><h3><a href="https://github.com/chinese-room-solutions/grimoire">Grimoire</a></h3>
+        <p>A Human-AI memory layer over your Markdown vault — an example of what MASS can power.</p></div>
+    </div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  FSL-1.1-ALv2 — free for everything except a competing service. Each release becomes Apache-2.0 after two years.<br>
+  © 2026 Daniil Trishkin (aka Kernel Pryanic) and Chinese Room Solutions ·
+  Built with the <a href="https://github.com/chinese-room-solutions/mass-sdk">MASS UI theme</a> and
+  <a href="https://data-star.dev">Datastar</a>.
+</div></footer>
+</body>
+</html>

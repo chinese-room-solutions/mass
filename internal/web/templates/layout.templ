@@ -1,18 +1,38 @@
 package templates
 
+import (
+	"runtime"
+
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
+)
+
 templ Layout(title string, body templ.Component, theme string) {
 	<!DOCTYPE html>
-	<html lang="en" class={ htmlThemeClass(theme) }>
+	<html lang="en" class={ htmlThemeClass(theme) } data-theme={ string(uikit.ParseTheme(theme)) } data-os={ runtime.GOOS }>
 	<head>
 		<meta charset="UTF-8"/>
 		<meta name="viewport" content="width=device-width, initial-scale=1"/>
 		<title>{ title }</title>
-		<script type="module" src="https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.7/bundles/datastar.js"></script>
 		<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/dark.css"/>
 		<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/themes/light.css"/>
 		<script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.1/cdn/shoelace-autoloader.js"></script>
+		<!-- Load Datastar only after Shoelace has upgraded the form controls it
+		     binds to. Shoelace's autoloader registers custom elements
+		     asynchronously; if Datastar scans data-bind before sl-input is
+		     defined it picks the attribute adapter (reads the value attribute,
+		     not the live .value property) and never recovers, so typed input
+		     never reaches the signal. Awaiting whenDefined forces the property
+		     adapter. -->
+		<script type="module">
+			await Promise.all(
+				['sl-input', 'sl-select', 'sl-switch'].map(t => customElements.whenDefined(t))
+			);
+			await import('https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js');
+		</script>
 		<link rel="icon" href="data:,"/>
-		<link rel="stylesheet" href="/public/dist.css?v=3"/>
+		<link rel="stylesheet" href="/public/dist.css?v=7"/>
+		@templ.Raw(themesStyle())
+		@templ.Raw(massThemesScript())
 	</head>
 	<body class={ bodyThemeClass(theme) + " min-h-screen" }>
 		@body

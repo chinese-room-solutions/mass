@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -34,9 +35,12 @@ func TestStreamWorker_HeartbeatStale(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "lastSeen exactly at window edge stays alive",
+			// Sleep + window are intentionally generous so the few
+			// microseconds between fixture build and assertion don't
+			// push the elapsed time past the window.
+			name:     "lastSeen well within window stays alive",
 			online:   true,
-			lastSeen: time.Now().Add(-time.Minute),
+			lastSeen: time.Now().Add(-time.Second),
 			window:   time.Minute,
 			want:     false,
 		},
@@ -120,4 +124,67 @@ func TestStreamWorker_ApplyHeartbeat_IdleSince(t *testing.T) {
 			}
 		})
 	}
+}
+
+// DeliverJobChunk and SetOffline race on the per-job chunk channels: the
+// hub delivers chunks from the worker's recv loop while the stale-
+// heartbeat watcher (or a UI kick) flips the worker offline. Before the
+// send moved under pendingMu, a chunk that looked its channel up just
+// before SetOffline closed it panicked with send-on-closed-channel and
+// took MASS down. Hammer the pair across many iterations — the panic
+// (and -race) would fail this test without the fix.
+func TestStreamWorker_DeliverJobChunkRacesSetOffline(t *testing.T) {
+	for range 2000 {
+		w := NewFakeStreamWorker("w1", "rt", nil, time.Now())
+		w.SetFakeSender(func(*workerpb.HubMessage) error { return nil })
+		jobID, ch, err := w.AssignJob("m", []byte("p"))
+		require.NoError(t, err)
+
+		// Consumer mirrors pumpWorkerChunks: drain until closed.
+		drained := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(drained)
+		}()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 20 {
+				w.DeliverJobChunk(jobID, &JobChunk{Type: JobChunkTypeChunk})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			w.SetOffline()
+		}()
+		close(start)
+		wg.Wait()
+		<-drained
+	}
+}
+
+// ApplyHeartbeat must copy the store-relative Files list verbatim from each
+// LoadedModelStatus so the hub and scheduler can see the cache keys backing a
+// loaded model. The values are opaque path strings — file or directory — and
+// MASS carries them through untouched.
+func TestStreamWorker_ApplyHeartbeat_Files(t *testing.T) {
+	w := &StreamWorker{}
+	hb := &workerpb.WorkerHeartbeat{
+		LoadedModels: []*workerpb.LoadedModelStatus{
+			{ModelId: "a", Files: []string{"gguf/llama/model.gguf", "gguf/llama/mmproj.gguf"}},
+			{ModelId: "b", Files: []string{"onnx/whisper"}},
+			{ModelId: "c"},
+		},
+	}
+	w.ApplyHeartbeat(hb)
+	require.Len(t, w.loaded, 3)
+	require.Equal(t, []string{"gguf/llama/model.gguf", "gguf/llama/mmproj.gguf"}, w.loaded[0].Files)
+	require.Equal(t, []string{"onnx/whisper"}, w.loaded[1].Files)
+	require.Empty(t, w.loaded[2].Files)
 }

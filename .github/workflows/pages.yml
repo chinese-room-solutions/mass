@@ -1,0 +1,57 @@
+name: pages
+
+# Deploy the landing page (site/) to GitHub Pages. The page is static; the
+# only build step is `make site`, which stages the SDK theme + Datastar from
+# the pinned mass-sdk module into the gitignored site/vendor/.
+#
+# One-time repo setup: Settings → Pages → Source: GitHub Actions. Creating
+# the Pages site via API needs repo-admin rights that neither the job token
+# nor GH_PAT carries — after that one click, the default job token (pages:
+# write below) handles everything here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+      - 'Makefile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  GOPRIVATE: github.com/chinese-room-solutions/*
+
+jobs:
+  deploy:
+    # The org is on the Team plan, so Pages works while the repo is private
+    # (the published URL is still public — Pages access control is
+    # Enterprise-only).
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Configure private module access
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+      - name: Stage site vendor assets
+        run: make site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

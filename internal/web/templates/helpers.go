@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/a-h/templ"
 	"github.com/chinese-room-solutions/mass-sdk/uikit"
 )
 
@@ -55,9 +56,6 @@ var (
 	//go:embed scripts/settings_autosave.js
 	settingsAutoSaveJS string
 
-	//go:embed scripts/settings_browse.js
-	settingsBrowseJS string
-
 	//go:embed scripts/scheduler.js
 	schedulerJS string
 
@@ -76,7 +74,6 @@ var (
 	fileBrowserScript      = "<script>" + fileBrowserJS + "</script>"
 	shellScripts           = "<script>" + shellScriptsJS + "</script>"
 	settingsAutoSaveScript = "<script>" + settingsAutoSaveJS + "</script>"
-	settingsBrowseScript   = "<script>" + settingsBrowseJS + "</script>"
 	schedulerScript        = "<script>" + schedulerJS + "</script>"
 	modelsTabScript        = "<script>" + modelsTabJS + "</script>"
 	runtimesScript         = "<script>" + runtimesJS + "</script>"
@@ -88,21 +85,268 @@ var (
 // Models, Scheduler and Workers are fetched lazily by the browser on first
 // tab activation — the shell ships their bodies as a spinner placeholder.
 type DashboardData struct {
-	Runtimes        []RuntimeViewData
-	ActiveRuntime   string
-	ListenAddr      string
-	DataDir         string
-	AuthTokenSet    bool
-	LogLevel        string // zerolog level name (e.g. "debug", "info")
-	Theme           string // "dark" or "light"
-	DevMode         bool
-	ConfigDir       string // directory containing config.yml (shown on Settings tab)
-	LogsDir         string // path to logs directory (shown on Settings tab)
-	TLSEnabled      bool
-	TLSCertFile     string
-	ResultTTL       string // job result cache TTL (e.g. "24h")
-	IdleEvictionTTL string // loaded-model idle eviction TTL (e.g. "10s")
-	RegistryURL     string // future: package registry
+	Runtimes      []RuntimeViewData
+	ActiveRuntime string
+	ListenAddr    string
+	// DataDir is the raw configured value, bound to the Settings input — empty
+	// means "platform default". EffectiveDataDir is what MASS actually resolved
+	// it to at startup, shown in the About section.
+	DataDir          string
+	EffectiveDataDir string
+	AuthTokenSet     bool
+	LogLevel         string // zerolog level name (e.g. "debug", "info")
+	Theme            string // "dark" or "light"
+	DevMode          bool
+	Version          string // running build's version (shown in About)
+	ConfigFile       string // path to the loaded config.yml (shown in About)
+	LogsDir          string // path to logs directory (shown in About)
+	TLSEnabled       bool
+	TLSCertFile      string
+	ResultTTL        string // job result cache TTL (e.g. "24h")
+	IdleEvictionTTL  string // loaded-model idle eviction TTL (e.g. "10s")
+	LoadAttempts     int    // total attempts before failing a job (1 = no retry)
+	RegistryURL      string // future: package registry
+}
+
+// RegistryPackageView holds template data for one available registry runtime.
+// Version is the newest listed version; Installable is whether an artifact
+// exists for this server's platform; Installed is whether it's already on disk.
+type RegistryPackageView struct {
+	Name        string
+	DisplayName string
+	Description string
+	Version     string
+	// RuntimeName is the installed runtime's kind (the DELETE /api/runtimes/
+	// path key) — what the row's Remove button hands the confirm dialog.
+	RuntimeName string
+	Installable bool
+	Installed   bool
+	// IncompatibleWorkers is the count of connected workers whose compatible
+	// range excludes this listed version — the fleet a runtime upgrade to it
+	// would strand. Non-zero only for an installed runtime with a newer listed
+	// version. Rendered as a pre-upgrade warning on the row.
+	IncompatibleWorkers int
+}
+
+// registryTitle prefers the display name, falling back to the package name.
+func registryTitle(p RegistryPackageView) string {
+	if p.DisplayName != "" {
+		return p.DisplayName
+	}
+	return p.Name
+}
+
+// incompatibleWorkersLabel is the pre-upgrade warning text: how many connected
+// workers this version would strand at Register.
+func incompatibleWorkersLabel(n int) string {
+	if n == 1 {
+		return "1 connected worker incompatible"
+	}
+	return fmt.Sprintf("%d connected workers incompatible", n)
+}
+
+// registryInstallDisabled returns the data-attr:disabled value for a row's
+// Install button: disabled when already installed or no artifact for the
+// platform.
+func registryInstallDisabled(p RegistryPackageView) string {
+	if p.Installed || !p.Installable {
+		return "true"
+	}
+	return "false"
+}
+
+// registryInstallDisabledExpr is the data-attr:disabled Datastar expression for
+// a row's Install button. It disables when the package can't be installed
+// (already installed / no artifact) or when any registry install is in flight
+// (registryInstalling is non-empty), so a click doesn't fire a second install
+// while one is downloading.
+func registryInstallDisabledExpr(p RegistryPackageView) string {
+	if registryInstallDisabled(p) == "true" {
+		return "true"
+	}
+	return "$registryInstalling !== ''"
+}
+
+// registryInstallLoadingExpr is the data-attr:loading expression: true while
+// this specific package is the one installing, so only its button spins.
+func registryInstallLoadingExpr(p RegistryPackageView) string {
+	return fmt.Sprintf("$registryInstalling === %s", jsStringLiteral(p.Name))
+}
+
+// registryInstallClickExpr marks this package as installing, then posts the
+// install. The SSE handler clears $registryInstalling when it finishes.
+func registryInstallClickExpr(p RegistryPackageView) string {
+	return fmt.Sprintf("$registryInstalling = %s; @post('/api/runtimes/registry/install/%s')",
+		jsStringLiteral(p.Name), p.Name)
+}
+
+// registryRemoveClickExpr routes an installed row's Remove through the same
+// confirm dialog the sidebar uses — uninstalling a runtime deletes its binary,
+// so it stays confirm-gated no matter the entry point.
+func registryRemoveClickExpr(p RegistryPackageView) string {
+	return fmt.Sprintf("$confirmUninstall = %s; $confirmOpen = true", jsStringLiteral(p.RuntimeName))
+}
+
+// RegistryPageSize is how many rows the runtime registry dialog renders per
+// window — the same visible-row budget as the themes dialog and the gateway's
+// Install Model panel.
+const RegistryPageSize = 5
+
+// registryMoreClickExpr widens the list window by a page, then re-fetches. The
+// server reads the signal back and renders the wider window.
+func registryMoreClickExpr(next int) string {
+	return fmt.Sprintf("$registryLimit = %d; @get('/api/runtimes/registry')", next)
+}
+
+// registryReloadExpr rewinds the window to the first page and re-fetches.
+// Opening the dialog and every fresh search start from the top.
+func registryReloadExpr() string {
+	return fmt.Sprintf("$registryLimit = %d; @get('/api/runtimes/registry')", RegistryPageSize)
+}
+
+// jsStringLiteral renders s as a single-quoted JS string literal, escaping the
+// characters that would break out of the quotes in a Datastar attr expression.
+func jsStringLiteral(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	return "'" + r.Replace(s) + "'"
+}
+
+// RenderRegistryAvailable renders the #registry-available list for SSE patches.
+// filtered is true when the list is the result of a non-empty search query, so
+// an empty list distinguishes "no match" from "empty registry". next is the
+// window a "Show More" click should ask for, 0 when the list already fits.
+func RenderRegistryAvailable(pkgs []RegistryPackageView, stale, filtered bool, errMsg string, next int) string {
+	return renderToString(registryAvailable(pkgs, stale, filtered, errMsg, next))
+}
+
+// InstalledThemeView is one row of the themes dialog's "Installed" section.
+// Built-ins can't be removed, so their row shows a marker instead of a button.
+type InstalledThemeView struct {
+	ID      string
+	Label   string
+	Base    string // "dark" | "light"
+	Builtin bool
+}
+
+// AvailableThemeView is one row of the themes dialog's "Available" section: a
+// registry theme package that isn't installed yet, at the version an install
+// would pick.
+type AvailableThemeView struct {
+	Name        string // registry package name, the install endpoint's key
+	Label       string
+	Description string
+	Version     string
+}
+
+// ThemeManagerView is the whole themes-dialog body. Installed always renders
+// (it comes from the live uikit registry); ErrMsg replaces the Available
+// section when the package registry can't be reached. Filtered is true when a
+// non-empty search produced the result, so an empty section reads as "no match"
+// rather than "nothing there".
+// InstalledNext / AvailableNext carry the window a section's "Show More" click
+// should ask for, or 0 when that section is already showing everything.
+type ThemeManagerView struct {
+	Installed     []InstalledThemeView
+	Available     []AvailableThemeView
+	InstalledNext int
+	AvailableNext int
+	Stale         bool
+	Filtered      bool
+	ErrMsg        string
+}
+
+// ThemePageSize is how many rows a themes-dialog section renders per window.
+// Both sections start at one page, so the dialog opens showing up to ten rows —
+// the same visible-row budget as the Install Model panel.
+const ThemePageSize = 5
+
+// Themes-dialog layout. The body is two content-sized grid rows that split the
+// panel evenly only when both overflow: each row grows to its own content, any
+// space one section doesn't fill goes to the other, and the panel stops at the
+// ceiling with the overflowing section(s) scrolling internally. max-content
+// keeps a short list from padding the dialog out to the ceiling, and
+// align-content:start stops the tracks stretching to fill it.
+const (
+	themeManagerStyle = "display:grid;grid-template-rows:minmax(0,auto) minmax(0,auto);" +
+		"align-content:start;gap:1rem;height:60vh;max-height:max-content"
+	themeSectionStyle = "display:flex;flex-direction:column;min-height:0;gap:0.5rem"
+	themeRowsStyle    = "min-height:0;overflow-y:auto"
+)
+
+// themeBusyDisabledExpr disables a theme row's button while any theme install
+// or removal is in flight, so a second click can't race the first.
+func themeBusyDisabledExpr() string { return "$themeBusy !== ''" }
+
+// themeBusyLoadingExpr is the data-attr:loading expression: true only while
+// this specific row is the one working, so only its button spins.
+func themeBusyLoadingExpr(key string) string {
+	return fmt.Sprintf("$themeBusy === %s", jsStringLiteral(key))
+}
+
+// themeInstallClickExpr marks the package as busy, then posts the install. The
+// SSE handler clears $themeBusy when it finishes.
+func themeInstallClickExpr(name string) string {
+	return fmt.Sprintf("$themeBusy = %s; @post('/api/themes/install/%s')", jsStringLiteral(name), name)
+}
+
+// themeRemoveClickExpr marks the theme as busy, then posts the removal. The
+// button sits inside the row's activate click-target, so the event must not
+// bubble — otherwise removing a theme would also activate it.
+func themeRemoveClickExpr(id string) string {
+	return fmt.Sprintf("evt.stopPropagation(); $themeBusy = %s; @post('/api/themes/remove/%s')", jsStringLiteral(id), id)
+}
+
+// themeActivateClickExpr activates an installed theme from its dialog row via
+// the same signal+post contract as the header palette. Guarded on $themeBusy so
+// a row click can't re-apply a theme mid-removal.
+func themeActivateClickExpr(id string) string {
+	return fmt.Sprintf("if ($themeBusy === '') { $theme = %s; @post('/internal/settings/theme') }", jsStringLiteral(id))
+}
+
+// themeActiveShowExpr shows a row's active-check only while that theme is the
+// applied one — reactive against $theme, so it follows palette switches too.
+func themeActiveShowExpr(id string) string {
+	return fmt.Sprintf("$theme === %s", jsStringLiteral(id))
+}
+
+// themeMoreClickExpr widens one section's window by a page, then re-fetches the
+// dialog body. The server reads the signal back and renders the wider window.
+func themeMoreClickExpr(signal string, next int) string {
+	return fmt.Sprintf("$%s = %d; @get('/api/themes/registry')", signal, next)
+}
+
+// themeReloadExpr rewinds both windows to the first page and re-fetches. Opening
+// the dialog and every fresh search start from the top.
+func themeReloadExpr() string {
+	return fmt.Sprintf("$themeInstalledLimit = %d; $themeAvailableLimit = %d; @get('/api/themes/registry')",
+		ThemePageSize, ThemePageSize)
+}
+
+// RenderThemeManager renders the #theme-manager dialog body for SSE patches.
+func RenderThemeManager(view ThemeManagerView) string {
+	return renderToString(themeManager(view))
+}
+
+// RenderThemeMenu renders the header's #theme-menu for SSE patches, so an
+// installed or removed theme appears in (or leaves) the picker without a
+// reload.
+func RenderThemeMenu() string {
+	return renderToString(themeMenu())
+}
+
+// RenderThemesStyle renders the #mass-themes <style> element for SSE patches,
+// so a just-installed theme's CSS is in the page before it can be picked.
+func RenderThemesStyle() string {
+	return themesStyle()
+}
+
+// firstRuntimeName returns the first runtime's name, or "" when none are
+// installed. Seeds the Add-worker dialog's runtime selection.
+func firstRuntimeName(rs []RuntimeViewData) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	return rs[0].RuntimeName
 }
 
 // RuntimeViewData holds template data for one installed runtime gateway.
@@ -117,20 +361,29 @@ type RuntimeViewData struct {
 
 // dashboardSignals returns the JSON data-signals string for the dashboard.
 func dashboardSignals(data DashboardData) string {
-	theme := data.Theme
-	if theme == "" {
-		theme = "dark"
-	}
+	resolved := uikit.ParseTheme(data.Theme)
+	base, _ := uikit.LookupTheme(string(resolved))
 	signals := map[string]any{
 		"activeTab":          "runtimes",
 		"activeRuntime":      data.ActiveRuntime,
 		"sidebarCollapsed":   false,
 		"runtimeSearch":      "",
 		"installRuntimeOpen": false,
-		"confirmOpen":        false,
-		"confirmUninstall":   "",
-		"packagePath":        "",
-		"installing":         false,
+		"installLocalOpen":   false,
+		"registryQuery":      "",
+		"registryInstalling": "",
+		// Themes dialog: open state, its search filter, the package name /
+		// theme id of the row currently installing or being removed ("" = idle),
+		// and how many rows each section currently windows to.
+		"browseThemesOpen":    false,
+		"themeQuery":          "",
+		"themeBusy":           "",
+		"themeInstalledLimit": ThemePageSize,
+		"themeAvailableLimit": ThemePageSize,
+		"confirmOpen":         false,
+		"confirmUninstall":    "",
+		"packagePath":         "",
+		"installing":          false,
 		// Runtimes-tab signals other than the dialog state.
 		"listenAddr": data.ListenAddr,
 		"dataDir":    data.DataDir,
@@ -142,10 +395,12 @@ func dashboardSignals(data DashboardData) string {
 		}(),
 		"authTokenSet":              data.AuthTokenSet,
 		"authTokenEdited":           false,
-		"theme":                     theme,
+		"theme":                     string(resolved),
+		"themeBase":                 string(base.Base),
 		"devMode":                   data.DevMode,
 		"resultTTL":                 data.ResultTTL,
 		"idleEvictionTTL":           data.IdleEvictionTTL,
+		"loadAttempts":              data.LoadAttempts,
 		"registryURL":               data.RegistryURL,
 		"logLevel":                  data.LogLevel,
 		"tlsEnabled":                data.TLSEnabled,
@@ -161,6 +416,32 @@ func dashboardSignals(data DashboardData) string {
 		"confirmDeleteGroupLabel":   "",
 		"confirmDeleteGroupCount":   0,
 		"selectedSchedulerKey":      "",
+		// Gates the Workers tab's "Add worker" button — adding a worker needs a
+		// runtime to attach it to. Re-patched over SSE on every runtime install
+		// and uninstall, so the button follows without a reload.
+		"hasRuntimes":      len(data.Runtimes) > 0,
+		"addWorkerOpen":    false,
+		"addWorkerRuntime": firstRuntimeName(data.Runtimes),
+		// Add-worker dialog: a join token is minted server-side when the dialog
+		// opens and patched into these signals. Empty until then.
+		"addWorkerToken":        "",
+		"addWorkerTokenExpiry":  "",
+		"addWorkerTokenError":   "",
+		"addWorkerAuthDisabled": false,
+		// Add-worker dialog: worker package + backend, populated server-side on
+		// dialog open and on runtime/worker change. Empty ⇒ the setup script
+		// auto-selects (a lone package / the "Auto" backend).
+		"addWorkerWorker":  "",
+		"addWorkerBackend": "",
+		// Add-worker dialog: the address the worker machines will use to reach this
+		// MASS. Prefilled from the browser origin on first dialog open (a
+		// user-edited value survives reopen). All generated commands derive their
+		// base from this, so a host-local admin can substitute the LAN/DNS address.
+		"addWorkerMassURL": "",
+		// Add-worker dialog: which copy row last confirmed a copy (1-4, 0 = none).
+		// A click sets it and resets after a short delay so the button flips to a
+		// success check transiently.
+		"addWorkerCopied": 0,
 	}
 	b, err := json.Marshal(signals)
 	if err != nil {
@@ -169,20 +450,50 @@ func dashboardSignals(data DashboardData) string {
 	return string(b)
 }
 
-// htmlThemeClass returns the <html> class string for the given theme.
+// htmlThemeClass returns the <html> class string for the given theme: the
+// registry's base + overlay classes, plus "dark" for the Tailwind dark variant
+// on any dark-based theme and "mass-theme-custom" for pluggable (non-built-in)
+// themes so the generic utility-override block in input.tw.css applies.
 func htmlThemeClass(theme string) string {
-	if theme == "light" {
-		return "sl-theme-light"
+	resolved := uikit.ParseTheme(theme)
+	info, _ := uikit.LookupTheme(string(resolved))
+	class := resolved.HTMLClass()
+	if info.Base == uikit.ThemeDark {
+		class += " dark"
 	}
-	return "sl-theme-dark dark"
+	if resolved != uikit.ThemeDark && resolved != uikit.ThemeLight {
+		class += " mass-theme-custom"
+	}
+	return class
 }
 
-// bodyThemeClass returns the <body> class string for the given theme.
+// bodyThemeClass returns the <body> class string for the given theme, keyed on
+// the resolved theme's base (a light-based pluggable theme gets light body
+// classes, everything else dark).
 func bodyThemeClass(theme string) string {
-	if theme == "light" {
+	info, _ := uikit.LookupTheme(string(uikit.ParseTheme(theme)))
+	if info.Base == uikit.ThemeLight {
 		return "bg-neutral-100 text-neutral-900"
 	}
 	return "bg-neutral-950 text-neutral-100"
+}
+
+// massThemesScript returns the inline <script> that publishes the theme
+// registry to the page as window.__massThemes (read by shell.js applyTheme).
+// uikit.ThemesJSON is a compact JSON object and cannot contain '<', so it is
+// safe to inline into a script element.
+func massThemesScript() string {
+	return "<script>window.__massThemes = " + uikit.ThemesJSON() + ";</script>"
+}
+
+// themesStyle returns the inline <style> carrying the pluggable-theme CSS.
+// Rendered whole via templ.Raw because templ treats <style> content as raw text
+// (expressions inside it are not evaluated). The SDK loader guarantees the CSS
+// contains no '<', so it cannot break out. The element is always emitted, even
+// with no themes loaded: it is the patch target the themes dialog re-renders
+// into after an install, and a patch needs something to match by id.
+func themesStyle() string {
+	return `<style id="mass-themes">` + uikit.ThemesCSS() + "</style>"
 }
 
 // displayPath normalises a filesystem path for display in the UI. Windows
@@ -219,20 +530,30 @@ func runtimeStatusDotClass(running, autoStart bool) string {
 	}
 }
 
+// renderToString renders a templ component to a string. Rendering to an
+// in-memory buffer only fails if the component logic itself errors, which is
+// an invariant violation for these process-built views — so panic rather
+// than swallow.
+func renderToString(c templ.Component) string {
+	var buf bytes.Buffer
+	if err := c.Render(context.Background(), &buf); err != nil {
+		panic(fmt.Errorf("rendering component: %w", err))
+	}
+	return buf.String()
+}
+
 // RenderRuntimeRowActions returns the HTML for the Start/Stop button area
 // keyed by runtime kind. Patched independently via SSE.
 func RenderRuntimeRowActions(kind string, running bool) string {
-	var buf bytes.Buffer
-	_ = runtimeRowActions(kind, running).Render(context.Background(), &buf)
-	return fmt.Sprintf(`<span id="runtime-actions-%s">`, html.EscapeString(kind)) + buf.String() + `</span>`
+	return fmt.Sprintf(`<span id="runtime-actions-%s">`, html.EscapeString(kind)) +
+		renderToString(runtimeRowActions(kind, running)) + `</span>`
 }
 
 // RenderRuntimeAutoStartButton renders just the auto-start lightning toggle
 // for a runtime row. Patched after the toggle endpoint flips the flag.
 func RenderRuntimeAutoStartButton(kind string, autoStart bool) string {
-	var buf bytes.Buffer
-	_ = runtimeAutoStartButton(kind, autoStart).Render(context.Background(), &buf)
-	return fmt.Sprintf(`<span id="runtime-autostart-%s">`, html.EscapeString(kind)) + buf.String() + `</span>`
+	return fmt.Sprintf(`<span id="runtime-autostart-%s">`, html.EscapeString(kind)) +
+		renderToString(runtimeAutoStartButton(kind, autoStart)) + `</span>`
 }
 
 // RenderRuntimeSidebarDot returns the sidebar status-dot for a runtime row.
@@ -246,24 +567,125 @@ func RenderRuntimeSidebarDot(kind string, running, autoStart bool) string {
 // RenderRuntimeList returns the full HTML of #runtime-list for SSE updates
 // after install or uninstall.
 func RenderRuntimeList(rs []RuntimeViewData, active string) string {
-	var buf bytes.Buffer
-	_ = runtimeListItems(rs, active).Render(context.Background(), &buf)
-	return `<div id="runtime-list" class="flex-1 overflow-y-auto py-1">` + buf.String() + `</div>`
+	return `<div id="runtime-list" class="flex-1 overflow-y-auto py-1">` +
+		renderToString(runtimeListItems(rs, active)) + `</div>`
+}
+
+// RenderAddWorkerRuntimePicker returns the #add-worker-runtime-picker fragment
+// for SSE updates after the installed-runtime set changes.
+func RenderAddWorkerRuntimePicker(rs []RuntimeViewData) string {
+	return renderToString(addWorkerRuntimePicker(rs))
+}
+
+// WorkerOptionView is one worker package the operator can pick in the Add-worker
+// dialog: its package name (the select value), human display name, and the
+// distinct backends its resolvable versions advertise (a union across platforms).
+type WorkerOptionView struct {
+	Name        string
+	DisplayName string
+	Backends    []string
+}
+
+// RenderAddWorkerWorkerPicker returns the #add-worker-worker-picker fragment: a
+// worker <select> populated from opts, always bound to $addWorkerWorker (the
+// server pins that signal to a package name even for a lone package so the
+// command carries an explicit &worker=). With none the fragment is empty.
+// loadFailed renders a muted note instead of a select when the registry could
+// not be reached.
+func RenderAddWorkerWorkerPicker(opts []WorkerOptionView, loadFailed bool) string {
+	return renderToString(addWorkerWorkerPicker(opts, loadFailed))
+}
+
+// RenderAddWorkerBackendPicker returns the #add-worker-backend-picker fragment: a
+// backend <select> ("Auto" + each backend) for the selected worker package, or
+// an empty container when the package has fewer than two backends (no choice to
+// make). backends is the chosen package's backend union.
+func RenderAddWorkerBackendPicker(backends []string) string {
+	return renderToString(addWorkerBackendPicker(backends))
+}
+
+// AddWorkerSelection resolves what $addWorkerWorker and $addWorkerBackend should
+// hold after options are (re)loaded for a runtime. worker is "" only when there
+// are no options; otherwise it is the retained currentWorker when that still
+// names a listed package, else the first package name — every package, including
+// a lone one, is pinned explicitly so the command carries &worker=. backend is
+// kept when currentBackend is still one of the selected package's backends, else
+// reset to "".
+func AddWorkerSelection(opts []WorkerOptionView, currentWorker, currentBackend string) (worker, backend string) {
+	if len(opts) == 0 {
+		return "", ""
+	}
+	worker = opts[0].Name
+	for _, o := range opts {
+		if o.Name == currentWorker {
+			worker = currentWorker
+			break
+		}
+	}
+	backend = ""
+	for _, o := range opts {
+		if o.Name == worker {
+			for _, b := range o.Backends {
+				if b == currentBackend {
+					backend = currentBackend
+				}
+			}
+		}
+	}
+	return worker, backend
+}
+
+// BackendsForWorker returns the backend union of the option named worker, or nil
+// when worker is empty or not listed. Callers pass it to
+// RenderAddWorkerBackendPicker so the backend select follows the worker choice.
+func BackendsForWorker(opts []WorkerOptionView, worker string) []string {
+	if worker == "" {
+		return nil
+	}
+	for _, o := range opts {
+		if o.Name == worker {
+			return o.Backends
+		}
+	}
+	return nil
+}
+
+// CorrectAddWorkerRuntime returns the value $addWorkerRuntime should hold given
+// the current runtime set and the client's current selection: the existing
+// selection when it still names an installed runtime, otherwise the first
+// runtime's name ("" when none are installed). Callers patch the signal only
+// when this differs from current, leaving a valid selection untouched.
+func CorrectAddWorkerRuntime(rs []RuntimeViewData, current string) string {
+	for _, r := range rs {
+		if r.RuntimeName == current {
+			return current
+		}
+	}
+	return firstRuntimeName(rs)
 }
 
 // RenderWelcomeState returns the Runtimes-tab right-pane welcome state.
 func RenderWelcomeState(empty bool) string {
 	heading := "Select a runtime"
-	subtext := "Choose a runtime from the sidebar, or install a new one."
 	if empty {
 		heading = "No runtimes installed"
-		subtext = "Install a runtime gateway package (.mass) to get started."
 	}
-	return `<div class="flex flex-col items-center justify-center h-64 text-center">` +
+	subtext := "Install a runtime gateway from the registry, or a local .mass package."
+	// Loud primary CTA only in the true empty state; once runtimes exist the
+	// pane is just a "pick one" prompt, so the install button drops to default.
+	installVariant := "default"
+	if empty {
+		installVariant = "primary"
+	}
+	return `<div id="runtime-welcome-content" class="flex flex-col items-center justify-center h-full text-center">` +
 		`<h2 class="text-lg font-semibold mb-2">` + heading + `</h2>` +
 		`<p class="text-neutral-400 text-sm mb-4">` + subtext + `</p>` +
-		`<sl-button variant="primary" size="small" data-on:click="$installRuntimeOpen = true">` +
-		`<sl-icon slot="prefix" name="plus-lg"></sl-icon>Install Runtime</sl-button></div>`
+		`<div class="flex items-center gap-2">` +
+		`<sl-button variant="` + installVariant + `" size="small" data-on:click="$installRuntimeOpen = true">` +
+		`<sl-icon slot="prefix" name="cloud-download"></sl-icon>Install Runtime</sl-button>` +
+		`<sl-button variant="default" size="small" data-on:click="$installLocalOpen = true">` +
+		`<sl-icon slot="prefix" name="folder2-open"></sl-icon>Browse Local</sl-button>` +
+		`</div></div>`
 }
 
 // --- Models tab text helpers ---------------------------------------------
@@ -405,6 +827,65 @@ func RenderRuntimeLogView(kind string, history []string) string {
 </div>`, esc(kind), entries)
 }
 
+// formatGFlops renders a Q4_K matvec throughput number for an operator-
+// facing chip. Big numbers fold into terraflops (one decimal place) so
+// "1240 GF" displays as "1.2 TF"; smaller numbers stay GFLOPS-rounded.
+func formatGFlops(gf float64) string {
+	if gf >= 1000 {
+		return fmt.Sprintf("%.1f TF", gf/1000)
+	}
+	return fmt.Sprintf("%.0f GF", gf)
+}
+
+// mismatchedGPURatio is the max/min compute_gflops threshold beyond which
+// we surface the mismatched-GPU advisory. 2× fires on any meaningfully
+// uneven pair — the discrete + iGPU case (1.8 TF vs ~50 GF) is ~36×, but
+// even a moderate 3090 + 3060 pairing (~2×) is enough lockstep tax that
+// the operator should know. Operators can still use the split
+// deliberately — the advisory is informative, not coercive.
+const mismatchedGPURatio = 2.0
+
+// mismatchedGPUAdvisory returns an empty string when the worker's
+// enabled-and-benched GPU set is uniform enough, or a one-sentence
+// advisory string when a wide GFLOPS gap means tensor-splitting across
+// the set would bottleneck on the slowest GPU. Caller renders the
+// returned text inside an sl-alert.
+//
+// Background in [memory/project_mismatched_gpu_split.md]: llama.cpp's
+// per-layer split runs lockstep, so the fastest GPU stalls on every
+// layer waiting for the slowest. A 36× capability gap (discrete +
+// integrated) collapses to roughly the integrated GPU's pace.
+func mismatchedGPUAdvisory(devices []ComputeView) string {
+	var minGF, maxGF float64
+	var slowName, fastName string
+	for _, d := range devices {
+		if d.Type != "GPU" || !d.Enabled || !d.HasBenchmark || d.ComputeGFlops <= 0 {
+			continue
+		}
+		if minGF == 0 || d.ComputeGFlops < minGF {
+			minGF = d.ComputeGFlops
+			slowName = d.DeviceName
+		}
+		if d.ComputeGFlops > maxGF {
+			maxGF = d.ComputeGFlops
+			fastName = d.DeviceName
+		}
+	}
+	if minGF == 0 || maxGF == 0 || slowName == fastName {
+		return "" // need at least two distinct enabled+benched GPUs
+	}
+	if maxGF/minGF < mismatchedGPURatio {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Mismatched GPUs enabled (%s at %s vs %s at %s). "+
+			"Runtimes that tensor-split across these devices will be bounded by the slower one. "+
+			"Disable the slower GPU below if that's not what you want.",
+		html.EscapeString(fastName), formatGFlops(maxGF),
+		html.EscapeString(slowName), formatGFlops(minGF),
+	)
+}
+
 // --- Workers tab view models ----------------------------------------------
 
 // WorkerView is the per-worker render shape for the Workers tab.
@@ -412,11 +893,11 @@ type WorkerView struct {
 	ID          string
 	Name        string
 	RuntimeName string
+	Version     string // worker's own semver (required at handshake)
 	Online      bool
 	Enabled     bool // operator toggle: any device on this worker enabled
 	Devices     []ComputeView
 	ActiveJobs  int
-	Capacity    int
 }
 
 // ComputeView is a per-device row inside a worker card.
@@ -430,25 +911,25 @@ type ComputeView struct {
 	UtilizationPct float64 // 0-100
 	HasUtilization bool
 	HasStats       bool
-	MemoryGBs      float64 // benchmarked memory bandwidth
+	MemoryGBs      float64 // benchmarked in-device memory bandwidth (STREAM)
+	LoadGBs        float64 // benchmarked host→device upload throughput
 	ComputeGFlops  float64 // benchmarked Q4_K matmul throughput
 	HasBenchmark   bool
 }
 
 // RenderWorkersList returns the inner HTML of #workers-list (no wrapper).
 func RenderWorkersList(workers []WorkerView) string {
-	var b strings.Builder
-	b.WriteString(`<style>.worker-stats-row{display:grid;font-family:var(--sl-font-mono);grid-template-columns:10ch 6rem 12ch 6rem;align-items:center;gap:0 2rem}.worker-stats-row .bench-val{white-space:nowrap}.worker-stats-row>div.text-xs{text-align:center}</style>`)
 	if len(workers) == 0 {
-		b.WriteString(`<div class="flex flex-col items-center justify-center py-16 text-center">` +
+		return `<div class="flex flex-col items-center justify-center py-16 text-center">` +
 			`<sl-icon name="pc-display-horizontal" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>` +
 			`<p class="text-sm" style="color:var(--mass-text-muted)">No workers connected.</p>` +
 			`<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Start a <span class="font-mono">mass-worker-*</span> binary that points at this MASS instance.</p>` +
-			`</div>`)
-		return b.String()
+			`</div>`
 	}
+	var b strings.Builder
+	b.WriteString(`<style>.worker-stats-row{display:grid;font-family:var(--sl-font-mono);grid-template-columns:10ch 6rem 12ch 6rem;align-items:center;gap:0 2rem}.worker-stats-row .bench-val{white-space:nowrap}.worker-stats-row>div.text-xs{text-align:center}</style>`)
 	for _, w := range workers {
-		statusColor := "var(--sl-color-success-400)"
+		statusColor := "var(--mass-success)"
 		statusIcon := "circle-fill"
 		statusText := "Online"
 		if !w.Online {
@@ -468,18 +949,74 @@ func RenderWorkersList(workers []WorkerView) string {
 			statusText, statusIcon, statusColor)
 		fmt.Fprintf(&b, `<span class="text-sm font-medium" style="color:var(--mass-text)">%s</span>`, html.EscapeString(w.Name))
 		fmt.Fprintf(&b, `<sl-badge variant="primary" pill style="font-size:0.65rem">%s</sl-badge>`, html.EscapeString(w.RuntimeName))
-		fmt.Fprintf(&b, `<span class="text-xs text-neutral-500 ml-auto mr-2">%d device(s) · %d/%d active</span>`,
-			len(w.Devices), w.ActiveJobs, w.ActiveJobs+w.Capacity)
+		if w.Version != "" {
+			fmt.Fprintf(&b, `<span class="text-xs" style="color:var(--mass-text-faint)">v%s</span>`, html.EscapeString(w.Version))
+		}
+		// Aggregate GFLOPS for the operator-visible "what does this worker
+		// bring" summary. GPU devices sum (tensor split runs them as one
+		// lockstep unit, but the throughput numbers add — bench measures
+		// achievable Q4_K matvec on each in isolation). CPU stays separate
+		// because the worker reserves CPU as a fallback used only when
+		// every GPU is disabled.
+		var gpuGF, cpuGF float64
+		var gpuBenched, cpuBenched bool
+		for _, d := range w.Devices {
+			if !d.Enabled || !d.HasBenchmark {
+				continue
+			}
+			switch d.Type {
+			case "GPU":
+				gpuGF += d.ComputeGFlops
+				gpuBenched = true
+			case "CPU":
+				cpuGF = d.ComputeGFlops // worker reports one CPU device
+				cpuBenched = true
+			}
+		}
+		// Two-row chip: enabled-out-of-total devices (+ in-flight count
+		// when busy) on top, bench aggregates below. mx-auto centers
+		// the block between the title (left) and the toggle / Bench-All
+		// controls (right); items-start keeps the two lines left-aligned
+		// with each other so they read as a list.
+		enabledDevices := 0
+		for _, d := range w.Devices {
+			if d.Enabled {
+				enabledDevices++
+			}
+		}
+		fmt.Fprintf(&b, `<div class="text-xs text-neutral-500 mx-auto flex flex-col items-start leading-tight">`)
+		if w.ActiveJobs > 0 {
+			fmt.Fprintf(&b, `<span>%d/%d device(s) · %d running</span>`,
+				enabledDevices, len(w.Devices), w.ActiveJobs)
+		} else {
+			fmt.Fprintf(&b, `<span>%d/%d device(s)</span>`,
+				enabledDevices, len(w.Devices))
+		}
+		if gpuBenched || cpuBenched {
+			b.WriteString(`<span>`)
+			first := true
+			if gpuBenched {
+				fmt.Fprintf(&b, `GPU %s`, formatGFlops(gpuGF))
+				first = false
+			}
+			if cpuBenched {
+				if !first {
+					b.WriteString(` · `)
+				}
+				fmt.Fprintf(&b, `CPU %s`, formatGFlops(cpuGF))
+			}
+			b.WriteString(`</span>`)
+		}
+		b.WriteString(`</div>`)
 		if len(w.Devices) > 0 {
 			workerToggleIcon := "toggle2-on"
-			workerToggleColor := "var(--sl-color-success-500)"
+			workerToggleColor := "var(--mass-success)"
 			workerToggleTip := "Disable all devices on this worker"
 			if !w.Enabled {
 				workerToggleIcon = "toggle2-off"
 				workerToggleColor = "var(--sl-color-neutral-500)"
 				workerToggleTip = "Enable all devices on this worker"
 			}
-			// Inline fetch — mirrors the pre-refactor commit's pattern.
 			// Encoding the icon name into the id forces a full element
 			// swap on every flip; Shoelace caches the SVG and in-place
 			// `name` mutations sometimes fail to refresh.
@@ -500,13 +1037,25 @@ func RenderWorkersList(workers []WorkerView) string {
 		if len(w.Devices) == 0 {
 			b.WriteString(`<p class="text-xs text-neutral-500 py-2">No compute devices reported.</p>`)
 		}
+		// Mismatched-GPU advisory. Only fires when >=2 enabled-and-benched
+		// GPUs differ by a wide margin in measured Q4_K matvec throughput.
+		// llama.cpp tensor-splits across every enabled GPU regardless of
+		// capability and the split runs in lockstep, so the discrete-GPU
+		// throughput collapses to the slowest device's pace. Operator may
+		// still *want* this (fit a model that doesn't fit on one GPU
+		// alone), so we inform, not refuse.
+		if msg := mismatchedGPUAdvisory(w.Devices); msg != "" {
+			fmt.Fprintf(&b, `<sl-alert variant="warning" open class="mb-2" style="--sl-spacing-large:0.6rem">`+
+				`<sl-icon slot="icon" name="exclamation-triangle"></sl-icon>`+
+				`<span class="text-xs">%s</span></sl-alert>`, msg)
+		}
 		for _, d := range w.Devices {
 			icon := "cpu"
-			iconColor := "var(--mass-blue)"
+			iconColor := "var(--mass-accent)"
 			badgeVariant := "primary"
 			if d.Type == "GPU" {
 				icon = "gpu-card"
-				iconColor = "var(--mass-green)"
+				iconColor = "var(--mass-success)"
 				badgeVariant = "success"
 			}
 			scopedID := idSafe + "_" + html.EscapeString(d.DeviceID)
@@ -523,7 +1072,7 @@ func RenderWorkersList(workers []WorkerView) string {
 			fmt.Fprintf(&b, `<sl-badge variant="%s" pill>%s</sl-badge>`, badgeVariant, html.EscapeString(d.Type))
 			b.WriteString(`<span class="ml-auto"></span>`)
 			devToggleIcon := "toggle2-on"
-			devToggleColor := "var(--sl-color-success-500)"
+			devToggleColor := "var(--mass-success)"
 			devToggleTip := "Disable this device for new model loads"
 			if !d.Enabled {
 				devToggleIcon = "toggle2-off"
@@ -545,9 +1094,9 @@ func RenderWorkersList(workers []WorkerView) string {
 			if hasGauges || d.HasBenchmark {
 				b.WriteString(`<div class="worker-stats-row">`)
 
-				memTip := "RAM throughput"
+				memTip := "RAM throughput (STREAM, in-device)"
 				if d.Type == "GPU" {
-					memTip = "VRAM throughput"
+					memTip = "VRAM throughput (STREAM, in-device)"
 				}
 				b.WriteString(`<div class="text-xs">`)
 				fmt.Fprintf(&b, `<sl-tooltip content="%s"><span class="text-neutral-500" style="cursor:help">Memory</span></sl-tooltip>`, memTip)
@@ -557,7 +1106,16 @@ func RenderWorkersList(workers []WorkerView) string {
 				} else {
 					b.WriteString(`<span class="text-neutral-500">—</span>`)
 				}
-				b.WriteString(`</div></div>`)
+				b.WriteString(`</div>`)
+				// Load throughput (host→device upload) — drives the
+				// scheduler's switch-cost predictor. Shown as a faint
+				// second line so the operator can compare it to Memory.
+				if d.HasBenchmark && d.LoadGBs > 0 {
+					loadTip := "Host→device upload throughput (model load)"
+					fmt.Fprintf(&b, `<sl-tooltip content="%s"><div class="text-neutral-400 font-mono mt-0.5 bench-val" id="bench-load-%s" style="font-size:0.65rem;opacity:0.75;cursor:help">load %s</div></sl-tooltip>`,
+						loadTip, scopedID, formatMemoryBW(d.LoadGBs))
+				}
+				b.WriteString(`</div>`)
 
 				memLabel := "RAM"
 				if d.Type == "GPU" {
@@ -620,7 +1178,7 @@ func writeGauge(b *strings.Builder, id, label string, pct float64, subtitle stri
 	color := BarColor(pct)
 	b.WriteString(`<div class="flex flex-col items-center" style="width:58px">`)
 	fmt.Fprintf(b, `<svg width="58" height="58" viewBox="0 0 66 66" class="gauge-ring" id="gauge-%s" data-gauge-pct="%.1f">`, html.EscapeString(id), pct)
-	b.WriteString(`<circle cx="33" cy="33" r="28" fill="none" stroke="var(--sl-color-neutral-300)" stroke-width="5" opacity="0.25"/>`)
+	b.WriteString(`<circle cx="33" cy="33" r="28" fill="none" stroke="var(--mass-border)" stroke-width="5" opacity="0.6"/>`)
 	fmt.Fprintf(b, `<circle cx="33" cy="33" r="28" fill="none" stroke="%s" stroke-width="5" stroke-linecap="round" stroke-dasharray="%.2f" stroke-dashoffset="%.2f" transform="rotate(-90 33 33)" style="transition:stroke-dashoffset .8s ease,stroke .4s ease"/>`, color, circumference, offset)
 	fmt.Fprintf(b, `<text x="33" y="33" text-anchor="middle" dominant-baseline="central" fill="var(--mass-text)" font-size="12" font-family="monospace" font-weight="600">%.0f%%</text>`, pct)
 	b.WriteString(`</svg>`)
@@ -629,7 +1187,9 @@ func writeGauge(b *strings.Builder, id, label string, pct float64, subtitle stri
 	b.WriteString(`</div>`)
 }
 
-// BarColor returns an HSL color string transitioning green → red over 0–100%.
+// BarColor returns a CSS color transitioning success → warning → danger over
+// 0–100%, blended from the theme tokens so gauges follow the active theme.
+// Mirrored by barColor in scripts/shell.js for in-place SSE gauge updates.
 func BarColor(pct float64) string {
 	if pct < 0 {
 		pct = 0
@@ -637,8 +1197,10 @@ func BarColor(pct float64) string {
 	if pct > 100 {
 		pct = 100
 	}
-	hue := 120 * (1 - pct/100)
-	return fmt.Sprintf("hsl(%.0f,70%%,45%%)", hue)
+	if pct <= 50 {
+		return fmt.Sprintf("color-mix(in srgb, var(--mass-warning) %.0f%%, var(--mass-success))", pct*2)
+	}
+	return fmt.Sprintf("color-mix(in srgb, var(--mass-danger) %.0f%%, var(--mass-warning))", (pct-50)*2)
 }
 
 // FormatMemMB formats a memory value in MB into a human-readable string.
@@ -673,10 +1235,4 @@ func formatMemoryBW(gbs float64) string {
 	default:
 		return fmt.Sprintf("%.1f KB/s", gbs*1e6)
 	}
-}
-
-// jsStringEscape escapes for embedding in a JS single-quoted string literal.
-func jsStringEscape(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", `\r`)
-	return r.Replace(s)
 }

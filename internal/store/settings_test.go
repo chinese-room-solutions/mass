@@ -10,7 +10,7 @@ import (
 func openTestDB(t *testing.T) *Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	s, err := Open(dbPath)
+	s, err := Open(DialectSQLite, dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s

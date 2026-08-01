@@ -12,9 +12,6 @@
 // `mass-proto/proto/gateway/gateway.proto`. The gateway in turn calls back
 // into MASS through the [scheduler.Scheduler] via the MassScheduler service
 // hosted on go-plugin's broker.
-//
-// Stage 2 brings this scaffolding online. Stage 4 ships the first real
-// gateway (mass-runtime-llama-cpp).
 package runtimes
 
 import (
@@ -25,12 +22,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/KernelPryanic/ctxerr"
 	"github.com/chinese-room-solutions/mass/internal/config"
+	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/rs/zerolog"
@@ -62,8 +62,8 @@ type Manifest struct {
 	Description string `yaml:"description,omitempty" json:"description,omitempty"`
 	AutoStart   bool   `yaml:"-" json:"auto_start"`
 	// Binary is the executable's path within the package, relative to the
-	// archive root (e.g. "bin/mass-runtime-llama-cpp" or
-	// "bin/mass-runtime-llama-cpp.exe"). When empty, the manager picks the
+	// archive root (e.g. "bin/mass-runtime-gateway-llama-cpp" or
+	// "bin/mass-runtime-gateway-llama-cpp.exe"). When empty, the manager picks the
 	// first executable in bin/.
 	Binary string `yaml:"binary,omitempty" json:"binary,omitempty"`
 }
@@ -74,11 +74,13 @@ type Manager struct {
 	store   store.RuntimeStoreInterface
 	logger  zerolog.Logger
 
-	// sched + logLevel are passed down to launched gateways via the
-	// MassScheduler callback service. Set via [SetScheduler] / [SetLogLevel]
-	// before calling Start.
-	sched    *scheduler.Scheduler
-	logLevel string
+	// sched, downloads, and logLevel are passed down to launched
+	// gateways via the MassScheduler callback service. Set via
+	// [SetScheduler] / [SetDownloads] / [SetLogLevel] before calling
+	// Start.
+	sched     *scheduler.Scheduler
+	downloads *downloads.Manager
+	logLevel  string
 
 	mu              sync.RWMutex
 	installed       map[string]Manifest       // runtime_name -> manifest (everything in the store)
@@ -117,6 +119,16 @@ func (m *Manager) SetScheduler(s *scheduler.Scheduler) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sched = s
+}
+
+// SetDownloads wires the downloads manager that backs gateway-
+// initiated install callbacks (MassScheduler.DownloadFiles). Must
+// be called before [Manager.Start] or DownloadFiles calls fail with
+// Unavailable.
+func (m *Manager) SetDownloads(d *downloads.Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.downloads = d
 }
 
 // SetLogLevel sets the log_level passed to gateways at Init time.
@@ -208,6 +220,20 @@ func (m *Manager) LoadedGatewayFor(runtimeName string) (*LoadedGateway, error) {
 	return g, nil
 }
 
+// DefaultCostAxisFor returns the running gateway's declared
+// default_cost_axis, or "" if no gateway is running for runtimeName.
+// The scheduler reads this at score time to fall back to the runtime's
+// required axis when an envelope's cost_axis names something a worker
+// hasn't benched.
+func (m *Manager) DefaultCostAxisFor(runtimeName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if g, ok := m.running[runtimeName]; ok {
+		return g.DefaultCostAxis
+	}
+	return ""
+}
+
 // RunningGateways returns every currently-running gateway. Callers use it
 // to fan out per-runtime work (HF install routing, the Models stream
 // multiplexer).
@@ -230,19 +256,18 @@ func (m *Manager) InstallFromPath(packagePath string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if m.IsInstalled(mf.RuntimeName) {
-		// Roll back the extraction so a failed install doesn't litter
-		// disk. Preserve any pre-existing state files (catalogue) so
-		// they survive this aborted attempt.
-		_ = removeInstallArtifacts(installDir)
-		return Manifest{}, ctxerr.With(ErrRuntimeAlreadyInstalled, map[string]any{"runtime_name": mf.RuntimeName})
-	}
+	// Default new installs to AutoStart=true so the operator's first
+	// experience is "install → it's running" instead of "install → click
+	// Start → wait." Existing rows are untouched; the operator's Stop /
+	// disable-autostart toggles in the Runtimes tab are still the source
+	// of truth for follow-up changes.
 	if err := m.store.UpsertRuntime(store.RuntimeRow{
 		RuntimeName: mf.RuntimeName,
 		Version:     mf.Version,
 		DisplayName: mf.DisplayName,
 		Description: mf.Description,
 		InstallPath: installDir,
+		AutoStart:   true,
 	}); err != nil {
 		_ = removeInstallArtifacts(installDir)
 		return Manifest{}, err
@@ -252,6 +277,16 @@ func (m *Manager) InstallFromPath(packagePath string) (Manifest, error) {
 	}
 	m.logger.Info().Str("runtime_name", mf.RuntimeName).Str("version", mf.Version).Msg("runtime installed")
 	m.fireInstallChange()
+	// Start the gateway synchronously so the caller's SSE response can
+	// render the row in its post-start "running" state. Init typically
+	// takes ~100ms — the Init timeout in startGateway is 30s but that's
+	// the failure ceiling, not the steady-state cost. A start failure
+	// is logged and reflected in the row state; the install itself
+	// stays committed since the binary is on disk and the row is in
+	// the store, so the operator can retry from the Runtimes tab.
+	if _, err := m.Start(context.Background(), mf.RuntimeName); err != nil {
+		m.logger.Warn().Err(err).Str("runtime_name", mf.RuntimeName).Msg("auto-start after install failed")
+	}
 	return mf, nil
 }
 
@@ -289,8 +324,15 @@ func (m *Manager) extractPackage(packagePath string) (Manifest, string, error) {
 	if err := yaml.Unmarshal(manifestBytes, &mf); err != nil {
 		return Manifest{}, "", ctxerr.With(fmt.Errorf("parsing runtime.yml: %w", err), map[string]any{"path": packagePath})
 	}
-	if mf.RuntimeName == "" {
-		return Manifest{}, "", ctxerr.With(fmt.Errorf("runtime.yml: runtime_name required"), map[string]any{"path": packagePath})
+	if err := validateRuntimeName(mf.RuntimeName); err != nil {
+		return Manifest{}, "", ctxerr.With(fmt.Errorf("runtime.yml: %w", err), map[string]any{"path": packagePath})
+	}
+
+	// Reject already-installed runtimes before touching the disk. Clearing
+	// the install dir here would try to delete the running gateway binary,
+	// which the OS keeps locked (Windows: "Access is denied").
+	if m.IsInstalled(mf.RuntimeName) {
+		return Manifest{}, "", ctxerr.With(ErrRuntimeAlreadyInstalled, map[string]any{"runtime_name": mf.RuntimeName})
 	}
 
 	installDir := config.RuntimeDir(m.dataDir, mf.RuntimeName)
@@ -424,6 +466,7 @@ func (m *Manager) Start(ctx context.Context, runtimeName string) (*LoadedGateway
 		return g, nil
 	}
 	sched := m.sched
+	dl := m.downloads
 	logLevel := m.logLevel
 	m.mu.Unlock()
 
@@ -443,7 +486,7 @@ func (m *Manager) Start(ctx context.Context, runtimeName string) (*LoadedGateway
 	// <root>/<each format they handle>/ themselves. The flat-by-
 	// format layout lets multiple runtimes that share a format see
 	// the same files without mirroring.
-	gw, err := startGateway(ctx, mf, binary, installDir, config.ModelsDir(m.dataDir), logLevel, sched, m.logger)
+	gw, err := startGateway(ctx, mf, binary, installDir, config.ModelsDir(m.dataDir), logLevel, sched, dl, m.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -453,8 +496,48 @@ func (m *Manager) Start(ctx context.Context, runtimeName string) (*LoadedGateway
 	gw.Manifest.AutoStart = m.installed[runtimeName].AutoStart // preserve operator state
 	m.installed[runtimeName] = gw.Manifest                     // refresh with Init response
 	m.mu.Unlock()
+	go m.watchGatewayExit(runtimeName, gw, gatewayExitPollInterval)
 	m.fireStateChange(runtimeName)
 	return gw, nil
+}
+
+// gatewayExitPollInterval is how often the exit watcher checks the gateway
+// subprocess. go-plugin exposes subprocess liveness only as a polling
+// predicate ([plugin.Client.Exited]), so a short ticker is the mechanism.
+const gatewayExitPollInterval = 2 * time.Second
+
+// watchGatewayExit reconciles the manager when a gateway subprocess dies
+// out from under it (crash, OOM kill): without this the runtime stays
+// "running" forever and every proxied request fails opaquely. One watcher
+// goroutine per launched gateway; it exits when the gateway is stopped or
+// replaced through the normal path (removed from m.running) or when the
+// crash is handled. No auto-restart — the operator decides.
+func (m *Manager) watchGatewayExit(runtimeName string, gw *LoadedGateway, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		m.mu.RLock()
+		current, ok := m.running[runtimeName]
+		m.mu.RUnlock()
+		if !ok || current != gw {
+			return // stopped / replaced via Stop, Shutdown, or a fresh Start
+		}
+		if !gw.exited() {
+			continue
+		}
+		m.mu.Lock()
+		stillCurrent := m.running[runtimeName] == gw
+		if stillCurrent {
+			delete(m.running, runtimeName)
+		}
+		m.mu.Unlock()
+		if stillCurrent {
+			gw.Close() // release the callback server; Kill on a dead process is a no-op
+			m.logger.Error().Str("runtime_name", runtimeName).Msg("gateway subprocess exited unexpectedly")
+			m.fireStateChange(runtimeName)
+		}
+		return
+	}
 }
 
 // Stop terminates a running gateway. Returns [ErrRuntimeNotRunning] when
@@ -571,6 +654,29 @@ func (m *Manager) Shutdown() {
 }
 
 // --- Internals ---
+
+// runtimeNamePattern is the shape an installable runtime_name must match.
+// The name becomes both a directory under {dataDir}/runtimes/ (so it must
+// be a safe path segment) and the /mass.<runtime_name>.* HTTP mount (so it
+// must be a plain lowercase slug).
+var runtimeNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// validateRuntimeName rejects manifest runtime_names that would escape the
+// runtimes directory or collide with reserved API namespaces. "v1" is
+// reserved: gateway traffic mounts at /mass.<runtime_name>.* and the public
+// API owns /mass.v1.Mass.
+func validateRuntimeName(name string) error {
+	if name == "" {
+		return errors.New("runtime_name required")
+	}
+	if !runtimeNamePattern.MatchString(name) {
+		return fmt.Errorf("runtime_name %q invalid: must match %s", name, runtimeNamePattern)
+	}
+	if name == "v1" {
+		return errors.New(`runtime_name "v1" is reserved (collides with the /mass.v1.Mass public API namespace)`)
+	}
+	return nil
+}
 
 func readManifest(path string) (Manifest, error) {
 	data, err := os.ReadFile(path)

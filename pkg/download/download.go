@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
@@ -33,30 +36,56 @@ type Manager struct {
 	client *http.Client
 }
 
-// NewManager creates a Manager. If client is nil, http.DefaultClient is used.
+// NewManager creates a Manager. If client is nil, one with connection and
+// response-header timeouts is used — but no total Client.Timeout: model
+// files are arbitrarily large, so bounding the whole transfer would kill
+// legitimate long downloads. Mid-body stalls are caught by the stall
+// watchdog instead (see stallTimeout).
 func NewManager(client *http.Client) *Manager {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		}}
 	}
 	return &Manager{client: client}
 }
 
+const (
+	// maxRetryDelay caps the exponential backoff. Uncapped, a handful of
+	// doublings puts the next attempt hours out — and past ~62 of them the
+	// shift overflows time.Duration into a negative (immediate) delay.
+	maxRetryDelay = 30 * time.Second
+	// maxRetriesLimit clamps WithMaxRetries. Ten attempts against a
+	// 30s-capped backoff is already minutes of retrying.
+	maxRetriesLimit = 10
+)
+
+// stallTimeout is how long a transfer may deliver no bytes at all before
+// it's abandoned. Generous — a busy origin can legitimately pause mid-body,
+// and a resumed retry re-reads nothing — but a full minute of silence on an
+// open connection is a dead transfer no HTTP client timeout would catch.
+const stallTimeout = time.Minute
+
 // options holds per-request configuration.
 type options struct {
-	headers    http.Header
-	progressFn ProgressFunc
-	resume     bool
-	maxRetries int
-	baseDelay  time.Duration
-	tempSuffix string // suffix for the temp file (default ".downloading")
+	headers      http.Header
+	progressFn   ProgressFunc
+	resume       bool
+	maxRetries   int
+	baseDelay    time.Duration
+	stallTimeout time.Duration
+	tempSuffix   string // suffix for the temp file (default ".downloading")
 }
 
 func defaultOptions() options {
 	return options{
-		headers:    make(http.Header),
-		maxRetries: 3,
-		baseDelay:  time.Second,
-		tempSuffix: ".downloading",
+		headers:      make(http.Header),
+		maxRetries:   3,
+		baseDelay:    time.Second,
+		stallTimeout: stallTimeout,
+		tempSuffix:   ".downloading",
 	}
 }
 
@@ -87,14 +116,16 @@ func WithResume(enable bool) Option {
 }
 
 // WithMaxRetries sets the maximum number of retry attempts on transient
-// errors (connection reset, timeout, 5xx). 0 means no retries.
+// errors (connection reset, timeout, 5xx). 0 means no retries; n is clamped
+// to [0, maxRetriesLimit].
 func WithMaxRetries(n int) Option {
-	return func(o *options) { o.maxRetries = n }
+	return func(o *options) { o.maxRetries = min(max(n, 0), maxRetriesLimit) }
 }
 
-// WithBaseDelay sets the base delay for exponential backoff between retries.
+// WithBaseDelay sets the base delay for exponential backoff between
+// retries. Negative values are treated as zero.
 func WithBaseDelay(d time.Duration) Option {
-	return func(o *options) { o.baseDelay = d }
+	return func(o *options) { o.baseDelay = max(d, 0) }
 }
 
 // WithTempSuffix overrides the temp file suffix (default ".downloading").
@@ -102,11 +133,15 @@ func WithTempSuffix(s string) Option {
 	return func(o *options) { o.tempSuffix = s }
 }
 
-// sentinel errors for classification.
+// sentinel errors for classification. ErrWriteFile covers every local
+// filesystem failure — creating, writing, closing and renaming the temp
+// file — because none of them are worth a retry: a full disk or a wrong
+// permission costs a complete re-download to surface the same error.
 var (
 	ErrHTTPClientError = errors.New("HTTP client error (4xx)")
 	ErrHTTPServerError = errors.New("HTTP server error (5xx)")
 	ErrWriteFile       = errors.New("writing file")
+	ErrStalled         = errors.New("transfer stalled")
 )
 
 // Download fetches url and saves the result to destPath atomically
@@ -148,11 +183,10 @@ func (m *Manager) Download(ctx context.Context, url, destPath string, opts ...Op
 			return lastErr
 		}
 		if attempt < attempts-1 {
-			delay := o.baseDelay * (1 << attempt)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(delay):
+			case <-time.After(retryDelay(o.baseDelay, attempt)):
 			}
 		}
 	}
@@ -168,7 +202,20 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// Watchdog against a server that accepts the request and then goes
+	// silent: no HTTP client timeout covers a body that has started but
+	// stopped, so cancel this attempt's context when no bytes arrive for
+	// o.stallTimeout. Rearmed on every read below.
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(o.stallTimeout, func() {
+		stalled.Store(true)
+		cancelReq()
+	})
+	defer watchdog.Stop()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -187,12 +234,11 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort cleanup
 
-	resumeOffset, resp, err = m.handleResumeResponse(ctx, resp, url, o, resumeOffset)
+	resumeOffset, resp, err = m.handleResumeResponse(reqCtx, resp, url, o, resumeOffset)
 	if err != nil {
 		return err
 	}
 
-	// Compute total size.
 	var total int64
 	if resp.StatusCode == http.StatusPartialContent {
 		total = resumeOffset + resp.ContentLength
@@ -200,7 +246,6 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 		total = resp.ContentLength // may be -1
 	}
 
-	// Open temp file.
 	var f *os.File
 	if resumeOffset > 0 && resp.StatusCode == http.StatusPartialContent {
 		f, err = os.OpenFile(tempPath, os.O_WRONLY|os.O_APPEND, 0644)
@@ -209,7 +254,8 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 		resumeOffset = 0
 	}
 	if err != nil {
-		return ctxerr.With(fmt.Errorf("opening temp file: %w", err), map[string]any{"path": tempPath})
+		return ctxerr.With(fmt.Errorf("%w: opening temp file: %w", ErrWriteFile, err), //nolint:errorlint // wrapping sentinel
+			map[string]any{"path": tempPath})
 	}
 	defer f.Close() //nolint:errcheck // safety net
 
@@ -222,6 +268,7 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			watchdog.Reset(o.stallTimeout)
 			if _, wErr := f.Write(buf[:n]); wErr != nil {
 				return fmt.Errorf("%w: %w", ErrWriteFile, wErr) //nolint:errorlint // wrapping sentinel
 			}
@@ -237,16 +284,21 @@ func (m *Manager) doDownload(ctx context.Context, url, destPath, tempPath string
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if stalled.Load() {
+				return ctxerr.With(fmt.Errorf("%w: no data for %s", ErrStalled, o.stallTimeout),
+					map[string]any{"url": url, "downloaded": downloaded})
+			}
 			return ctxerr.With(fmt.Errorf("reading response: %w", readErr), map[string]any{"url": url})
 		}
 	}
 
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing temp file: %w", err)
+		return fmt.Errorf("%w: closing temp file: %w", ErrWriteFile, err) //nolint:errorlint // wrapping sentinel
 	}
 
 	if err := os.Rename(tempPath, destPath); err != nil {
-		return ctxerr.With(fmt.Errorf("finalizing download: %w", err), map[string]any{"temp": tempPath, "dest": destPath})
+		return ctxerr.With(fmt.Errorf("%w: finalizing download: %w", ErrWriteFile, err), //nolint:errorlint // wrapping sentinel
+			map[string]any{"temp": tempPath, "dest": destPath})
 	}
 
 	return nil
@@ -317,10 +369,29 @@ func httpSentinel(statusCode int) error {
 	return ErrHTTPClientError
 }
 
+// retryDelay returns the backoff before retry number attempt (0-based):
+// base doubled per attempt, capped at maxRetryDelay, with ±25% jitter so
+// concurrent downloads don't retry in lockstep.
+func retryDelay(base time.Duration, attempt int) time.Duration {
+	delay := base
+	for range attempt {
+		if delay >= maxRetryDelay {
+			break
+		}
+		delay *= 2 // can't overflow: bounded by 2 * maxRetryDelay
+	}
+	delay = min(delay, maxRetryDelay)
+	spread := delay / 4
+	if spread <= 0 {
+		return delay
+	}
+	return delay - spread + time.Duration(rand.Int64N(int64(2*spread)))
+}
+
 // isRetryable returns true for transient errors that may succeed on retry.
 func isRetryable(err error) bool {
 	if errors.Is(err, ErrWriteFile) || errors.Is(err, ErrHTTPClientError) {
-		return false // disk errors and 4xx are not transient
+		return false // local filesystem errors and 4xx are not transient
 	}
 	// Retry on HTTP 5xx and network errors (connection reset, timeout, etc.).
 	// Context cancellations are handled before this is called.

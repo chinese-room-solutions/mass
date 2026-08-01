@@ -17,8 +17,8 @@ const (
 
 // DownloadRow is one persisted download. Identity is RelPath — the file's
 // destination under models_dir is the natural unique key. Completed
-// downloads are deleted from the table; the file then becomes a regular
-// model the model store discovers on its next walk.
+// downloads are deleted from the table; the file is then owned by whichever
+// runtime gateway's catalogue claims it on its next walk.
 type DownloadRow struct {
 	RelPath     string
 	URL         string
@@ -35,9 +35,10 @@ type DownloadRow struct {
 // UpsertDownload inserts a new row or updates the bookkeeping fields of an
 // existing one. RelPath identifies the row.
 func (s *Store) UpsertDownload(row DownloadRow) error {
-	_, err := s.db.Exec(`
-		INSERT INTO downloads (rel_path, url, source, repo_id, runtime_name, group_key, status, downloaded, total, error_msg)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	now := nowStamp()
+	_, err := s.db.Exec(s.rebind(`
+		INSERT INTO downloads (rel_path, url, source, repo_id, runtime_name, group_key, status, downloaded, total, error_msg, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(rel_path) DO UPDATE SET
 			url          = excluded.url,
 			source       = excluded.source,
@@ -48,9 +49,9 @@ func (s *Store) UpsertDownload(row DownloadRow) error {
 			downloaded   = excluded.downloaded,
 			total        = excluded.total,
 			error_msg    = excluded.error_msg,
-			updated_at   = strftime('%Y-%m-%dT%H:%M:%fZ')`,
+			updated_at   = excluded.updated_at`),
 		row.RelPath, row.URL, row.Source, row.RepoID, row.RuntimeName, row.GroupKey,
-		row.Status, row.Downloaded, row.Total, row.ErrorMsg)
+		row.Status, row.Downloaded, row.Total, row.ErrorMsg, now, now)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("upserting download: %w", err), map[string]any{"rel_path": row.RelPath})
 	}
@@ -60,9 +61,9 @@ func (s *Store) UpsertDownload(row DownloadRow) error {
 // UpdateDownloadProgress updates the byte counters (no status change).
 // Hot path — keep tiny and unlocked.
 func (s *Store) UpdateDownloadProgress(relPath string, downloaded, total int64) error {
-	_, err := s.db.Exec(`
-		UPDATE downloads SET downloaded = ?, total = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ')
-		WHERE rel_path = ?`, downloaded, total, relPath)
+	_, err := s.db.Exec(s.rebind(`
+		UPDATE downloads SET downloaded = ?, total = ?, updated_at = ?
+		WHERE rel_path = ?`), downloaded, total, nowStamp(), relPath)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("updating download progress: %w", err), map[string]any{"rel_path": relPath})
 	}
@@ -72,9 +73,9 @@ func (s *Store) UpdateDownloadProgress(relPath string, downloaded, total int64) 
 // SetDownloadStatus updates only the status (and clears error_msg unless
 // the new status is "error"). Used by pause/resume/error transitions.
 func (s *Store) SetDownloadStatus(relPath, status, errorMsg string) error {
-	_, err := s.db.Exec(`
-		UPDATE downloads SET status = ?, error_msg = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ')
-		WHERE rel_path = ?`, status, errorMsg, relPath)
+	_, err := s.db.Exec(s.rebind(`
+		UPDATE downloads SET status = ?, error_msg = ?, updated_at = ?
+		WHERE rel_path = ?`), status, errorMsg, nowStamp(), relPath)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("setting download status: %w", err),
 			map[string]any{"rel_path": relPath, "status": status})
@@ -86,7 +87,7 @@ func (s *Store) SetDownloadStatus(relPath, status, errorMsg string) error {
 // did not exist (idempotent — completion + cancel + boot recovery races
 // can all try to delete the same row).
 func (s *Store) DeleteDownload(relPath string) error {
-	_, err := s.db.Exec(`DELETE FROM downloads WHERE rel_path = ?`, relPath)
+	_, err := s.db.Exec(s.rebind(`DELETE FROM downloads WHERE rel_path = ?`), relPath)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("deleting download: %w", err), map[string]any{"rel_path": relPath})
 	}
@@ -96,9 +97,9 @@ func (s *Store) DeleteDownload(relPath string) error {
 // GetDownload returns the row for relPath, or [sql.ErrNoRows] when absent.
 func (s *Store) GetDownload(relPath string) (DownloadRow, error) {
 	var row DownloadRow
-	err := s.db.QueryRow(`
+	err := s.db.QueryRow(s.rebind(`
 		SELECT rel_path, url, source, repo_id, runtime_name, group_key, status, downloaded, total, error_msg
-		FROM downloads WHERE rel_path = ?`, relPath).
+		FROM downloads WHERE rel_path = ?`), relPath).
 		Scan(&row.RelPath, &row.URL, &row.Source, &row.RepoID, &row.RuntimeName, &row.GroupKey,
 			&row.Status, &row.Downloaded, &row.Total, &row.ErrorMsg)
 	if err != nil {
@@ -116,9 +117,13 @@ func (s *Store) ListDownloads() ([]DownloadRow, error) {
 		SELECT rel_path, url, source, repo_id, runtime_name, group_key, status, downloaded, total, error_msg
 		FROM downloads ORDER BY created_at`)
 	if err != nil {
-		return nil, ctxerr.With(fmt.Errorf("listing downloads: %w", err), nil)
+		return nil, fmt.Errorf("listing downloads: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			panic(fmt.Errorf("close rows: %w", err))
+		}
+	}()
 	var out []DownloadRow
 	for rows.Next() {
 		var r DownloadRow

@@ -72,17 +72,20 @@
     window.__massBeginRenameGroup(span);
   });
 
-  // Delete a single model owned by the given runtime. Routes to the
-  // runtime's own DELETE endpoint via the /mass.<kind>.<rest> proxy —
-  // MASS just forwards bytes; the runtime owns the model on disk.
+  // Delete a single model owned by the given runtime. Routes to MASS's
+  // own /api/models/delete: the runtime decides which files make up the
+  // model, MASS removes them from its store (byte ops stay MASS-side).
   // Returns true on success, false on failure (alert already shown).
   async function deleteOne(kind, id) {
     if (!kind) {
       window.massAlert('Cannot delete: missing runtime kind.', {title: 'Delete Failed', variant: 'danger'});
       return false;
     }
-    var encoded = id.split('/').map(encodeURIComponent).join('/');
-    var resp = await fetch('/mass.' + kind + '.v1/Models/' + encoded, { method: 'DELETE' });
+    var resp = await fetch('/api/models/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runtime_name: kind, id: id }),
+    });
     if (!resp.ok) {
       window.massAlert(window.massErrorText(await resp.text()) || ('HTTP ' + resp.status), {title: 'Delete Failed', variant: 'danger'});
       return false;

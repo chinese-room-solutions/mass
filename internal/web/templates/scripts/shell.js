@@ -1,20 +1,66 @@
 (function() {
-  // ── Theme: watch for Datastar signal patches and update <html>/<body> classes.
-  function applyTheme(t) {
-    var isLight = t === 'light';
-    document.documentElement.className = isLight ? 'sl-theme-light' : 'sl-theme-dark dark';
+  // ── Theme: watch for Datastar signal patches and update <html>/<body>
+  // classes. Registry-driven via window.__massThemes (injected by Layout): a
+  // theme carries a base (dark|light) plus an sl-theme-<name> overlay class for
+  // pluggable themes; those overlays also carry the mass-theme-custom marker so
+  // the generic utility overrides in input.tw.css apply.
+  // baseHint is the server's $themeBase signal. It wins over the injected
+  // registry because a theme installed since page load isn't in that snapshot
+  // (the script tag can't be re-executed over SSE), and the server knows the
+  // base of the theme it just registered.
+  function applyTheme(t, baseHint) {
+    var known = (window.__massThemes || {})[t];
+    var isLight = (baseHint || (known && known.base) || 'dark') === 'light';
+    var base = isLight ? 'light' : 'dark';
+    var custom = t !== base;
+
+    var cls = 'sl-theme-' + base + (isLight ? '' : ' dark');
+    if (custom) cls += ' sl-theme-' + t + ' mass-theme-custom';
+    document.documentElement.className = cls;
+    document.documentElement.dataset.theme = t;
+
     document.body.className = (isLight ? 'bg-neutral-100 text-neutral-900' : 'bg-neutral-950 text-neutral-100') + ' min-h-screen';
-    var add = isLight ? 'sl-theme-light' : 'sl-theme-dark';
-    var rem = isLight ? 'sl-theme-dark' : 'sl-theme-light';
+
     document.querySelectorAll('sl-dialog').forEach(function(d) {
-      d.classList.add(add);
-      d.classList.remove(rem);
+      Array.prototype.slice.call(d.classList).forEach(function(c) {
+        if (c.indexOf('sl-theme-') === 0) d.classList.remove(c);
+      });
+      d.classList.add('sl-theme-' + base);
+      if (custom) d.classList.add('sl-theme-' + t);
     });
   }
   document.addEventListener('datastar-signal-patch', function(e) {
-    if (e.detail && e.detail.theme !== undefined) applyTheme(e.detail.theme);
+    if (e.detail && e.detail.theme !== undefined) applyTheme(e.detail.theme, e.detail.themeBase);
   });
-  applyTheme(document.documentElement.classList.contains('sl-theme-light') ? 'light' : 'dark');
+  applyTheme(document.documentElement.dataset.theme || 'dark');
+
+  // ── Shoelace → native event bridge for Datastar two-way binding.
+  // Datastar's data-bind on a custom element listens for native input/change,
+  // but Shoelace inputs emit namespaced sl-input/sl-change instead, so the
+  // signal never updates from typing. Re-dispatch a native bubbling event on
+  // the same element so every data-bind on a Shoelace input syncs DOM→signal.
+  [['sl-input', 'input'], ['sl-change', 'change']].forEach(function(pair) {
+    document.addEventListener(pair[0], function(e) {
+      var el = e.target;
+      if (el && el.tagName && el.tagName.indexOf('-') !== -1) {
+        el.dispatchEvent(new Event(pair[1], { bubbles: true }));
+      }
+    }, true);
+  });
+
+  // ── Shared debounced button click: returns a function that, when called,
+  // schedules a click on the given button ID after `ms` ms. Repeated calls
+  // reset the timer. Used by settings_autosave.js to coalesce rapid input.
+  window.__massDebouncedClick = function(buttonId, ms) {
+    var timer = null;
+    return function() {
+      clearTimeout(timer);
+      timer = setTimeout(function() {
+        var btn = document.getElementById(buttonId);
+        if (btn) btn.click();
+      }, ms);
+    };
+  };
 
   // ── Persist activeTab to localStorage + lazy-fetch each tab's content.
   // The dashboard ships an empty shell so initial render is fast; tab
@@ -24,6 +70,7 @@
     if (!force && _tabLoaded[name]) {
       if (name === 'workers') openWorkersStream();
       if (name === 'scheduler') openSchedulerStream();
+      if (name === 'queue') openQueueStream();
       // Models tab is fully Datastar-driven — its #models-list element opens
       // /api/models/stream via data-on-load, so there's nothing to wire here.
       return;
@@ -32,6 +79,7 @@
     switch (name) {
       case 'scheduler': url = '/api/scheduler/list'; target = 'scheduler-list'; break;
       case 'workers':   url = '/api/workers/list';   target = 'workers-list'; break;
+      case 'queue':     url = '/api/queue/list';     target = 'queue-list'; break;
       default: return;
     }
     var el = document.getElementById(target);
@@ -43,11 +91,12 @@
         _tabLoaded[name] = true;
         if (name === 'workers') openWorkersStream();
         if (name === 'scheduler') openSchedulerStream();
+        if (name === 'queue') openQueueStream();
       })
       .catch(function() { /* leave the empty state; user can switch tabs to retry */ });
   }
   (function() {
-    var validTabs = {runtimes:1, models:1, scheduler:1, workers:1, settings:1};
+    var validTabs = {runtimes:1, models:1, scheduler:1, queue:1, workers:1, settings:1};
     var saved = localStorage.getItem('mass-active-tab');
     if (saved && !validTabs[saved]) saved = null;
     if (saved) {
@@ -148,7 +197,47 @@
       .then(function(r) { return r.text(); })
       .then(function(html) {
         var el = document.getElementById('scheduler-list');
-        if (el) el.innerHTML = html;
+        if (!el) return;
+        el.innerHTML = html;
+        if (typeof window.__massSchedulerPruneSelection === 'function') {
+          window.__massSchedulerPruneSelection(el);
+        }
+      })
+      .catch(function() {});
+  }
+
+  // ── Queue tab live SSE: refetch list on every "change" event.
+  // Queue mutations (Submit insert, dispatch pop, terminal frame, cancel,
+  // disconnect drain) all broadcast a "change" event from the scheduler;
+  // refetching the rendered HTML stays cheap because rows are flat and
+  // each queue section's body is collapsed until the operator unfolds it.
+  var _queueSSE = null;
+  function openQueueStream() {
+    if (_queueSSE) return;
+    _queueSSE = new EventSource('/api/queue/events');
+    _queueSSE.addEventListener('change', refetchQueueList);
+    _queueSSE.onerror = function() {
+      // Browser auto-reconnects; nothing to do here.
+    };
+  }
+  function refetchQueueList() {
+    // Preserve which collapsible cards the operator has open, same dance
+    // as refetchWorkersList. Queue rows churn frequently; closing every
+    // card on every refetch would make the tab unusable.
+    var open = {};
+    document.querySelectorAll('#queue-list .queue-card').forEach(function(c) {
+      if (c.open) open[c.id] = true;
+    });
+    fetch('/api/queue/list')
+      .then(function(r) { return r.text(); })
+      .then(function(html) {
+        var el = document.getElementById('queue-list');
+        if (!el) return;
+        el.innerHTML = html;
+        for (var k in open) {
+          var c = document.getElementById(k);
+          if (c) c.open = true;
+        }
       })
       .catch(function() {});
   }
@@ -218,11 +307,14 @@
     var spans = svg.parentNode ? svg.parentNode.querySelectorAll('span') : [];
     if (spans.length >= 2) spans[1].textContent = subtitle;
   }
+  // Mirrors templates.BarColor: success → warning → danger via theme tokens.
   function barColor(pct) {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
-    var hue = 120 * (1 - pct/100);
-    return 'hsl(' + Math.round(hue) + ',70%,45%)';
+    if (pct <= 50) {
+      return 'color-mix(in srgb, var(--mass-warning) ' + Math.round(pct * 2) + '%, var(--mass-success))';
+    }
+    return 'color-mix(in srgb, var(--mass-danger) ' + Math.round((pct - 50) * 2) + '%, var(--mass-warning))';
   }
   function formatMem(mb) {
     if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
@@ -256,7 +348,7 @@
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
       var bar = document.getElementById(_dragBarId);
-      if (bar) bar.style.background = 'var(--mass-blue)';
+      if (bar) bar.style.background = 'var(--mass-accent)';
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -371,10 +463,13 @@
 
   // ── File browser. Two call shapes:
   //
-  //   1. Settings (legacy, single-select, no name input):
-  //      __massBrowse(signal, ext)
+  //   1. Settings (single-select, no name input):
+  //      __massBrowse(signal, ext)          — pick a file
+  //      __massBrowse(signal, {dirsOnly:true}) — pick a directory
   //      Writes the picked path into the element matching
-  //      [data-bind="<signal>"] when the operator clicks Select.
+  //      [data-bind="<signal>"] when the operator clicks Select. For a
+  //      directory pick, the current folder is the selection, so Select
+  //      enables as soon as a folder is open.
   //
   //   2. Model import (multi-select, required name input):
   //      __massBrowse({
@@ -391,11 +486,14 @@
     var selectBtn = document.getElementById('mass-fb-select');
     var nameInput = document.getElementById('mass-fb-name');
 
-    // Shape 1: legacy two-arg form (Settings).
+    // Shape 1: two-arg form (Settings). ext may be a string (file filter)
+    // or an options object {dirsOnly:true} to pick a directory instead.
     if (typeof arg === 'string') {
       var signal = arg;
+      var dirsOnly = ext && typeof ext === 'object' ? !!ext.dirsOnly : false;
+      var extFilter = typeof ext === 'string' ? ext : '';
       var _selectedPath = '';
-      dlg.label = 'Browse' + (ext ? ' (' + ext + ' files)' : '');
+      dlg.label = dirsOnly ? 'Choose a folder' : 'Browse' + (extFilter ? ' (' + extFilter + ' files)' : '');
       setGroupInputVisible(false);
       dlg.show();
       selectBtn.disabled = true;
@@ -408,9 +506,15 @@
       window.__massFileBrowser({
         pathElId: 'mass-fb-path',
         entriesElId: 'mass-fb-entries',
-        ext: ext || '',
-        onSelect: function(path) { _selectedPath = path; selectBtn.disabled = false; },
-        onNavigate: function() { _selectedPath = ''; selectBtn.disabled = true; }
+        ext: extFilter,
+        dirsOnly: dirsOnly,
+        // For a directory pick the open folder IS the selection, so Select
+        // tracks navigation; for a file pick it tracks the clicked file.
+        onSelect: dirsOnly ? undefined : function(path) { _selectedPath = path; selectBtn.disabled = false; },
+        onNavigate: function(dir) {
+          if (dirsOnly) { _selectedPath = dir; selectBtn.disabled = !dir; }
+          else { _selectedPath = ''; selectBtn.disabled = true; }
+        }
       });
       return;
     }
@@ -595,4 +699,5 @@
   setupFilter('models-filter-input',    'models-list');
   setupFilter('scheduler-filter-input', 'scheduler-list');
   setupFilter('workers-filter-input',   'workers-list');
+  setupFilter('queue-filter-input',     'queue-list');
 })();

@@ -62,12 +62,19 @@ type StreamWorker struct {
 	id          string
 	name        string
 	runtimeName string
+	version     string // worker's own semver (required at handshake)
+	compatible  string // semver range of runtime versions it decodes (required at handshake)
 	devices     []stats.Device
 	online      bool
 	lastSeen    time.Time
 	massURL     string
 	modelsDir   string
 	loopback    bool
+	// vramHeadroomPct is the worker's effective --vram-headroom-pct
+	// value reported at registration (1-100); 0 means the worker didn't
+	// report and consumers fall back to their own default. Fixed for the
+	// worker process's lifetime, so no lock.
+	vramHeadroomPct int32
 
 	sendMu sync.Mutex
 	sender jobSenderInterface
@@ -101,8 +108,97 @@ type benchOutcome struct {
 	err     error
 }
 
-// NewStreamWorker builds a worker from its registration message.
-func NewStreamWorker(reg *workerpb.WorkerRegister, sender jobSenderInterface, massURL, modelsDir string, loopback bool, logger zerolog.Logger) *StreamWorker {
+// NewFakeStreamWorker constructs a StreamWorker without a bidi stream. It
+// reports devices + identity + an online status so the scheduler's read-
+// side getters (used by selection logic) work in unit tests. Calls that
+// require the worker bidi stream (AssignJob, LoadModel, ...) will fail —
+// those paths belong to integration tests with a live hub.
+func NewFakeStreamWorker(id, runtimeName string, devices []stats.Device, lastSeen time.Time) *StreamWorker {
+	devCopy := make([]stats.Device, len(devices))
+	copy(devCopy, devices)
+	return &StreamWorker{
+		id:          id,
+		name:        id,
+		runtimeName: runtimeName,
+		devices:     devCopy,
+		online:      true,
+		lastSeen:    lastSeen,
+		jobs:        make(map[string]chan *JobChunk),
+		loads:       make(map[string]chan loadOutcome),
+		unloads:     make(map[string]chan error),
+		benches:     make(map[string]chan benchOutcome),
+	}
+}
+
+// SetFakeVRAMHeadroomPct seeds the registration-reported VRAM headroom
+// watermark. Tests only.
+func (w *StreamWorker) SetFakeVRAMHeadroomPct(pct int32) { w.vramHeadroomPct = pct }
+
+// SetFakeVersionCompat seeds the registration-reported worker version and
+// compatible range without a real registration. Tests only.
+func (w *StreamWorker) SetFakeVersionCompat(version, compatible string) {
+	w.version = version
+	w.compatible = compatible
+}
+
+// SetFakeCapacity seeds the worker-wide AvailableCapacity without going
+// through a real heartbeat. Tests only.
+func (w *StreamWorker) SetFakeCapacity(workerCap int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.availableCap = workerCap
+}
+
+// SetFakeLoadedModels seeds the worker's loaded-model set without going
+// through a heartbeat. Tests only — exercises the scheduler's affinity
+// path.
+func (w *StreamWorker) SetFakeLoadedModels(loaded []LoadedModelStatus) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.loaded = append(w.loaded[:0:0], loaded...)
+}
+
+// SetFakeDeviceStats seeds the worker's per-device live stats
+// (used / total MB) without a heartbeat. Tests only — exercises
+// the memory-fit predicates that read from Stats().
+func (w *StreamWorker) SetFakeDeviceStats(stats []stats.DeviceStats) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deviceStats = append(w.deviceStats[:0:0], stats...)
+}
+
+// SetFakeLoopback seeds the loopback flag without a real registration.
+// Tests only — call before handing the worker to the scheduler.
+func (w *StreamWorker) SetFakeLoopback(loopback bool) {
+	w.loopback = loopback
+}
+
+// fakeSenderFn adapts a plain function into [jobSenderInterface] so
+// tests can intercept outbound HubMessages without wiring a real bidi
+// stream. Used by [StreamWorker.SetFakeSender].
+type fakeSenderFn func(*workerpb.HubMessage) error
+
+func (f fakeSenderFn) Send(msg *workerpb.HubMessage) error { return f(msg) }
+
+// SetFakeSender installs a function-backed sender on the worker so
+// tests can observe AssignJob / LoadModel / etc. dispatches and feed
+// chunks back via DeliverJobChunk. Pass nil to restore the default
+// (no sender; AssignJob fails with ErrWorkerOffline). Tests only.
+func (w *StreamWorker) SetFakeSender(fn func(msg *workerpb.HubMessage) error) {
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	if fn == nil {
+		w.sender = nil
+		return
+	}
+	w.sender = fakeSenderFn(fn)
+}
+
+// NewStreamWorker builds a worker from its server-assigned id and its
+// registration message. The id is minted by MASS at enrollment (join-token
+// flow) and echoed by the worker on every later connect — the register message
+// no longer carries it.
+func NewStreamWorker(id string, reg *workerpb.WorkerRegister, sender jobSenderInterface, massURL, modelsDir string, loopback bool, logger zerolog.Logger) *StreamWorker {
 	devices := make([]stats.Device, len(reg.Devices))
 	for i, d := range reg.Devices {
 		devices[i] = stats.Device{
@@ -113,21 +209,24 @@ func NewStreamWorker(reg *workerpb.WorkerRegister, sender jobSenderInterface, ma
 		}
 	}
 	return &StreamWorker{
-		id:          reg.Id,
-		name:        reg.Name,
-		runtimeName: reg.RuntimeName,
-		devices:     devices,
-		online:      true,
-		lastSeen:    time.Now(),
-		massURL:     massURL,
-		modelsDir:   modelsDir,
-		loopback:    loopback,
-		sender:      sender,
-		jobs:        make(map[string]chan *JobChunk),
-		loads:       make(map[string]chan loadOutcome),
-		unloads:     make(map[string]chan error),
-		benches:     make(map[string]chan benchOutcome),
-		logger:      logger.With().Str("worker", reg.Id).Str("runtime_name", reg.RuntimeName).Bool("loopback", loopback).Logger(),
+		id:              id,
+		name:            reg.Name,
+		runtimeName:     reg.RuntimeName,
+		version:         reg.Version,
+		compatible:      reg.Compatible,
+		devices:         devices,
+		online:          true,
+		lastSeen:        time.Now(),
+		massURL:         massURL,
+		modelsDir:       modelsDir,
+		loopback:        loopback,
+		vramHeadroomPct: reg.VramHeadroomPct,
+		sender:          sender,
+		jobs:            make(map[string]chan *JobChunk),
+		loads:           make(map[string]chan loadOutcome),
+		unloads:         make(map[string]chan error),
+		benches:         make(map[string]chan benchOutcome),
+		logger:          logger.With().Str("worker", id).Str("runtime_name", reg.RuntimeName).Bool("loopback", loopback).Logger(),
 	}
 }
 
@@ -136,6 +235,12 @@ func NewStreamWorker(reg *workerpb.WorkerRegister, sender jobSenderInterface, ma
 func (w *StreamWorker) ID() string          { return w.id }
 func (w *StreamWorker) Name() string        { return w.name }
 func (w *StreamWorker) RuntimeName() string { return w.runtimeName }
+func (w *StreamWorker) Version() string     { return w.version }
+func (w *StreamWorker) Compatible() string  { return w.compatible }
+
+// VRAMHeadroomPct returns the worker-reported effective VRAM headroom
+// watermark (1-100), or 0 when the worker didn't report one.
+func (w *StreamWorker) VRAMHeadroomPct() int32 { return w.vramHeadroomPct }
 
 // --- Status / stats / hardware ---
 
@@ -295,9 +400,11 @@ func (w *StreamWorker) ApplyHeartbeat(hb *workerpb.WorkerHeartbeat) (loadedChang
 	loaded := make([]LoadedModelStatus, len(hb.LoadedModels))
 	for i, lm := range hb.LoadedModels {
 		loaded[i] = LoadedModelStatus{
-			ModelID:  lm.ModelId,
-			PoolSize: int(lm.PoolSize),
-			Active:   int(lm.Active),
+			ModelID:   lm.ModelId,
+			PoolSize:  int(lm.PoolSize),
+			Active:    int(lm.Active),
+			DeviceIDs: append([]string(nil), lm.GetDeviceIds()...),
+			Files:     append([]string(nil), lm.GetFiles()...),
 		}
 		if old, ok := prev[lm.ModelId]; ok {
 			loaded[i].Source = old.Source
@@ -341,21 +448,34 @@ func sameLoadedSet(a, b []LoadedModelStatus) bool {
 // --- Result delivery (called by Hub) ---
 
 // DeliverJobChunk routes one streaming chunk to the waiting Schedule caller.
+//
+// The send happens while pendingMu is held, deliberately: [StreamWorker.SetOffline]
+// closes job channels under the same lock, so lock-scoped delivery makes
+// send and close mutually exclusive — a chunk that looked its channel up
+// just before the worker went offline can no longer panic with
+// send-on-closed-channel. Holding pendingMu across the send is the
+// documented exception to the no-locks-across-blocking-work rule: the
+// sole consumer is the scheduler's pumpWorkerChunks, which only appends
+// each chunk to an in-memory ring buffer — bounded work, no I/O — so
+// the channel drains promptly and the send cannot block indefinitely.
+// Terminal frames delete + close under the same critical section, which
+// keeps SetOffline from double-closing a channel Deliver just retired.
 func (w *StreamWorker) DeliverJobChunk(jobID string, chunk *JobChunk) {
+	terminal := chunk.Type == JobChunkTypeCompleted || chunk.Type == JobChunkTypeError
 	w.pendingMu.Lock()
 	ch, ok := w.jobs[jobID]
-	if ok && (chunk.Type == JobChunkTypeCompleted || chunk.Type == JobChunkTypeError) {
-		delete(w.jobs, jobID)
+	if ok {
+		if terminal {
+			delete(w.jobs, jobID)
+		}
+		ch <- chunk
+		if terminal {
+			close(ch)
+		}
 	}
 	w.pendingMu.Unlock()
-
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID).Msg("received chunk for unknown job")
-		return
-	}
-	ch <- chunk
-	if chunk.Type == JobChunkTypeCompleted || chunk.Type == JobChunkTypeError {
-		close(ch)
 	}
 }
 
@@ -541,13 +661,13 @@ func (w *StreamWorker) DeleteCacheFiles(filenames []string) error {
 }
 
 // SetEnabledDevices replaces the worker's in-memory device whitelist for
-// new model loads. Empty deviceIDs means "every advertised device" — the
-// bootstrap default. Already-loaded models are unaffected. Fire-and-
-// forget; the worker stores the set in memory only and MASS resends on
-// every reconnect (workers are stateless).
-func (w *StreamWorker) SetEnabledDevices(deviceIDs []string) error {
+// new model loads with the explicit three-state set (see [EnabledDevices]).
+// Already-loaded models are unaffected. Fire-and-forget; the worker stores
+// the set in memory only and MASS resends on every reconnect (workers are
+// stateless).
+func (w *StreamWorker) SetEnabledDevices(enabled EnabledDevices) error {
 	return w.send(&workerpb.HubMessage{Msg: &workerpb.HubMessage_SetEnabledDevices{
-		SetEnabledDevices: &workerpb.HubSetEnabledDevices{EnabledDeviceIds: deviceIDs},
+		SetEnabledDevices: &workerpb.HubSetEnabledDevices{All: enabled.All, DeviceIds: enabled.IDs},
 	}})
 }
 

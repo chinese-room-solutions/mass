@@ -1,281 +1,195 @@
-# MASS - Modular AI Scheduling Service
+# MASS — Modular AI Scheduling Service
 
-AI inference and workload scheduling service. Runs LLM inference on [llama.cpp](https://github.com/ggerganov/llama.cpp) via [llama-go](https://github.com/tcpipuk/llama-go) and dynamically schedules AI workloads across available compute resources. Exposes chat completion and embedding endpoints over [Twirp](https://github.com/twitchtv/twirp) RPC with Prometheus metrics, API key auth, and automatic GPU detection.
+[![CI](https://github.com/chinese-room-solutions/mass/actions/workflows/ci.yml/badge.svg)](https://github.com/chinese-room-solutions/mass/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/chinese-room-solutions/mass)](https://github.com/chinese-room-solutions/mass/releases/latest)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/License-FSL--1.1--ALv2-blue.svg)](LICENSE.md)
 
-*AI powered applications made easy.*
+MASS is a **pure-Go orchestrator** for AI inference. It does no inference itself — instead it manages a fleet of compute, schedules work onto it, and exposes that capacity through pluggable runtimes. Every inference-specific concern (which model formats are understood, which API is spoken, how a model is loaded and run) lives outside MASS in **installable runtime gateways**, so the same orchestrator drives llama.cpp today and vLLM, a TTS engine, or a diffusion model tomorrow — without a single code change.
+
+*AI-powered applications made easy.*
+
+## Architecture
+
+<img src="./assets/MASS Architecture.png" alt="MASS architecture" width="820"/>
+
+**MASS** is the coordinator. It holds the durable job queues, scores and places each job onto a suitable worker, streams results back, and serves the operator dashboard. It deals only in *opaque jobs* — bytes it routes but never interprets.
+
+**Runtime gateways** are the adapters that teach MASS a single inference ecosystem. Each one is an installable `.mass` package (one per runtime kind: llama-cpp, vLLM, TTS, …) that MASS launches as a [go-plugin](https://github.com/hashicorp/go-plugin) subprocess. A gateway owns everything format-specific that MASS deliberately doesn't:
+
+- it **hosts the public API** for its runtime (OpenAI-compatible and/or its own typed endpoints), which MASS proxies at `/mass.<runtime>.*`;
+- it **recognises the models** — walks the models directory, parses the files it understands, and builds the catalogue MASS renders. MASS owns the bytes on disk and does all the copying and fetching; the gateway only *plans* what an install should contain and *parses* what's already there;
+- it **defines what a "job" is** — it translates an incoming API request into an opaque payload, submits it to MASS's scheduler, and streams the result back to the caller. Only the gateway and its workers understand those payload bytes.
+
+This is why a new runtime is just a new gateway: it brings its own format knowledge and API, and MASS keeps scheduling unchanged.
+
+**Workers** are the muscle. Each is a runtime-specific binary that connects into MASS over a long-lived bidirectional gRPC stream, advertises its hardware (and benchmarks itself), then holds models resident in GPU/CPU memory and executes the opaque payloads its matching gateway produced. Workers are where the heavy inference toolchains (CUDA, ROCm, Metal, Vulkan) and the model weights actually live; many can join one MASS to form a fleet.
+
+**Apps** are ordinary client programs. For inference they call a gateway's API (proxied through MASS at `/mass.<runtime>.*`) and get streamed responses back, exactly as if talking to any inference server. For management — installing the model an app needs, listing what's available — they call MASS's own versioned RPC API. See **Contracts** below.
+
+**DB** (SQLite by default, or Postgres) persists the job queues and completed results, so work survives restarts and result streams can resume after a reconnect.
+
+The key property: **MASS knows nothing about models or inference.** Format parsing, API shapes, and execution are all pushed to the edges — gateways and workers — leaving a small, stable orchestrator in the middle that only has to schedule opaque work well.
+
+## Contracts
+
+MASS deliberately exposes its surfaces along the same seams as its architecture. Each one has a different audience, and that audience decides its shape — which is why there is no single "MASS API".
+
+- **MASS management API** (`mass.v1`) — the public, **versioned** RPC contract for managing MASS itself: installing models, listing what's available, and (over time) the broader control surface that lets apps and AI agents drive the orchestrator. It is a [Connect](https://connectrpc.com/) service, so the *same* methods are reachable as gRPC *and* plain HTTP/JSON. This is the stable entry point external programs build against. Model operations here follow one rule: the **runtime decides** (which files are one model, their names, which is a companion) and **MASS executes** the byte movement against its store — so MASS never has to understand a model format, and a gateway never touches the store.
+
+- **Runtime gateway API** (`mass.<runtime>.v1`) — each gateway's own **versioned** API for inference, which MASS proxies opaquely at `/mass.<runtime>.*` (typed API) and `/mass.<runtime>/*` (the gateway's plain HTTP routes, e.g. an OpenAI-compatible shim). MASS routes the bytes but never interprets them, so a gateway is free to expose whatever it likes (its typed API, an OpenAI-compatible shim, or both). Apps doing inference talk here.
+
+- **Internal plugin & worker contracts** — MASS↔gateway (go-plugin) and MASS↔worker (a long-lived gRPC stream carrying gateway-encoded payloads) are private wiring between components, not for external callers.
+
+- **Operator dashboard endpoints** — the live dashboard talks to MASS over a private set of REST + Server-Sent-Events endpoints. These exist because the browser UI (Datastar) needs streaming HTML/SSE that a request/response RPC can't provide. They are an implementation detail of the bundled UI, ship in lockstep with it, and are **not** a public contract — external programs should use the versioned management API instead.
+
+The dividing line: **versioned RPC for everything external; the dashboard's REST/SSE stays private to the UI.** The management-API and internal protos live in [`mass-proto`](https://github.com/chinese-room-solutions/mass-proto); each gateway's own API proto ships in that gateway's repo.
 
 ## Features
 
-- Chat completion and batch chat completion (GGUF models)
-- Text embeddings and batch embeddings
-- Automatic GPU offloading when CUDA is available
-- Worker pool with persistent llama.cpp contexts per model
-- Reasoning model support (e.g. DeepSeek-R1 thinking token extraction)
-- Prometheus metrics (`/metrics` on port 2112)
-- Bearer token authentication
-
-## Backends
-
-MASS ships one binary per platform/backend combination — pick the one matching your hardware. Each binary statically links the relevant ggml backend (CUDA, ROCm, Metal, or CPU-only) to keep download size small (NVIDIA cuBLAS DLL alone is ~285 MB).
-
-| Platform        | CPU-only | NVIDIA (CUDA) | AMD (ROCm) | Apple (Metal) |
-|-----------------|----------|---------------|------------|---------------|
-| Linux x86_64    | ✅       | ✅            | ✅         | —             |
-| Linux arm64     | ✅       | ✅ (Jetson)   | —          | —             |
-| Windows x86_64  | ⚠️       | ✅            | —          | —             |
-| macOS arm64     | —        | —             | —          | ✅            |
-
-⚠️ Windows CPU-only is not currently produced by `make-win.ps1` (Windows users typically want CUDA). Use Linux for CPU-only deployments.
-
-## Prerequisites
-
-| Tool | Linux | Windows (native) | macOS |
-|------|-------|-------------------|-------|
-| Go 1.26+ | [go.dev](https://go.dev/dl/) or goenv | [go.dev](https://go.dev/dl/) | `brew install go` |
-| GCC/G++ | `apt install build-essential` | MSYS2 MinGW-w64: `pacman -S mingw-w64-x86_64-gcc` | Xcode CLT (`xcode-select --install`) |
-| CMake | `apt install cmake` | Bundled with VS or [cmake.org](https://cmake.org/download/) | `brew install cmake` |
-| CUDA Toolkit *(NVIDIA)* | `apt install cuda-toolkit` | [nvidia.com](https://developer.nvidia.com/cuda-downloads) | — |
-| ROCm Toolkit *(AMD)* | [rocm.docs.amd.com](https://rocm.docs.amd.com) | — | — |
-| Visual Studio *(NVIDIA only)* | - | 2022 Community, "Desktop C++" workload | — |
-| Ninja | - | `pacman -S mingw-w64-x86_64-ninja` | `brew install ninja` |
+- **Pure-Go core** — the heavy inference toolchains (CUDA, ROCm, Metal, Vulkan) are confined to the workers. The only CGO anywhere is the desktop window's system webview (Linux/macOS); `make build-headless` builds a fully static, CGO-free server binary.
+- **Pluggable runtimes** — install, start, stop, and uninstall `.mass` gateway packages live from the dashboard; no rebuild, no restart of MASS.
+- **Latency-aware scheduling** — jobs are placed by predicted wall-clock cost (queue depth + model load time), models load on demand, failed placements retry on another worker, and result streams survive a worker reconnecting mid-job.
+- **Fleet control** — enable/disable individual workers or devices, with new workers benchmarked automatically so the scheduler knows their throughput.
+- **Operator dashboard** — live view (Datastar + Shoelace + Tailwind) of runtimes, models, the scheduler, queues, and workers, with Prometheus metrics, bearer-token auth, and optional TLS for API and worker traffic.
 
 ## Quick start
 
+Prebuilt binaries for Linux, macOS, and Windows ship on the
+[releases page](https://github.com/chinese-room-solutions/mass/releases/latest).
+To build from source instead:
+
+Building MASS needs **Go 1.26+** (plus `bun` or `npx` for the Tailwind CSS step). The desktop build also needs the system webview's dev packages on Linux (`gtk+-3.0`, `webkit2gtk-4.1`) and the Xcode command-line tools on macOS — Windows needs neither. Inference backend toolchains are needed only for the separate worker binaries, not for MASS.
+
 ```bash
-# Clone
 git clone https://github.com/chinese-room-solutions/mass.git
 cd mass
+make run          # build web assets + binary, then start bin/mass
+```
 
-# Pick the build matching your hardware (output: bin/mass):
-make build-cpu      # CPU-only
-make build-cuda     # NVIDIA / CUDA
-make build-rocm     # AMD / ROCm        (Linux only)
-make build-metal    # Apple Silicon     (macOS only)
+MASS starts as a desktop app: a native window over the dashboard, plus a tray icon (minimizing folds to the tray, Quit exits). On a server, run `mass --headless` to skip the window — or `make build-headless` for a CGO-free static binary with no GUI at all — and open the dashboard in a browser instead.
 
-# Run
-make run CONFIG=config/advert.yml
+MASS loads its config from the user config dir (e.g. `~/.config/mass/config.yml`), writing defaults on first run. Then, in the dashboard at `http://localhost:3455`:
+
+1. **Runtimes** → install a gateway package (e.g. [`mass-runtime-gateway-llama-cpp`](https://github.com/chinese-room-solutions/mass-runtime-gateway-llama-cpp)) and start it.
+2. **Workers** → **Add worker** (or `mass workers install-local` for the MASS host itself). MASS serves the [worker](https://github.com/chinese-room-solutions/mass-worker-llama-cpp) installer and prints the download-and-run commands for each GPU machine — see **Joining workers** below.
+3. **Models** → install or import a model. Models must enter through MASS: they land in the hub's store, and workers fetch what they run from there — a model dropped on a worker's own disk is invisible to the fleet.
+4. Send inference at the gateway's proxied endpoint. MASS strips the `/mass.<runtime>` prefix and forwards the rest — `/mass.llama-cpp/v1/...` reaches the gateway's OpenAI-compatible shim at `/v1/...`, while `/mass.llama-cpp.v1/...` selects its typed API (`Chat`, `Jobs/{id}`, ...):
+   ```bash
+   curl -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"my-model","messages":[{"role":"user","content":"hi"}]}'
+   ```
+
+### Running a downloaded release on macOS
+
+The macOS release ships an ad-hoc-signed `MASS.app`. It is **not notarized** by Apple
+(notarization needs a paid Apple Developer account), so on first launch macOS shows:
+
+> "Apple could not verify 'MASS' is free of malware…"
+
+This is expected for any non-notarized app — it is a Gatekeeper warning, not a problem
+with the build. Approve it **once** and it never appears again for that copy:
+
+- **Recommended:** right-click (or Control-click) `MASS.app` → **Open** → **Open** in the dialog.
+- Or: try to open it, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+- Or, from the terminal, clear the quarantine flag:
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/MASS.app
+  ```
+
+After approving once, MASS launches normally by double-click.
+
+## Command-line management
+
+The `mass` binary is also a client for its own `mass.v1` management API, so the whole control surface is scriptable without the dashboard. A leading subcommand runs the CLI (`mass -headless` / `mass -version` still start the server):
+
+```bash
+mass status                                   # orchestrator health
+mass runtimes search                          # gateway packages in the registry
+mass runtimes install mass-runtime-gateway-llama-cpp   # install (and start) one
+mass runtimes list                            # installed gateways
+mass runtimes start llama-cpp                 # bring a gateway up
+mass models import-remote --runtime llama-cpp --repo owner/model --file q4.gguf
+mass workers list                             # fleet state + device IDs
+mass queue list                               # inspect queued/running jobs
+```
+
+`runtimes install` takes the registry **package** name; `start`/`stop`/`uninstall`
+and every `--runtime` flag take the **runtime** name that package declares
+(`mass-runtime-gateway-llama-cpp` → `llama-cpp`). Both columns show in `runtimes search`.
+
+The verb groups mirror the dashboard tabs: `status`, `models`, `runtimes`, `workers`, `scheduler`, and `queue`. Shared flags on every command: `--addr` (target URL; defaults to `$MASS_ADDR`, else the local config), `--token` (`$MASS_AUTH_TOKEN`), `--json` (raw protojson — use this when parsing), and `--timeout`. Errors map to exit codes `0`/`1`/`2` (ok/error/usage). For the full verb reference and common workflows, see the [`mass-cli` skill](.claude/skills/mass-cli/SKILL.md).
+
+The skill is a plain Markdown instruction file — any agent can use it: point yours at `SKILL.md` directly, or install it wherever your agent discovers skills. With Claude Code, for example, it's picked up automatically when working inside this repo; for other projects copy (or symlink) the skill directory into the project's `.claude/skills/mass-cli/`, or install it user-wide so every project sees it:
+
+```bash
+cp -r .claude/skills/mass-cli ~/.claude/skills/
 ```
 
 ## Build commands
 
-All commands go through the `Makefile`. On Windows, the Makefile delegates build steps to `make-win.ps1` automatically (currently CUDA-only).
+Run through the `Makefile` (works on Linux, macOS, and Windows under Git Bash / MSYS2).
 
 | Command | Description |
 |---------|-------------|
-| `make build-cpu` | CPU-only binary |
-| `make build-cuda` | NVIDIA CUDA binary |
-| `make build-rocm` | AMD ROCm binary (Linux only) |
-| `make build-metal` | Apple Metal binary (macOS only) |
-| `make build BUILD_TAGS=<backend>` | Generic form (`backend` ∈ empty, `cublas`, `hipblas`, `metal`) |
-| `make build-libs` | Build llama-go static libraries only |
-| `make run [CONFIG=...]` | Build and run (default: `config/dev.yml`) |
-| `make docker-build [TAG=...]` | Build Docker image |
-| `make proto` | Regenerate protobuf/ConnectRPC code |
-| `make test` | Run full test suite with race detector |
-| `make lint` | Run golangci-lint |
-| `make fmt` | Format Go code |
-| `make tidy` | Tidy go.mod |
-| `make clean` | Remove `bin/` |
-| `make clean-all` | Remove `bin/` and llama-go build artifacts |
-
-### Windows notes
-
-On Windows the Makefile invokes `make-win.ps1` for native build steps (CUDA DLLs, MinGW libs). You can also call it directly for Windows-specific options:
-
-```powershell
-.\make-win.ps1 build -CudaArch 86    # Target RTX 30xx only (default: 61;75;86;89;90;120)
-.\make-win.ps1 help                   # Show all options
-```
-
-See [WINDOWS_GPU_BUILD.md](WINDOWS_GPU_BUILD.md) for architecture details and troubleshooting.
+| `make build` | Web assets + Go build → `bin/mass` |
+| `make build-headless` | Server build: no window/tray, CGO-free static binary |
+| `make build-web` | Web assets only (templ + Tailwind) |
+| `make run` | Build and run |
+| `make package` | Self-extracting installer (app + setup wizard) → `dist/` |
+| `make bundle-macos` | macOS-only: build an ad-hoc-signed `bin/MASS.app` |
+| `make test` / `make unittest` | Tests with `-race` / with `-short` |
+| `make lint` / `make vulncheck` | golangci-lint / govulncheck |
+| `make fmt` / `make tidy` / `make clean` | format / `go mod tidy` / remove `bin/` |
 
 ## Configuration
 
-MASS uses a single YAML config file stored in the user config directory (e.g. `%APPDATA%/mass/config.yml` on Windows). Defaults are embedded in the binary and written on first run. Module settings are stored in a sibling `modules.yml` file.
+A single YAML file in the user config dir (`%APPDATA%/mass/config.yml` on Windows, `~/.config/mass/config.yml` on Linux). Defaults are written on first run; most keys are also editable live in the **Settings** tab.
 
 ```yaml
-listen_addr: ":3455"
-auth_token: ""
-data_dir: ""
-theme: dark
-dev_mode: false
+listen_addr: "127.0.0.1:3455"  # also serves gRPC over the same port; non-loopback binds require auth_token
+data_dir: ""                # root for runtimes, models, DB (platform default if empty)
+theme: dark                 # dark | light
+result_ttl: "24h"           # how long completed job results are kept
+idle_eviction_ttl: "30s"    # idle time before a loaded model is unloaded
+stream_replay_ttl: "30s"    # how long a finished job's stream chunks stay replayable
+load_attempts: 1            # placement attempts before failing (1 = no retry)
+db_dialect: ""              # "" = SQLite (default), or "postgres"
+db_dsn: ""                  # Postgres DSN when db_dialect: postgres
 logger:
-  level: debug
-  console_writer: true
+  level: info               # trace | debug | info | warn | error
 tls:
   enabled: false
-  cert_file: ""
+  cert_file: ""             # PEM with cert + key; enables TLS for API + workers
 ```
 
-All settings are also editable through the web UI Settings tab.
+The **auth token** isn't stored here — set it in the Settings tab (persisted hashed in the DB; empty = no auth). `MASS_AUTH_TOKEN` overrides it. By default MASS serves plaintext h2c, fine for localhost and trusted networks.
 
-### TLS / SSL
+## Joining workers
 
-MASS supports TLS for encrypted worker and API communication. By default, MASS uses plaintext HTTP/2 (h2c), suitable for localhost and trusted networks.
-
-To enable TLS, provide a PEM file containing both the certificate and private key:
-```yaml
-tls:
-  enabled: true
-  cert_file: /path/to/server.pem
-```
-
-**Worker connection with TLS:**
-```bash
-# Self-signed cert: worker must trust the CA
-mass-worker --mass-url https://mass-host:3455 --ca-file /path/to/ca.pem --token mytoken
-
-# Trusted CA (e.g. Let's Encrypt): no --ca-file needed
-mass-worker --mass-url https://mass-host:3455 --token mytoken
-```
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MASS_AUTH_TOKEN` | _(empty)_ | Override config file auth token |
-| `LLAMA_LOG` | `error` | llama.cpp log verbosity: error, warn, info, debug |
-| `LLAMA_GO_DIR` | `../llama-go` | Path to llama-go (for builds) |
-| `BUILD_TAGS` | _(empty)_ | Set to `cublas` for GPU builds |
-| `CUDA_ARCH` | auto-detect | CUDA compute capability (GPU builds only) |
-
-## API
-
-MASS exposes two categories of HTTP endpoints:
-
-### Inference API (ConnectRPC)
-
-Inference endpoints live under `/mass.Mass/` and accept JSON or protobuf. Defined in [service.proto](rpc/service.proto):
-
-| Method | Description |
-|--------|-------------|
-| `POST /mass.Mass/ChatCompletion` | Chat completion (supports `"stream": true` for SSE) |
-| `POST /mass.Mass/BatchChatCompletion` | Batch chat completions |
-| `POST /mass.Mass/Embedding` | Text embedding |
-| `POST /mass.Mass/BatchEmbedding` | Batch text embeddings |
-| `POST /mass.Mass/Tokenize` | Tokenize text |
-
-### Public REST API (`/api/v1/`)
-
-Versioned JSON endpoints for programmatic access by modules, external tools, and the web UI:
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/v1/models` | List available models. Filters: `?type=chat\|embedding`, `?search=...` |
-| `GET /api/v1/models?id={publisher/repo/variant}` | Get detailed model specs (GGUF metadata, capabilities) |
-| `GET /api/v1/models?status=true` | Include runtime status (loaded, active requests, mode) |
-| `POST /api/v1/models/load` | Load a model into the scheduler pool |
-| `POST /api/v1/models/import` | Import a local GGUF file into the models directory |
-| `GET /api/v1/browse/roots` | List filesystem roots (for file picker) |
-| `GET /api/v1/browse?dir=...&ext=...` | Browse directory contents |
-| `GET /api/v1/sync-logs` | Fetch current log buffer |
-| `GET /ping` | Health check |
-
-### Internal UI endpoints (`/api/`)
-
-Unversioned endpoints that return SSE/Datastar patches (HTML fragments + signal updates) for the web UI. These are consumed by the browser via Datastar's `@get`/`@post` directives and are not intended for external use. They cover module lifecycle, settings, model management UI, HuggingFace search/download, and scheduler visualization.
-
-## Module system
-
-MASS is built around a plugin architecture. Each module is a standalone process — a compiled binary, a Python script, a Node.js app, or anything else that can be launched via a command. Modules communicate with MASS over gRPC using the [go-plugin](https://github.com/hashicorp/go-plugin) protocol. They can declare model requirements, expose custom web UI, and handle API requests — all while MASS manages the underlying inference engine and scheduler.
-
-### Runtime abstraction
-
-The scheduler is decoupled from module execution via a `ModuleRuntimeInterface`. Today all modules run as bare processes (`Manager` implementation). The interface enables future runtime backends without changes to scheduling logic:
-
-| Runtime | Status | Use case |
-|---------|--------|----------|
-| Process (`Manager`) | Current | Local development, single-machine deployment |
-| Docker | Planned | Isolated execution, shared machines |
-| Kubernetes | Planned | Enterprise, multi-node GPU clusters |
-
-All communication happens over gRPC regardless of runtime — module code is the same whether it runs as a local process, a Docker container, or a K8s pod.
-
-### Inference runtime abstraction
-
-Model loading is abstracted behind a `ModelLoaderInterface`, decoupling the scheduler from any specific inference runtime. Today MASS uses [llama.cpp](https://github.com/ggerganov/llama.cpp) via llama-go for GGUF models. The interface allows adding new runtimes without changing scheduling or module code:
-
-| Runtime | Status | Formats |
-|---------|--------|---------|
-| llama.cpp (`pkg/llama`) | Current | GGUF (chat + embedding) |
-| ONNX Runtime | Planned | ONNX models |
-| vLLM | Planned | HuggingFace models, tensor-parallel GPU inference |
-
-Modules declare model requirements by type (chat or embedding) — the scheduler picks the right runtime based on the model format.
-
-### How it works
-
-<img src="./assets/MASS-Architecture.png" alt="drawing" width="1600"/>
-
-**Lifecycle:** Package (.mass) → Install → Discover (spawn process, call `GetInfo`) → Start (load models) → Serve UI + API
-
-### Module SDK
-
-Modules implement the `Module` interface from [mass-module](https://github.com/chinese-room-solutions/mass-module):
-
-| Method | Purpose |
-|--------|---------|
-| `GetInfo()` | Return name, version, model requirements, UI capability |
-| `HTTPHandler()` | Return an `http.Handler` serving the module's web UI (full pages, not fragments) |
-| `HandleRequest(method, payload)` | Handle API calls routed by proto service descriptor |
-| `Health()` | Health check |
-
-Module UIs are served as full HTML pages via `HTTPHandler()`. MASS proxies `/modules/{name}/*` to the module over gRPC (`HandleHTTP`/`HandleHTTPStream`), rendering them inside an iframe in the MASS shell. The SDK provides `uikit.Layout()` to wrap content with shared theme CSS and CDN dependencies.
-
-### Package format
-
-Modules are distributed as `.mass` files (ZIP archives) containing the binary, a `module.yml` metadata file, and optionally a `config.yml` with default settings (auto-detected during install).
-
-```yaml
-# module.yml
-name: playground
-version: 0.1.0
-description: Interactive API playground for testing MASS inference endpoints
-sdk_version: "1"
-command: ${MODULE_DIR}/mass-playground.exe --headless
-ui_path: "/"
-icon: icon.png
-dependencies:
-  - name: embedding
-    version: ">=0.1.0"
-    source: "github:chinese-room-solutions/mass-embedding"
-  - name: vision
-    version: "^1.0.0"
-    source: "github:chinese-room-solutions/mass-vision"
-```
-
-MASS resolves the full dependency graph (including transitive dependencies), checks installed versions first, and only downloads from the source when no installed version satisfies the constraint. Multiple versions of the same module can coexist on disk (`modules/{name}/{version}/`). Resolved versions are recorded in a `module.lock` file for reproducible installs.
-
-Supported version constraints follow [semver](https://semver.org/) conventions: `^1.2.0` (compatible), `~1.2.0` (patch-level), `>=1.0.0`, `<2.0.0`, and combinations.
-
-Supported sources:
-| Source | Example | Description |
-|--------|---------|-------------|
-| GitHub Releases | `github:owner/repo` | Downloads `.mass` assets from GitHub Releases (public or private with token) |
-
-### Path macros
-
-Module commands and config paths support variable expansion, resolved at load time:
-
-| Macro | Resolves to | Example |
-|-------|-------------|---------|
-| `${MODULE_DIR}` | Module's install directory | `D:\data\modules\embedding\0.1.0` |
-| `${MODULES_DIR}` | All modules directory | `D:\data\modules` |
-| `${DATA_DIR}` | MASS data directory | `D:\data` |
-
-This keeps `modules.yml` portable — paths adjust automatically if the data directory changes.
-
-### UI integration
-
-Module UIs are full HTML pages served via `HTTPHandler()` and displayed in an iframe within the MASS shell. MASS proxies HTTP requests over gRPC, including SSE streaming (`HandleHTTPStream`). The SDK provides `uikit.Layout()` for shared theme CSS, [Datastar](https://data-star.dev/) SSE, [Shoelace](https://shoelace.style/) web components, and Tailwind CSS — all via CDN. Modules can also run standalone with a native webview window via the SDK's `webview.Open()` package.
-
-### Debug mode
-
-Set `debug: true` in a module's config to attach to an already-running module process (e.g. under a debugger). MASS reads a `.reattach.json` file from the module directory to connect via TCP instead of spawning a subprocess.
-
-## Docker
+MASS hands out a download command plus a run command that installs the matching worker on another machine. Get them from `mass workers join-command` (or the **Add worker** button on the Workers tab):
 
 ```bash
-make docker-build
-docker compose up -d
+# 1. Download the installer (uname picks the right OS/arch build):
+curl -fsSL "http://<mass-host>:3455/setup/worker-bin/llama-cpp?os=$(uname -s)&arch=$(uname -m)" -o mass-worker-setup && chmod +x mass-worker-setup
+# 2. Run it — an interactive wizard walks you through scope/dirs/options:
+./mass-worker-setup --mass-url http://<mass-host>:3455 --token <TOKEN>
 ```
+
+On Windows, download with `irm` (arch hardcoded to `AMD64`) and run `.\mass-worker-setup.exe`. `--mass-url` and `--token` are just prefilled defaults for the wizard; nothing is forced. The `/setup/*` endpoints are unauthenticated (the join token rides only in the pasted command line), and the worker-bin path accepts uname-style `os`/`arch` values (`Linux`/`Darwin`/`Windows`, `x86_64`/`aarch64`, …).
+
+### Air-gapped artifact cache
+
+MASS proxies and caches worker installers content-addressed by the index's sha256, under:
+
+```
+<data_dir>/registry-cache/artifacts/<sha256>
+```
+
+For a LAN with no registry access, drop the installer files there named by their sha256 (from the index) ahead of time; MASS serves them straight from the cache and never reaches the network.
+
+## License
+
+[FSL-1.1-ALv2](LICENSE.md) — source-available: use, modify, and redistribute
+freely for anything except a competing product or service; each release
+converts to Apache-2.0 two years after publication.

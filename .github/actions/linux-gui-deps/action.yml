@@ -1,0 +1,33 @@
+name: Linux GUI deps
+description: >
+  Install the GTK3 + WebKitGTK 4.1 dev packages the cgo GUI build needs, and
+  verify pkg-config resolves them. Needed by every Linux job that loads the
+  package graph — build, test, lint, and govulncheck all type-check the cgo
+  webview packages, which have no pure-Go fallback.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        # DPkg::Lock::Timeout bounds the wait for the lock: the runner images run
+        # a background apt timer, and plain apt-get retries a held lock forever —
+        # which presents as a step that hangs for the entire job instead of
+        # failing. Callers pair this with a step timeout-minutes (composite steps
+        # cannot set their own).
+        sudo apt-get -o DPkg::Lock::Timeout=180 update
+        sudo apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends \
+          libgtk-3-dev libwebkit2gtk-4.1-dev
+        # Assert the modules resolve here, where they are provisioned: Ubuntu's
+        # pkg-config is pkgconf, which exits 1 with NO message on a missing
+        # module, so a half-provisioned runner otherwise surfaces as an
+        # unexplained exit 1 in whichever step queries it first.
+        pkg-config --print-errors --exists gtk+-3.0 webkit2gtk-4.1
+        # Some cgo deps still request the retired webkit2gtk-4.0 module. Alias
+        # the .pc files, in the dir where the 4.1 ones actually live (they are
+        # API-compatible), so those resolve too.
+        pcdir=$(pkg-config --variable=pcfiledir webkit2gtk-4.1)
+        sudo ln -sf "$pcdir/webkit2gtk-4.1.pc" "$pcdir/webkit2gtk-4.0.pc"
+        sudo ln -sf "$pcdir/javascriptcoregtk-4.1.pc" "$pcdir/javascriptcoregtk-4.0.pc"
