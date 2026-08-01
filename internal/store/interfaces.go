@@ -1,5 +1,9 @@
 package store
 
+import (
+	"context"
+)
+
 // SettingsStoreInterface abstracts key-value settings storage.
 type SettingsStoreInterface interface {
 	// GetSetting retrieves a setting value by key. Returns "" if not found.
@@ -67,13 +71,38 @@ type DownloadStoreInterface interface {
 	ListDownloads() ([]DownloadRow, error)
 }
 
+// JoinTokenStoreInterface abstracts worker-enrollment join-token persistence.
+// Only bcrypt hashes are stored; expired rows are pruned opportunistically on
+// insert and list.
+type JoinTokenStoreInterface interface {
+	InsertJoinToken(row JoinTokenRow, now int64) error
+	ListValidJoinTokens(now int64) ([]JoinTokenRow, error)
+}
+
+// WorkerStoreInterface abstracts enrolled-worker credential persistence. A row
+// holds the worker's server-assigned id, name, and the bcrypt hash of its
+// per-worker secret. Deleting the row revokes the worker.
+type WorkerStoreInterface interface {
+	InsertWorker(row WorkerRow) error
+	GetWorker(workerID string) (WorkerRow, error)
+	ListWorkers() ([]WorkerRow, error)
+	DeleteWorker(workerID string) (bool, error)
+}
+
 type StoreInterface interface {
 	SettingsStoreInterface
 	BenchmarkStoreInterface
-	DeviceQueueStateStoreInterface
+	WorkerQueueStateStoreInterface
+	ThroughputCorrectionStoreInterface
 	RuntimeStoreInterface
 	WorkerDeviceEnabledStoreInterface
+	JoinTokenStoreInterface
+	WorkerStoreInterface
 	DownloadStoreInterface
+
+	// Ping reports whether the underlying database is reachable. Used by
+	// the /ready probe.
+	Ping(ctx context.Context) error
 
 	// Close releases resources held by the store.
 	Close() error
@@ -81,11 +110,14 @@ type StoreInterface interface {
 
 // Compile-time checks that Store satisfies all interfaces.
 var (
-	_ SettingsStoreInterface            = (*Store)(nil)
-	_ BenchmarkStoreInterface           = (*Store)(nil)
-	_ DeviceQueueStateStoreInterface    = (*Store)(nil)
-	_ RuntimeStoreInterface             = (*Store)(nil)
-	_ WorkerDeviceEnabledStoreInterface = (*Store)(nil)
-	_ DownloadStoreInterface            = (*Store)(nil)
-	_ StoreInterface                    = (*Store)(nil)
+	_ SettingsStoreInterface             = (*Store)(nil)
+	_ BenchmarkStoreInterface            = (*Store)(nil)
+	_ WorkerQueueStateStoreInterface     = (*Store)(nil)
+	_ ThroughputCorrectionStoreInterface = (*Store)(nil)
+	_ RuntimeStoreInterface              = (*Store)(nil)
+	_ WorkerDeviceEnabledStoreInterface  = (*Store)(nil)
+	_ JoinTokenStoreInterface            = (*Store)(nil)
+	_ WorkerStoreInterface               = (*Store)(nil)
+	_ DownloadStoreInterface             = (*Store)(nil)
+	_ StoreInterface                     = (*Store)(nil)
 )

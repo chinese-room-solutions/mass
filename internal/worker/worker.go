@@ -26,6 +26,16 @@ type WorkerInterface interface {
 	// (e.g. "llama-cpp"). Set at register time.
 	RuntimeName() string
 
+	// Version reports the worker's own semver (e.g. "0.1.0"), set at register
+	// time. Empty when the worker predates the handshake version field.
+	Version() string
+
+	// Compatible reports the semver range of runtime versions this worker
+	// decodes (e.g. ">=0.1 <0.2"), set at register time. Empty when the worker
+	// predates the handshake field. Used to flag workers a runtime upgrade
+	// would strand.
+	Compatible() string
+
 	// Status returns the current status of this worker.
 	Status() WorkerStatus
 
@@ -67,4 +77,17 @@ type LoadedModelStatus struct {
 	Active    int
 	Source    string    // gateway-attributed caller, e.g. "app: playground" / "direct"
 	IdleSince time.Time // zero when Active>0; stamped when Active first hits 0
+	// DeviceIDs lists the canonical IDs of every device this model
+	// actually occupies after load. Single GPU for a small model, multiple
+	// GPUs for a tensor split, a CPU when llama.cpp spills layers. Honest
+	// scoring in the scheduler uses min(GFLOPS across this set) — split
+	// models are bounded by their slowest device.
+	DeviceIDs []string
+	// Files are the store-relative cache keys backing this loaded model
+	// (primary plus companions), echoed verbatim from the worker. An entry
+	// may denote a single file OR a directory subtree; consumers protect and
+	// match by exact string OR path prefix (entry + "/"). Opaque to MASS —
+	// this is byte-level file identity for cache reconciliation, never parsed
+	// for model semantics.
+	Files []string
 }

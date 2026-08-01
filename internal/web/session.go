@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -55,5 +56,34 @@ func (ss *SessionStore) Valid(id string) bool {
 func (ss *SessionStore) Invalidate(id string) {
 	ss.mu.Lock()
 	delete(ss.sessions, id)
+	ss.mu.Unlock()
+}
+
+// Janitor removes expired sessions every hour until ctx is cancelled.
+// Valid only prunes the session it is asked about, so sessions that are
+// never presented again would otherwise accumulate for the process
+// lifetime. Run as `go sessions.Janitor(ctx)`.
+func (ss *SessionStore) Janitor(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ss.prune()
+		}
+	}
+}
+
+// prune removes every expired session.
+func (ss *SessionStore) prune() {
+	now := time.Now()
+	ss.mu.Lock()
+	for id, expiry := range ss.sessions {
+		if now.After(expiry) {
+			delete(ss.sessions, id)
+		}
+	}
 	ss.mu.Unlock()
 }

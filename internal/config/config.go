@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,16 +16,37 @@ import (
 )
 
 // DefaultListenAddr is the default HTTP listen address for the web UI.
-const DefaultListenAddr = ":3455"
+// Loopback by default: binding beyond the local machine is an explicit
+// operator choice and requires an auth token (enforced at startup).
+const DefaultListenAddr = "127.0.0.1:3455"
 
 // DefaultResultTTL is the default TTL for cached job results.
 const DefaultResultTTL = 24 * time.Hour
+
+// DefaultLoadAttempts is the default total number of times the
+// dispatcher will try to place a job before failing it. 1 = no retry
+// (first failure ends the job, today's pay-on-failure behavior).
+// Operators raise this when the fleet sees transient load failures
+// (driver hiccups, edge-case OOMs from under-estimated memory) and
+// want the scheduler to try another worker before surfacing the
+// error to the gateway.
+const DefaultLoadAttempts = 1
 
 // DefaultIdleEvictionTTL is the default time a loaded model can sit
 // idle on a worker before MASS evicts it. Short enough that a forgotten
 // model frees its slot quickly; long enough that back-to-back chats
 // don't pay reload cost.
 const DefaultIdleEvictionTTL = 30 * time.Second
+
+// DefaultStreamReplayTTL is how long the scheduler keeps a per-job chunk
+// ring buffer after the terminal frame so a disconnected gateway can
+// reconnect via StreamChunks and replay. Short enough that idle buffers
+// release memory quickly; long enough to absorb a gateway restart cycle.
+const DefaultStreamReplayTTL = 30 * time.Second
+
+// DefaultRegistryURL is the raw index.yml of the public mass-registry, fetched
+// off its default branch when RegistryURL is unset.
+const DefaultRegistryURL = "https://raw.githubusercontent.com/chinese-room-solutions/mass-registry/main/index.yml"
 
 // ErrLogLevelUnknown is returned when an unrecognized log level string is parsed.
 var ErrLogLevelUnknown = errors.New("unsupported log level")
@@ -88,13 +110,20 @@ type LoggerConfig struct {
 // Config is the unified application configuration.
 type Config struct {
 	ListenAddr      string `yaml:"listen_addr" json:"listen_addr"`
-	AuthToken       string `yaml:"auth_token,omitempty" json:"-" secret:"true"` // Legacy: read from YAML for migration only, never serialized
 	DataDir         string `yaml:"data_dir,omitempty" json:"data_dir,omitempty"`
 	Theme           string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
 	DevMode         bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
 	RegistryURL     string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
 	ResultTTL       string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`               // How long to keep job results (e.g. "24h")
 	IdleEvictionTTL string `yaml:"idle_eviction_ttl,omitempty" json:"idle_eviction_ttl,omitempty"` // How long a loaded model can sit idle before eviction (e.g. "10s")
+	StreamReplayTTL string `yaml:"stream_replay_ttl,omitempty" json:"stream_replay_ttl,omitempty"` // How long per-job chunk buffers survive after terminal frame (e.g. "30s")
+	LoadAttempts    int    `yaml:"load_attempts,omitempty" json:"load_attempts,omitempty"`         // Total times to try placing a job before failing (1 = no retry)
+
+	// Database backend. Default = SQLite at "{dataDir}/mass.db".
+	// To use Postgres: set DBDialect to "postgres" and DBDSN to the libpq
+	// URL (e.g. "postgres://user:pw@host:5432/mass?sslmode=disable").
+	DBDialect string `yaml:"db_dialect,omitempty" json:"db_dialect,omitempty"`
+	DBDSN     string `yaml:"db_dsn,omitempty" json:"-" secret:"true"`
 
 	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 	TLS    TLSConfig    `yaml:"tls,omitempty" json:"tls,omitempty"`
@@ -114,6 +143,43 @@ func (c *Config) EffectiveListenAddr() string {
 		return c.ListenAddr
 	}
 	return DefaultListenAddr
+}
+
+// IsLoopbackAddr reports whether a listen address ("host:port", ":port",
+// or a bare host) binds only the loopback interface. An empty host
+// (":3455") and the unspecified addresses ("0.0.0.0", "::") bind every
+// interface, so they are not loopback. Hostnames other than "localhost"
+// are treated as non-loopback — resolving them at startup would make the
+// answer depend on DNS.
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
+}
+
+// LocalURL builds a URL for reaching the server bound at addr from this
+// machine. An empty or unspecified host (":3455", "0.0.0.0:3455",
+// "[::]:3455") is reachable via localhost; a concrete host is kept as-is.
+func LocalURL(scheme, addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = addr, ""
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "localhost"
+	}
+	if port == "" {
+		return scheme + "://" + host
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
 // EffectiveResultTTL returns the configured result TTL duration,
@@ -142,6 +208,38 @@ func (c *Config) EffectiveIdleEvictionTTL() time.Duration {
 	return d
 }
 
+// EffectiveStreamReplayTTL returns the configured stream-replay TTL
+// duration, defaulting to DefaultStreamReplayTTL if empty or invalid.
+func (c *Config) EffectiveStreamReplayTTL() time.Duration {
+	if c.StreamReplayTTL == "" {
+		return DefaultStreamReplayTTL
+	}
+	d, err := time.ParseDuration(c.StreamReplayTTL)
+	if err != nil {
+		return DefaultStreamReplayTTL
+	}
+	return d
+}
+
+// EffectiveLoadAttempts returns the configured attempt cap, defaulting
+// to DefaultLoadAttempts when unset or non-positive. Non-positive
+// values are silently coerced to the default to keep the dispatcher
+// from interpreting "0 attempts" as a permanent reject.
+func (c *Config) EffectiveLoadAttempts() int {
+	if c.LoadAttempts <= 0 {
+		return DefaultLoadAttempts
+	}
+	return c.LoadAttempts
+}
+
+// EffectiveRegistryURL returns the configured RegistryURL or DefaultRegistryURL.
+func (c *Config) EffectiveRegistryURL() string {
+	if c.RegistryURL != "" {
+		return c.RegistryURL
+	}
+	return DefaultRegistryURL
+}
+
 // EffectiveDataDir returns the configured DataDir or the platform default.
 func (c *Config) EffectiveDataDir() (string, error) {
 	if c.DataDir != "" {
@@ -150,11 +248,28 @@ func (c *Config) EffectiveDataDir() (string, error) {
 	return DefaultDataDir()
 }
 
+// EffectiveDB returns the database dialect and DSN to open. When DBDialect
+// is empty or "sqlite", the DSN is a filesystem path "{dataDir}/mass.db"
+// (DBDSN is ignored). When DBDialect is "postgres", DBDSN is required and
+// passed through verbatim.
+//
+// dialect is returned as a string so the config package doesn't have to
+// import the store package; main passes it to store.Open which converts to
+// store.Dialect.
+func (c *Config) EffectiveDB(dataDir string) (dialect, dsn string) {
+	switch c.DBDialect {
+	case "postgres":
+		return "postgres", c.DBDSN
+	default:
+		return "sqlite", filepath.Join(dataDir, "mass.db")
+	}
+}
+
 // Default returns a Config with sensible defaults.
 func Default() *Config {
 	return &Config{
 		Logger: LoggerConfig{
-			Level:         LogLevel(zerolog.DebugLevel),
+			Level:         LogLevel(zerolog.InfoLevel),
 			ConsoleWriter: true,
 		},
 	}
@@ -162,6 +277,12 @@ func Default() *Config {
 
 // ConfigFile is the YAML config file name within the MASS config directory.
 const ConfigFile = "config.yml"
+
+// FilePath returns the path of the config file [Load] reads and [Save] writes
+// within configDir.
+func FilePath(configDir string) string {
+	return filepath.Join(configDir, ConfigFile)
+}
 
 // DefaultDir returns the platform-appropriate MASS config directory,
 // creating it if needed (e.g. %APPDATA%/mass on Windows, ~/.config/mass
@@ -204,7 +325,7 @@ func LogsDir(configDir string) string {
 // Load reads ConfigFile from the given config directory. Returns Default()
 // (overlaid with disk content) and firstRun=true when no file exists yet.
 func Load(configDir string) (cfg *Config, firstRun bool, err error) {
-	cfgPath := filepath.Join(configDir, ConfigFile)
+	cfgPath := FilePath(configDir)
 	errCtx := map[string]any{"path": cfgPath}
 	cfg = Default()
 
@@ -224,7 +345,7 @@ func Load(configDir string) (cfg *Config, firstRun bool, err error) {
 
 // Save writes ConfigFile to the given config directory.
 func Save(cfg *Config, configDir string) error {
-	cfgPath := filepath.Join(configDir, ConfigFile)
+	cfgPath := FilePath(configDir)
 	errCtx := map[string]any{"path": cfgPath}
 
 	data, err := yaml.Marshal(cfg)
@@ -275,13 +396,6 @@ func DefaultDataDir() (string, error) {
 // own format subdir(s).
 func ModelsDir(dataDir string) string {
 	return filepath.Join(dataDir, "models")
-}
-
-// FormatModelsDir returns the directory holding all files for one model
-// format: {dataDir}/models/{format}/. Multiple runtimes that handle the
-// same format share this directory.
-func FormatModelsDir(dataDir, format string) string {
-	return filepath.Join(ModelsDir(dataDir), format)
 }
 
 // RuntimesDir returns the directory where installed runtime gateway packages

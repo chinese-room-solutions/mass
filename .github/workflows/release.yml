@@ -1,170 +1,117 @@
 name: release
 
-# Builds and publishes per-platform/per-backend mass binaries on tag push.
-# Tier-1 artifacts (built on every release):
-#   - linux-amd64-cpu      (CPU-only)
-#   - linux-amd64-cuda     (NVIDIA, CUDA arch 86 = RTX 30xx baseline)
-#   - macos-arm64-metal    (Apple Silicon)
-#   - windows-amd64-cuda   (NVIDIA via make-win.ps1)
+# On a version tag (or manual dispatch), build the mass binary natively on each
+# target OS and attach the archives to a single GitHub Release.
 #
-# AMD ROCm and Linux arm64 (Jetson) are tier-2 — add jobs here once demand exists
-# (ROCm in particular needs a self-hosted runner).
+# MASS is pure Go except the native GUI (webview_go, CGO on Linux/macOS), so each
+# artifact is built on its own runner — Linux needs the GTK/WebKit dev headers;
+# Windows builds CGO-free (pure-Go webview2, no extra DLLs to ship). Every OS
+# builds through `make build`. This is the only place the (10x-billed) macOS
+# runner is used; CI covers Linux + Windows.
 
 on:
   push:
-    tags:
-      - "*.*.*"
+    tags: ['v*']
   workflow_dispatch:
-
 permissions:
-  contents: write  # required to upload release artifacts
+  contents: write  # upload release artifacts
 
 env:
-  LLAMA_GO_DIR: ${{ github.workspace }}/../llama-go
+  GOPRIVATE: github.com/chinese-room-solutions/*
 
 jobs:
-  linux-cpu:
-    runs-on: ubuntu-latest
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `asset` is the release-asset basename: mass_<goos>_<goarch>, no
+        # version — stable names keep releases/latest/download/ links evergreen
+        # (the website and READMEs hardcode them).
+        include:
+          - os: ubuntu-24.04
+            label: linux-amd64
+            asset: mass_linux_amd64
+          - os: windows-latest
+            label: windows-amd64
+            asset: mass_windows_amd64
+          - os: macos-15
+            label: macos-arm64
+            asset: mass_darwin_arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          path: mass
-      - uses: actions/checkout@v4
-        with:
-          repository: tcpipuk/llama-go
-          submodules: recursive
-          path: llama-go
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: mass/go.mod
+          go-version-file: go.mod
           check-latest: true
-      - name: Build CPU binary
-        working-directory: mass
-        env:
-          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
-        run: make build-cpu
-      - name: Package
-        working-directory: mass
+      - name: Configure private module access
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        # Bounded, so a stuck apt fails the step in minutes instead of hanging
+        # the job. Covers the action's own 180s lock wait twice over.
+        timeout-minutes: 8
+        uses: ./.github/actions/linux-gui-deps
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web deps
+        shell: bash
+        working-directory: web
+        run: npm ci
+      # make build/bundle-macos run build-web first: templ generate, stage the
+      # sdk theme from the pinned Go module cache (no sibling checkout), and
+      # build the CSS — failing if dist.css comes out empty.
+      - name: Build
+        shell: bash
         run: |
-          tar -czf mass-${{ github.ref_name }}-linux-amd64-cpu.tar.gz -C bin mass
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mass-linux-amd64-cpu
-          path: mass/mass-${{ github.ref_name }}-linux-amd64-cpu.tar.gz
-
-  linux-cuda:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: mass
-      - uses: actions/checkout@v4
-        with:
-          repository: tcpipuk/llama-go
-          submodules: recursive
-          path: llama-go
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: mass/go.mod
-          check-latest: true
-      - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: '12.5.0'
-          method: network
-      - name: Build CUDA binary
-        working-directory: mass
-        env:
-          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
-          CUDA_ARCH: "86"  # RTX 30xx baseline; users can rebuild for other archs
-        run: make build-cuda
-      - name: Package
-        working-directory: mass
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            make bundle-macos  # .app bundle: launching from Finder opens no Terminal
+          else
+            make build
+          fi
+      - name: Package installer
+        shell: bash
+        run: make package
+      - name: Archive
+        shell: bash
         run: |
-          tar -czf mass-${{ github.ref_name }}-linux-amd64-cuda.tar.gz -C bin mass
-      - uses: actions/upload-artifact@v4
+          name="${{ matrix.asset }}"
+          setup="mass-setup_${name#mass_}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$name.zip" ./bin/mass.exe
+            mv dist/mass-setup.exe "$setup.exe"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            tar -czf "$name.tar.gz" -C bin MASS.app
+            mv dist/MASS-Setup.zip "$setup.zip"
+          else
+            tar -czf "$name.tar.gz" -C bin mass
+            mv dist/*.AppImage "$setup.AppImage"
+          fi
+      - uses: actions/upload-artifact@v7
         with:
-          name: mass-linux-amd64-cuda
-          path: mass/mass-${{ github.ref_name }}-linux-amd64-cuda.tar.gz
-
-  macos-metal:
-    runs-on: macos-14  # arm64 (Apple Silicon)
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: mass
-      - uses: actions/checkout@v4
-        with:
-          repository: tcpipuk/llama-go
-          submodules: recursive
-          path: llama-go
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: mass/go.mod
-          check-latest: true
-      - name: Install build deps
-        run: brew install cmake ninja
-      - name: Build Metal binary
-        working-directory: mass
-        env:
-          LLAMA_GO_DIR: ${{ github.workspace }}/llama-go
-        run: make build-metal
-      - name: Package
-        working-directory: mass
-        run: |
-          tar -czf mass-${{ github.ref_name }}-macos-arm64-metal.tar.gz -C bin mass
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mass-macos-arm64-metal
-          path: mass/mass-${{ github.ref_name }}-macos-arm64-metal.tar.gz
-
-  windows-cuda:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: mass
-      - uses: actions/checkout@v4
-        with:
-          repository: tcpipuk/llama-go
-          submodules: recursive
-          path: llama-go
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: mass/go.mod
-          check-latest: true
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja mingw-w64-x86_64-cmake
-      - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: '12.5.0'
-          method: network
-      - name: Build CUDA binary (Windows)
-        working-directory: mass
-        shell: pwsh
-        run: .\make-win.ps1 build
-      - name: Package
-        working-directory: mass
-        shell: pwsh
-        run: |
-          Compress-Archive -Path bin\mass.exe,bin\*.dll -DestinationPath mass-${{ github.ref_name }}-windows-amd64-cuda.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mass-windows-amd64-cuda
-          path: mass/mass-${{ github.ref_name }}-windows-amd64-cuda.zip
+          name: ${{ matrix.asset }}
+          path: |
+            mass_*.tar.gz
+            mass_*.zip
+            mass-setup_*
 
   publish:
-    needs: [linux-cpu, linux-cuda, macos-metal, windows-cuda]
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.AppImage
+            artifacts/**/*.exe
           generate_release_notes: true

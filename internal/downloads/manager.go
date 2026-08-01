@@ -40,8 +40,14 @@ var (
 )
 
 // Persistence-cadence: persist progress no more than once every 5s to avoid
-// burning IO on hot downloads. Mirrors pre-refactor behaviour exactly.
+// burning IO on hot downloads.
 const persistInterval = 5 * time.Second
+
+// maxConcurrent caps how many transfer goroutines (HTTP downloads + local
+// imports) move bytes at once. The rest queue on the manager's semaphore
+// as "active" jobs; the semaphore acquire selects against the job's
+// context so Pause/Cancel stay responsive while queued.
+const maxConcurrent = 3
 
 // Job describes one download known to the Manager. It mirrors
 // [store.DownloadRow] plus runtime-only fields (cancel func, paused flag).
@@ -84,6 +90,9 @@ type Manager struct {
 	mu   sync.Mutex
 	jobs map[string]*runtimeJob // key = rel_path
 
+	// sem bounds concurrent transfers at maxConcurrent.
+	sem chan struct{}
+
 	// Subscribers + their fan-out channel; protected by subMu.
 	subMu sync.Mutex
 	subs  map[chan Event]struct{}
@@ -117,14 +126,15 @@ func NewManager(s store.DownloadStoreInterface, modelsDir string, logger zerolog
 		dl:        download.NewManager(nil),
 		logger:    logger.With().Str("component", "downloads").Logger(),
 		jobs:      map[string]*runtimeJob{},
+		sem:       make(chan struct{}, maxConcurrent),
 		subs:      map[chan Event]struct{}{},
 	}
 }
 
 // Recover reads every persisted download from the store and restores it as
 // paused. Stale rows whose temp file no longer exists (and whose destination
-// file isn't already present) are removed. Mirrors the pre-refactor
-// behaviour: user explicitly clicks Resume to pick up.
+// file isn't already present) are removed. The operator clicks Resume to
+// pick up; recovery never auto-resumes.
 func (m *Manager) Recover() {
 	rows, err := m.store.ListDownloads()
 	if err != nil {
@@ -168,11 +178,15 @@ func (m *Manager) Recover() {
 }
 
 // Start kicks off a new download. Returns [ErrAlreadyExists] if relPath is
-// already tracked (active or paused), or [ErrAlreadyDone] if the
-// destination file already exists on disk.
+// already tracked (active or paused), [ErrAlreadyDone] if the destination
+// file already exists on disk, or [ErrInvalidRelPath] when relPath would
+// escape models_dir.
 func (m *Manager) Start(spec Job) error {
-	if spec.RelPath == "" || spec.URL == "" {
-		return ctxerr.With(fmt.Errorf("Start: rel_path and url are required"), nil)
+	if spec.URL == "" {
+		return ctxerr.With(fmt.Errorf("Start: url is required"), nil)
+	}
+	if err := ValidateRelPath(spec.RelPath); err != nil {
+		return err
 	}
 	destPath := filepath.Join(m.modelsDir, filepath.FromSlash(spec.RelPath))
 	if _, err := os.Stat(destPath); err == nil {
@@ -389,6 +403,15 @@ func (m *Manager) run(rj *runtimeJob) {
 	rj.mu.Unlock()
 	defer close(done)
 
+	// Wait for a transfer slot. Cancellable so Pause/Cancel (which fire
+	// rj.cancel) release a still-queued job immediately.
+	select {
+	case m.sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-m.sem }()
+
 	destPath := filepath.Join(m.modelsDir, filepath.FromSlash(relPath))
 	var lastPctReported int64 = -1
 
@@ -480,8 +503,8 @@ func (m *Manager) ImportLocal(srcPath, relPath, runtimeName string, labels Local
 	if runtimeName == "" {
 		return "", ctxerr.With(fmt.Errorf("runtime name is required"), map[string]any{"path": srcPath})
 	}
-	if strings.TrimSpace(relPath) == "" {
-		return "", ctxerr.With(fmt.Errorf("rel_path is required"), map[string]any{"path": srcPath})
+	if err := ValidateRelPath(relPath); err != nil {
+		return "", err
 	}
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -543,11 +566,22 @@ func (m *Manager) copyLocal(rj *runtimeJob, srcPath, destPath string) {
 	total := rj.job.Total
 	rj.mu.Unlock()
 
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	rj.mu.Lock()
+	rj.cancel = cancel
 	rj.done = done
 	rj.mu.Unlock()
 	defer close(done)
+
+	// Wait for a transfer slot (same budget as HTTP downloads).
+	// Cancellable so Pause/Cancel release a still-queued import immediately.
+	select {
+	case m.sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-m.sem }()
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		m.failJob(rj, err)
@@ -566,11 +600,6 @@ func (m *Manager) copyLocal(rj *runtimeJob, srcPath, destPath string) {
 		m.failJob(rj, err)
 		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	rj.mu.Lock()
-	rj.cancel = cancel
-	rj.mu.Unlock()
 
 	buf := make([]byte, 512*1024)
 	var copied int64
@@ -674,4 +703,50 @@ func rowFromJob(j Job) store.DownloadRow {
 		Total:       j.Total,
 		ErrorMsg:    j.ErrorMsg,
 	}
+}
+
+// RemoveLocal deletes the given store-relative files from models_dir,
+// cancelling any in-flight job for them first, and drops their download
+// rows. Used to execute a model delete: the runtime decides which files
+// constitute the model, MASS removes them here. Best-effort per file;
+// returns the first hard error. Empty group directories are pruned.
+func (m *Manager) RemoveLocal(relPaths []string) error {
+	var firstErr error
+	for _, relPath := range relPaths {
+		if err := ValidateRelPath(relPath); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		// Cancel an in-flight import for this file so its goroutine
+		// releases the handle before we unlink (Windows).
+		if err := m.Cancel(relPath); err != nil && !errors.Is(err, ErrNotFound) {
+			m.logger.Warn().Err(err).Str("rel_path", relPath).Msg("cancelling in-flight job before remove")
+		}
+		dest := filepath.Join(m.modelsDir, filepath.FromSlash(relPath))
+		// A store entry may denote a single file or a directory subtree
+		// (directory-shaped models: ONNX, vLLM, diffusion, …). Remove the
+		// whole subtree when the resolved path is a directory, the file
+		// otherwise. ValidateRelPath above already guarantees dest stays
+		// inside modelsDir, so RemoveAll can't escape the store.
+		remove := os.Remove
+		if info, statErr := os.Stat(dest); statErr == nil && info.IsDir() {
+			remove = os.RemoveAll
+		}
+		if err := remove(dest); err != nil && !os.IsNotExist(err) {
+			if firstErr == nil {
+				firstErr = ctxerr.With(fmt.Errorf("removing %s: %w", relPath, err), map[string]any{"rel_path": relPath})
+			}
+			continue
+		}
+		if err := m.store.DeleteDownload(relPath); err != nil {
+			m.logger.Warn().Err(err).Str("rel_path", relPath).Msg("deleting download row on remove")
+		}
+		// Prune the now-empty group directory (ignore if not empty / gone).
+		if dir := filepath.Dir(dest); dir != m.modelsDir {
+			_ = os.Remove(dir)
+		}
+	}
+	return firstErr
 }

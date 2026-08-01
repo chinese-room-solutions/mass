@@ -3,41 +3,45 @@ package templates
 import (
 	"fmt"
 	"strings"
+
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
 )
 
 templ Shell(data DashboardData) {
 	<!-- data-init runs once when the element mounts — used here to open the
 	     Models tab's SSE on page load. Patches target #models-list (and
 	     descendants) inside the Models tab body. -->
-	<div data-signals={ dashboardSignals(data) } data-init="@get('/api/models/stream', {openWhenHidden: true})" class="min-h-screen">
-		<!-- Header -->
-		<header class="sticky top-0 z-20" style="background:var(--mass-bg-panel);border-bottom:1px solid var(--mass-border)">
+	<div data-signals={ dashboardSignals(data) } data-init="@get('/api/models/stream', {openWhenHidden: true})" class="h-screen flex flex-col overflow-hidden">
+		<!-- Header is natural height; tab panels below flex into the rest. -->
+		<header class="z-20 flex-shrink-0" style="background:var(--mass-bg-panel);border-bottom:1px solid var(--mass-border)">
 			<div class="px-4 py-2 flex items-center gap-3">
-				<img data-attr:src="$theme === 'dark' ? '/public/MASS-Dark.png' : '/public/MASS-Light.png'" alt="MASS" style="height:1.25rem"/>
+				<img data-attr:src="$themeBase === 'dark' ? '/public/MASS-Dark.png' : '/public/MASS-Light.png'" alt="MASS" style="height:1.5rem"/>
 				<div class="ml-auto flex items-center gap-1">
-					<sl-tooltip content="Toggle light/dark theme">
-						<sl-icon-button
-							data-attr:name="$theme === 'dark' ? 'sun' : 'moon-stars'"
-							data-on:click="@post('/internal/settings/theme')"
-							style="font-size:1.1rem"
-						></sl-icon-button>
-					</sl-tooltip>
+					<sl-dropdown placement="bottom-end" hoist>
+						<sl-icon-button slot="trigger" name="palette" label="Theme" style="font-size:1.1rem"></sl-icon-button>
+						@themeMenu()
+					</sl-dropdown>
 				</div>
 			</div>
 			<div class="px-4 flex gap-4" style="border-top:1px solid var(--mass-border)">
 				@tabButton("runtimes", "Runtimes")
 				@tabButton("models", "Models")
 				@tabButton("scheduler", "Scheduler")
+				@tabButton("queue", "Queues")
 				@tabButton("workers", "Workers")
 				@tabButton("settings", "Settings")
 			</div>
 		</header>
 
 		<!-- Runtimes tab -->
-		<div data-show="$activeTab === 'runtimes'" class="flex" style="height: calc(100vh - 88px);">
+		<div data-show="$activeTab === 'runtimes'" class="flex flex-1 min-h-0">
 			<div id="mass-left-panel" class="flex flex-col overflow-x-hidden flex-shrink-0" style="width:22%;min-width:270px">
 				<!-- Search + collapse toggle -->
-				<div class="flex items-center gap-2 px-2 py-2 flex-shrink-0 justify-end" style="border-bottom:1px solid var(--mass-border)">
+				<div
+					class="flex items-center gap-2 px-2 py-2 flex-shrink-0 justify-end"
+					data-attr:class="'flex items-center gap-2 px-2 py-2 flex-shrink-0 ' + ($sidebarCollapsed ? 'justify-center' : 'justify-end')"
+					style="border-bottom:1px solid var(--mass-border)"
+				>
 					<sl-input
 						id="runtime-search-input"
 						data-show="!$sidebarCollapsed"
@@ -53,6 +57,7 @@ templ Shell(data DashboardData) {
 						<sl-icon-button
 							id="mass-collapse-btn"
 							data-attr:name="$sidebarCollapsed ? 'layout-sidebar-reverse' : 'layout-sidebar'"
+							data-on:click="$sidebarCollapsed = !$sidebarCollapsed"
 							style="font-size:1.1rem;flex-shrink:0"
 						></sl-icon-button>
 					</sl-tooltip>
@@ -61,25 +66,44 @@ templ Shell(data DashboardData) {
 				<div class="flex-1 overflow-y-auto py-1" id="runtime-list">
 					@runtimeListItems(data.Runtimes, data.ActiveRuntime)
 				</div>
-				<!-- Install button -->
-				<div class="p-2 flex-shrink-0" style="border-top:1px solid var(--mass-border)">
-					<sl-button
-						data-show="!$sidebarCollapsed"
-						size="small"
-						variant="default"
-						class="w-full"
-						data-on:click="$installRuntimeOpen = true"
-					>
-						<sl-icon slot="prefix" name="plus-lg"></sl-icon>
-						Install Runtime
-					</sl-button>
-					<sl-tooltip data-show="$sidebarCollapsed" content="Install runtime">
-						<sl-icon-button
-							name="plus-lg"
+				<!-- Install buttons: registry ("Install Runtime") + local package ("Browse Local"). -->
+				<div class="p-2 flex-shrink-0 flex flex-col gap-2" style="border-top:1px solid var(--mass-border)">
+					<div data-show="!$sidebarCollapsed" class="flex flex-col gap-2">
+						<sl-button
+							size="small"
+							variant="default"
+							class="w-full"
 							data-on:click="$installRuntimeOpen = true"
-							style="font-size:1.1rem"
-						></sl-icon-button>
-					</sl-tooltip>
+						>
+							<sl-icon slot="prefix" name="cloud-download"></sl-icon>
+							Install Runtime
+						</sl-button>
+						<sl-button
+							size="small"
+							variant="default"
+							class="w-full"
+							data-on:click="$installLocalOpen = true"
+						>
+							<sl-icon slot="prefix" name="folder2-open"></sl-icon>
+							Browse Local
+						</sl-button>
+					</div>
+					<div data-show="$sidebarCollapsed" class="flex flex-col items-center gap-1">
+						<sl-tooltip content="Install runtime" placement="right">
+							<sl-icon-button
+								name="cloud-download"
+								data-on:click="$installRuntimeOpen = true"
+								style="font-size:1.1rem"
+							></sl-icon-button>
+						</sl-tooltip>
+						<sl-tooltip content="Browse local package" placement="right">
+							<sl-icon-button
+								name="folder2-open"
+								data-on:click="$installLocalOpen = true"
+								style="font-size:1.1rem"
+							></sl-icon-button>
+						</sl-tooltip>
+					</div>
 				</div>
 			</div>
 
@@ -93,13 +117,17 @@ templ Shell(data DashboardData) {
 				<div id="runtime-welcome" data-show="$activeRuntime === ''" class="h-full overflow-y-auto">
 					@templ.Raw(RenderWelcomeState(len(data.Runtimes) == 0))
 				</div>
+				<!-- RenderWelcomeState carries id="runtime-welcome-content" so SSE
+				     patches target it by id (the data-show wrapper above keeps its
+				     Datastar binding). -->
+
 				<!-- Live logs panel: populated by JS when a runtime is selected. -->
 				<div id="runtime-logs" data-show="$activeRuntime !== ''" class="h-full overflow-y-auto"></div>
 			</main>
 		</div>
 
 		<!-- Models tab -->
-		<div data-show="$activeTab === 'models'" style="height: calc(100vh - 88px);">
+		<div data-show="$activeTab === 'models'" class="flex-1 min-h-0">
 			<div id="models-tab" style="display:flex;justify-content:center;height:100%">
 				<button id="models-deselect-trigger" style="display:none" data-on:click="$selectedModelID = ''"></button>
 				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
@@ -138,7 +166,7 @@ templ Shell(data DashboardData) {
 						<sl-button variant="default" size="small" style="min-width:12rem"
 							onclick="window.__massOpenInstall()">
 							<sl-icon slot="prefix" name="plus-lg"></sl-icon>
-							Install New Model
+							Install Model
 						</sl-button>
 						<sl-button variant="default" size="small" style="min-width:10rem"
 							onclick="window.__massImportLocal()">
@@ -160,7 +188,7 @@ templ Shell(data DashboardData) {
 		</div>
 
 		<!-- Scheduler tab -->
-		<div data-show="$activeTab === 'scheduler'" style="height: calc(100vh - 88px);">
+		<div data-show="$activeTab === 'scheduler'" class="flex-1 min-h-0">
 			<div id="scheduler-tab" style="display:flex;justify-content:center;height:100%">
 				<button id="scheduler-deselect-trigger" style="display:none" data-on:click="$selectedSchedulerKey = ''"></button>
 				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
@@ -197,8 +225,32 @@ templ Shell(data DashboardData) {
 			</div>
 		</div>
 
+		<!-- Queue tab -->
+		<div data-show="$activeTab === 'queue'" class="flex-1 min-h-0">
+			<div id="queue-tab" style="display:flex;justify-content:center;height:100%">
+				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
+					<div style="padding:0.75rem 1.5rem 0">
+						<div class="flex items-center justify-center gap-2 text-sm font-semibold" style="color:var(--mass-text)">
+							<sl-icon name="list-task"></sl-icon>
+							<span>Queues</span>
+						</div>
+						<div class="mt-2">
+							<sl-input id="queue-filter-input" size="small" clearable placeholder="Filter queues...">
+								<sl-icon slot="prefix" name="search"></sl-icon>
+							</sl-input>
+						</div>
+					</div>
+					<div id="queue-list-scroll" style="flex:1;overflow-y:auto;padding:0.75rem 1.5rem">
+						<div id="queue-list">
+							@tabLoadingSpinner()
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
 		<!-- Workers tab -->
-		<div data-show="$activeTab === 'workers'" style="height: calc(100vh - 88px);">
+		<div data-show="$activeTab === 'workers'" class="flex-1 min-h-0">
 			<div id="workers-tab" style="display:flex;justify-content:center;height:100%">
 				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
 					<div style="padding:0.75rem 1.5rem 0">
@@ -206,21 +258,41 @@ templ Shell(data DashboardData) {
 							<sl-icon name="pc-display-horizontal"></sl-icon>
 							<span>Workers</span>
 						</div>
-						<div class="mt-2">
-							<sl-input id="workers-filter-input" size="small" clearable placeholder="Filter workers...">
+						<div class="mt-2 flex items-center gap-2">
+							<sl-input id="workers-filter-input" size="small" clearable placeholder="Filter workers..." style="flex:1">
 								<sl-icon slot="prefix" name="search"></sl-icon>
 							</sl-input>
+							<!-- Adding a worker needs a runtime to attach it to. $hasRuntimes
+							     is re-patched on every install/uninstall so the button follows
+							     without a reload; the server-rendered display:none keeps it
+							     from flashing before hydration. -->
+							<sl-button
+								size="small"
+								data-show="$hasRuntimes"
+								if len(data.Runtimes) == 0 {
+									style="display:none"
+								}
+								data-on:click="$addWorkerOpen = true"
+							>
+								<sl-icon slot="prefix" name="plus-lg"></sl-icon>
+								Add worker
+							</sl-button>
 						</div>
 					</div>
-					<div id="workers-list" style="flex:1;overflow-y:auto;padding:0.75rem 1.5rem" class="space-y-3">
-						@tabLoadingSpinner()
+					<div id="workers-list-scroll" style="flex:1;overflow-y:auto;padding:0.75rem 1.5rem;display:flex;flex-direction:column">
+						<div id="workers-list" class="space-y-3" style="flex:1">
+							@tabLoadingSpinner()
+						</div>
 					</div>
 				</div>
 			</div>
 		</div>
 
+		<!-- Add worker dialog -->
+		@addWorkerDialog(data)
+
 		<!-- Settings tab -->
-		<div data-show="$activeTab === 'settings'" style="height: calc(100vh - 88px);" class="flex">
+		<div data-show="$activeTab === 'settings'" class="flex flex-1 min-h-0">
 			<div id="settings-left-panel" class="overflow-auto flex-shrink-0" style="width:40%;min-width:480px">
 				@settingsPanel(data)
 			</div>
@@ -242,12 +314,18 @@ templ Shell(data DashboardData) {
 			</div>
 		</div>
 
-		<!-- Confirm uninstall dialog (Runtimes) -->
+		<!-- Confirm uninstall dialog (Runtimes). Raised above the default dialog
+		     z-index: the registry dialog's Remove buttons open it while that
+		     dialog is still up, and at equal z-index the later-in-DOM registry
+		     dialog would cover it. -->
 		<sl-dialog
 			id="mass-confirm-uninstall-dialog"
+			class="mass-dialog"
 			label="Uninstall Runtime"
+			style="--sl-z-index-dialog: 900"
 			data-attr:open="$confirmOpen"
-			data-on:sl-hide="$confirmOpen = false"
+			data-on:sl-hide="if(evt.target === el){$confirmOpen = false}"
+			data-on:keydown="if (evt.key === 'Enter') { evt.preventDefault(); @delete('/api/runtimes/' + $confirmUninstall); $confirmOpen = false }"
 		>
 			<p class="text-sm" style="color:var(--mass-text)">This removes the gateway binary. Models on disk and currently-connected workers are not affected.</p>
 			<div slot="footer" class="flex gap-2 justify-end">
@@ -260,13 +338,82 @@ templ Shell(data DashboardData) {
 			</div>
 		</sl-dialog>
 
-		<!-- Install runtime dialog -->
+		<!-- Registry install dialog: search + browse the package registry.
+		     On show it fetches /api/runtimes/registry into #registry-available;
+		     the search box re-fetches (debounced) with the registryQuery filter.
+		     Rows carry their own Install buttons; the dialog stays open across
+		     installs so the operator can add several runtimes in one sitting. -->
 		<sl-dialog
 			id="install-runtime-dialog"
+			class="mass-dialog"
 			label="Install Runtime"
 			data-attr:open="$installRuntimeOpen"
-			data-on:sl-hide="if(!$installing){$installRuntimeOpen = false}"
-			style="--width: 520px; --body-spacing: var(--sl-spacing-small) var(--sl-spacing-large) var(--sl-spacing-small); --footer-spacing: var(--sl-spacing-small) var(--sl-spacing-large);"
+			data-on:sl-hide="if(evt.target === el){$installRuntimeOpen = false}"
+			data-on:sl-show={ "if(evt.target === el){" + registryReloadExpr() + "}" }
+			style="--width: 640px;"
+		>
+			<div class="space-y-3">
+				<sl-input
+					size="small"
+					clearable
+					placeholder="Search runtimes..."
+					data-bind="registryQuery"
+					data-on:input__debounce.300ms={ registryReloadExpr() }
+					autocomplete="off"
+				>
+					<sl-icon slot="prefix" name="search"></sl-icon>
+				</sl-input>
+				<div id="registry-install-alert"></div>
+				<div id="registry-available">
+					@registryLoading()
+				</div>
+			</div>
+		</sl-dialog>
+
+		<!-- Themes dialog: manage the installed themes and browse the registry's
+		     theme packages. Same shape as the runtime registry dialog above — on
+		     show it fetches /api/themes/registry into #theme-manager and the
+		     search box re-fetches (debounced) with the themeQuery filter. Rows
+		     carry their own Install/Remove buttons and the dialog stays open
+		     across them. Both entry points rewind the section windows, so a
+		     fresh search (or a re-open) starts at the first page. -->
+		<sl-dialog
+			id="browse-themes-dialog"
+			class="mass-dialog"
+			label="Themes"
+			data-attr:open="$browseThemesOpen"
+			data-on:sl-hide="if(evt.target === el){$browseThemesOpen = false}"
+			data-on:sl-show={ "if(evt.target === el){" + themeReloadExpr() + "}" }
+			style="--width: 640px;"
+		>
+			<div class="space-y-3">
+				<sl-input
+					size="small"
+					clearable
+					placeholder="Search themes..."
+					data-bind="themeQuery"
+					data-on:input__debounce.300ms={ themeReloadExpr() }
+					autocomplete="off"
+				>
+					<sl-icon slot="prefix" name="search"></sl-icon>
+				</sl-input>
+				<div id="theme-alert"></div>
+				<div id="theme-manager">
+					@themeLoading()
+				</div>
+			</div>
+		</sl-dialog>
+
+		<!-- Local install dialog: install a runtime gateway from a .mass
+		     package on disk. Errors render inline into #install-error so the
+		     operator stays in the dialog. -->
+		<sl-dialog
+			id="install-local-dialog"
+			class="mass-dialog"
+			label="Browse Local"
+			data-attr:open="$installLocalOpen"
+			data-on:sl-hide="if(evt.target === el && !$installing){$installLocalOpen = false}"
+			style="--width: 520px;"
 		>
 			<div class="space-y-2">
 				<div id="install-error"></div>
@@ -274,6 +421,7 @@ templ Shell(data DashboardData) {
 					<label class="text-sm font-medium" style="color:var(--mass-text)">Package File</label>
 					<div class="flex items-center gap-2 mt-1">
 						<sl-input
+							id="install-package-input"
 							size="small"
 							data-bind="packagePath"
 							placeholder="/path/to/runtime.mass"
@@ -292,7 +440,7 @@ templ Shell(data DashboardData) {
 				</div>
 			</div>
 			<div slot="footer" class="flex gap-2 justify-end">
-				<sl-button size="small" data-on:click="$installRuntimeOpen = false" data-attr:disabled="$installing">Cancel</sl-button>
+				<sl-button size="small" data-on:click="$installLocalOpen = false" data-attr:disabled="$installing">Cancel</sl-button>
 				<sl-button
 					variant="primary"
 					size="small"
@@ -305,9 +453,10 @@ templ Shell(data DashboardData) {
 		<!-- Confirm delete model dialog -->
 		<sl-dialog
 			id="mass-confirm-delete-model-dialog"
+			class="mass-dialog"
 			label="Delete Model"
 			data-attr:open="$confirmDeleteModelOpen"
-			data-on:sl-hide="$confirmDeleteModelOpen = false"
+			data-on:sl-hide="if(evt.target === el){$confirmDeleteModelOpen = false}"
 		>
 			<p class="text-sm" style="color:var(--mass-text)">This removes the file from <span class="font-mono">{ displayPath(data.DataDir) }/models</span> on disk. This cannot be undone.</p>
 			<div slot="footer" class="flex gap-2 justify-end">
@@ -323,9 +472,10 @@ templ Shell(data DashboardData) {
 		<!-- Confirm delete group dialog -->
 		<sl-dialog
 			id="mass-confirm-delete-group-dialog"
+			class="mass-dialog"
 			label="Delete Model Group"
 			data-attr:open="$confirmDeleteGroupOpen"
-			data-on:sl-hide="$confirmDeleteGroupOpen = false"
+			data-on:sl-hide="if(evt.target === el){$confirmDeleteGroupOpen = false}"
 		>
 			<p class="text-sm" style="color:var(--mass-text)">
 				Delete <span class="font-semibold" data-text="$confirmDeleteGroupLabel"></span>
@@ -349,12 +499,11 @@ templ Shell(data DashboardData) {
 		<sl-dialog
 			id="mass-confirm-cancel-dl-dialog"
 			label="Cancel Download"
-			class="mass-dialog-centered-title"
-			style="--header-spacing: var(--sl-spacing-small) var(--sl-spacing-large); --body-spacing: var(--sl-spacing-x-small) var(--sl-spacing-large) var(--sl-spacing-small); --footer-spacing: var(--sl-spacing-x-small) var(--sl-spacing-large);"
+			class="mass-dialog"
 		>
-			<p class="text-sm text-center" style="color:var(--mass-text)">Cancel download of <span id="mass-cancel-dl-name" class="font-mono"></span>?</p>
-			<p class="text-xs text-center mt-1" style="color:var(--mass-text-muted)">The partial file will be removed.</p>
-			<div slot="footer" class="flex justify-center">
+			<p class="text-sm" style="color:var(--mass-text)">Cancel download of <span id="mass-cancel-dl-name" class="font-mono"></span>?</p>
+			<p class="text-xs mt-1" style="color:var(--mass-text-muted)">The partial file will be removed.</p>
+			<div slot="footer" class="flex justify-end">
 				<sl-button
 					variant="danger"
 					size="small"
@@ -363,25 +512,36 @@ templ Shell(data DashboardData) {
 			</div>
 		</sl-dialog>
 
-		<!-- Install new model (HuggingFace search) -->
-		<sl-dialog id="mass-install-model-dialog" label="Install New Model" style="--width:680px">
-			<!-- Runtime selector — populated by install.js when the dialog opens.
-			     Operator chooses which runtime gets the install before searching;
-			     install.js stores the selection on $installRuntime and routes
-			     both the search filter (extension list) and the eventual
-			     download to that runtime. -->
+		<!-- Install new model — runtime-hosted UI in an iframe.
+		     Each runtime gateway serves its own /install page (HF
+		     picker, custom registry form, etc.) under
+		     /mass.<runtime>.*/install. install.js renders the
+		     runtime selector and points the iframe at the picked
+		     runtime's /install endpoint. The gateway calls back into
+		     MASS via MassScheduler.DownloadFiles for the actual
+		     fetch — MASS holds zero registry knowledge. -->
+		<!-- Install dialog mounts the gateway's /install page in an
+		     iframe. The iframe element paints the MASS dialog
+		     surface so there's no white flash before the page loads;
+		     the page itself runs with a transparent body, so the
+		     iframe acts as a single seamless surface with the dialog.
+		     Page postMessages mass-install-resize so MASS can size
+		     the iframe to actual content height. -->
+		<!-- The gateway owns layout, scroll, and how tall it wants to
+		     be. MASS only enforces a viewport ceiling (in install.js)
+		     so the dialog can't grow off-screen. The dialog body's
+		     overflow:hidden override (in input.tw.css) keeps the
+		     dialog from growing a redundant scrollbar alongside the
+		     iframe's. -->
+		<sl-dialog id="mass-install-model-dialog" class="mass-dialog" label="Install Model" style="--width:680px">
 			<div id="mass-install-runtime-tabs" class="flex items-center gap-1 mb-3 flex-wrap" style="border-bottom:1px solid var(--mass-border);padding-bottom:0.5rem"></div>
-			<div class="flex gap-2 mb-3">
-				<sl-input id="mass-install-query" size="small" clearable placeholder="Search Hugging Face models..." class="flex-1" autocomplete="off"></sl-input>
-				<sl-button variant="primary" size="small" onclick="window.__massHFSearch()">
-					<sl-icon slot="prefix" name="search"></sl-icon>
-					Search
-				</sl-button>
-			</div>
-			<div id="mass-install-results" style="max-height:32rem;overflow-y:auto"></div>
+			<iframe id="mass-install-frame" scrolling="no" style="width:100%;height:0;border:0;display:block;background-color:var(--mass-bg-base);overflow:hidden" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
 		</sl-dialog>
 
-		<!-- Settings file/directory browser -->
+		<!-- Settings file/directory browser. Doesn't use .mass-dialog
+		     because it has special body/footer needs: an inner-
+		     scrolling entries list (input.tw.css) and a zero-padded
+		     footer that hugs its single row. -->
 		<sl-dialog id="mass-file-browser" label="Browse Files" style="--width:640px;--body-spacing:var(--sl-spacing-small) var(--sl-spacing-large);--footer-spacing:0;">
 			<div id="mass-fb-path" class="flex items-center gap-1 flex-wrap text-xs mb-2 min-h-[24px]"></div>
 			<div id="mass-fb-entries" class="max-h-[420px] overflow-y-auto space-y-0.5 pb-2" style="border-bottom:1px solid var(--mass-border)"></div>
@@ -403,7 +563,7 @@ templ Shell(data DashboardData) {
 		<!-- Name-prompt dialog used by HF install. Browse Local hosts
 		     its name field inside the file-browser dialog; HF has no
 		     such host, so this is a small standalone modal. -->
-		<sl-dialog id="mass-name-prompt-dialog" label="Install" style="--width:480px">
+		<sl-dialog id="mass-name-prompt-dialog" class="mass-dialog" label="Install" style="--width:480px">
 			<label class="text-xs block mb-1" style="color:var(--mass-text-muted)">Name (required)</label>
 			<input id="mass-name-prompt-input" type="text" placeholder="e.g. Qwen3 7B Instruct" autocomplete="off" class="w-full text-sm rounded px-2 py-1.5" style="background:var(--mass-bg-base);border:1px solid var(--mass-border);color:var(--mass-text)"/>
 			<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Files installed under the same name show up as variants of one model in the Models tab. Type to see suggestions from already-installed models.</p>
@@ -419,6 +579,222 @@ templ Shell(data DashboardData) {
 		@templ.Raw(modelsTabScript)
 		@templ.Raw(schedulerScript)
 		@templ.Raw(installScript)
+	</div>
+}
+
+// addWorkerDialog shows, per OS, a download command and a run command. The base
+// URL is taken from the browser's own location (proxy-safe) and the runtime is
+// chosen from the installed set. The download pulls the matching worker
+// installer from /setup/worker-bin; running it launches the installer's
+// interactive wizard on the target machine (--mass-url and --token are just
+// prefilled defaults). Opening the dialog mints a real join token server-side
+// (@get /api/workers/join-token patches $addWorkerToken + $addWorkerTokenExpiry)
+// and embeds it in the run command. The run command appends --token only when
+// $addWorkerToken is non-empty, so an auth-disabled MASS (no token minted) and
+// the pre-mint window both render a clean tokenless command.
+templ addWorkerDialog(data DashboardData) {
+	<sl-dialog
+		id="add-worker-dialog"
+		class="mass-dialog"
+		label="Add worker"
+		data-attr:open="$addWorkerOpen"
+		data-on:sl-show="if(evt.target === el){if($addWorkerMassURL === '') $addWorkerMassURL = window.location.origin; @get('/api/workers/join-token'); @get('/api/workers/add-dialog-options')}"
+		data-on:sl-hide="if(evt.target === el){$addWorkerOpen = false}"
+	>
+		<div class="flex flex-col gap-3">
+			<p class="text-sm" style="color:var(--mass-text-muted)">
+				On the machine you want to join, download the installer and run it — it walks you through an interactive setup wizard.
+				<span data-text="$addWorkerAuthDisabled ? 'This MASS has no operator token, so the run command needs none.' : ($addWorkerToken === '' ? '' : 'The token is embedded in the run command below (' + $addWorkerTokenExpiry + ').')"></span>
+			</p>
+			<div data-show="$addWorkerTokenError !== ''" class="text-sm" style="color:var(--mass-danger)" data-text="$addWorkerTokenError"></div>
+			<div>
+				<sl-input
+					size="small"
+					label="MASS address"
+					data-attr:value="$addWorkerMassURL"
+					data-on:sl-input="$addWorkerMassURL = evt.target.value"
+					placeholder="http://mass.example:3455"
+				></sl-input>
+				<p class="text-xs mt-1" style="color:var(--mass-text-muted)">Address the worker machines will use to reach this MASS.</p>
+				<p
+					class="text-xs mt-1"
+					style="color:var(--mass-warning)"
+					data-show="/:\/\/(127\.0\.0\.1|localhost|\[?::1\]?)(:|\/|$)/.test($addWorkerMassURL)"
+				>This is a loopback address — workers on other machines can't reach it.</p>
+			</div>
+			@addWorkerRuntimePicker(data.Runtimes)
+			@addWorkerWorkerPicker(nil, false)
+			@addWorkerBackendPicker(nil)
+			<div style="border-top:1px solid var(--mass-border)"></div>
+			<div>
+				<div class="text-xs font-semibold mb-1" style="color:var(--mass-text-muted)">Linux / macOS</div>
+				<div class="text-xs mb-1" style="color:var(--mass-text-faint)">1. Download the installer</div>
+				<div class="flex items-start gap-2 mb-2">
+					<pre
+						class="font-mono text-xs rounded-lg p-2 flex-1 overflow-x-auto"
+						style="background:var(--mass-bg-panel);border:1px solid var(--mass-border);color:var(--mass-text)"
+						data-text="'curl -fsSL &#34;' + $addWorkerMassURL.replace(/\/$/, '') + '/setup/worker-bin/' + $addWorkerRuntime + '?os=$(uname -s)&amp;arch=$(uname -m)' + ($addWorkerWorker === '' ? '' : '&amp;worker=' + $addWorkerWorker) + ($addWorkerBackend === '' ? '' : '&amp;backend=' + $addWorkerBackend) + '&#34; -o mass-worker-setup &amp;&amp; chmod +x mass-worker-setup'"
+					></pre>
+					<sl-icon-button
+						data-attr:name="$addWorkerCopied === 1 ? 'check-lg' : 'clipboard'"
+						data-attr:style="$addWorkerCopied === 1 ? 'color:var(--mass-success)' : ''"
+						label="Copy"
+						data-on:click="navigator.clipboard.writeText('curl -fsSL &#34;' + $addWorkerMassURL.replace(/\/$/, '') + '/setup/worker-bin/' + $addWorkerRuntime + '?os=$(uname -s)&amp;arch=$(uname -m)' + ($addWorkerWorker === '' ? '' : '&amp;worker=' + $addWorkerWorker) + ($addWorkerBackend === '' ? '' : '&amp;backend=' + $addWorkerBackend) + '&#34; -o mass-worker-setup &amp;&amp; chmod +x mass-worker-setup'); clearTimeout(window._massCopyReset); $addWorkerCopied = 1; window._massCopyReset = setTimeout(() => $addWorkerCopied = 0, 1500)"
+					></sl-icon-button>
+				</div>
+				<div class="text-xs mb-1" style="color:var(--mass-text-faint)">2. Run it</div>
+				<div class="flex items-start gap-2">
+					<pre
+						class="font-mono text-xs rounded-lg p-2 flex-1 overflow-x-auto"
+						style="background:var(--mass-bg-panel);border:1px solid var(--mass-border);color:var(--mass-text)"
+						data-text="'./mass-worker-setup --mass-url ' + $addWorkerMassURL.replace(/\/$/, '') + ($addWorkerToken === '' ? '' : ' --token ' + $addWorkerToken)"
+					></pre>
+					<sl-icon-button
+						data-attr:name="$addWorkerCopied === 2 ? 'check-lg' : 'clipboard'"
+						data-attr:style="$addWorkerCopied === 2 ? 'color:var(--mass-success)' : ''"
+						label="Copy"
+						data-on:click="navigator.clipboard.writeText('./mass-worker-setup --mass-url ' + $addWorkerMassURL.replace(/\/$/, '') + ($addWorkerToken === '' ? '' : ' --token ' + $addWorkerToken)); clearTimeout(window._massCopyReset); $addWorkerCopied = 2; window._massCopyReset = setTimeout(() => $addWorkerCopied = 0, 1500)"
+					></sl-icon-button>
+				</div>
+			</div>
+			<div>
+				<div class="text-xs font-semibold mb-1" style="color:var(--mass-text-muted)">Windows (PowerShell)</div>
+				<div class="text-xs mb-1" style="color:var(--mass-text-faint)">1. Download the installer</div>
+				<div class="flex items-start gap-2 mb-2">
+					<pre
+						class="font-mono text-xs rounded-lg p-2 flex-1 overflow-x-auto"
+						style="background:var(--mass-bg-panel);border:1px solid var(--mass-border);color:var(--mass-text)"
+						data-text="'irm ' + &#34;'&#34; + $addWorkerMassURL.replace(/\/$/, '') + '/setup/worker-bin/' + $addWorkerRuntime + '?os=windows&amp;arch=AMD64' + ($addWorkerWorker === '' ? '' : '&amp;worker=' + $addWorkerWorker) + ($addWorkerBackend === '' ? '' : '&amp;backend=' + $addWorkerBackend) + &#34;'&#34; + ' -OutFile mass-worker-setup.exe'"
+					></pre>
+					<sl-icon-button
+						data-attr:name="$addWorkerCopied === 3 ? 'check-lg' : 'clipboard'"
+						data-attr:style="$addWorkerCopied === 3 ? 'color:var(--mass-success)' : ''"
+						label="Copy"
+						data-on:click="navigator.clipboard.writeText('irm ' + &#34;'&#34; + $addWorkerMassURL.replace(/\/$/, '') + '/setup/worker-bin/' + $addWorkerRuntime + '?os=windows&amp;arch=AMD64' + ($addWorkerWorker === '' ? '' : '&amp;worker=' + $addWorkerWorker) + ($addWorkerBackend === '' ? '' : '&amp;backend=' + $addWorkerBackend) + &#34;'&#34; + ' -OutFile mass-worker-setup.exe'); clearTimeout(window._massCopyReset); $addWorkerCopied = 3; window._massCopyReset = setTimeout(() => $addWorkerCopied = 0, 1500)"
+					></sl-icon-button>
+				</div>
+				<div class="text-xs mb-1" style="color:var(--mass-text-faint)">2. Run it</div>
+				<div class="flex items-start gap-2">
+					<pre
+						class="font-mono text-xs rounded-lg p-2 flex-1 overflow-x-auto"
+						style="background:var(--mass-bg-panel);border:1px solid var(--mass-border);color:var(--mass-text)"
+						data-text="'.\\mass-worker-setup.exe --mass-url ' + $addWorkerMassURL.replace(/\/$/, '') + ($addWorkerToken === '' ? '' : ' --token ' + $addWorkerToken)"
+					></pre>
+					<sl-icon-button
+						data-attr:name="$addWorkerCopied === 4 ? 'check-lg' : 'clipboard'"
+						data-attr:style="$addWorkerCopied === 4 ? 'color:var(--mass-success)' : ''"
+						label="Copy"
+						data-on:click="navigator.clipboard.writeText('.\\mass-worker-setup.exe --mass-url ' + $addWorkerMassURL.replace(/\/$/, '') + ($addWorkerToken === '' ? '' : ' --token ' + $addWorkerToken)); clearTimeout(window._massCopyReset); $addWorkerCopied = 4; window._massCopyReset = setTimeout(() => $addWorkerCopied = 0, 1500)"
+					></sl-icon-button>
+				</div>
+			</div>
+		</div>
+		<div slot="footer" class="flex justify-end">
+			<sl-button size="small" data-on:click="$addWorkerOpen = false">Close</sl-button>
+		</div>
+	</sl-dialog>
+}
+
+// addWorkerRuntimePicker is the runtime <select> inside the Add-worker dialog,
+// wrapped in a stable-id container so it can be re-patched over SSE whenever the
+// installed-runtime set changes. The select renders only with >1 runtime (a
+// single runtime needs no choice); the container is always present so the SSE
+// patch has a target, but is hidden when it holds nothing — an empty flex item
+// still consumes a row-gap on both sides. $addWorkerRuntime carries the actual
+// selection — kept in sync server-side alongside these patches.
+templ addWorkerRuntimePicker(rs []RuntimeViewData) {
+	{{ show := len(rs) > 1 }}
+	<div
+		id="add-worker-runtime-picker"
+		if !show {
+			style="display:none"
+		}
+	>
+		if show {
+			<sl-select
+				size="small"
+				label="Runtime"
+				hoist
+				data-attr:value="$addWorkerRuntime"
+				data-on:sl-change="$addWorkerRuntime = evt.target.value; @get('/api/workers/add-dialog-options')"
+			>
+				for _, r := range rs {
+					<sl-option value={ r.RuntimeName }>{ displayName(r) }</sl-option>
+				}
+			</sl-select>
+		}
+	</div>
+}
+
+// addWorkerWorkerPicker is the worker <select> inside the Add-worker dialog,
+// wrapped in a stable-id container re-patched over SSE whenever the options
+// (re)load for the selected runtime. The "Worker" field never disappears: with
+// options a select renders (always binding $addWorkerWorker — the server pins it
+// to a package name, even for a lone package, so the command is deterministic —
+// and re-fetching options on change so the backend picker follows); with none, a
+// labeled empty-state line renders instead; on a registry-fetch failure a labeled
+// failure note renders. In both no-select cases the signals stay empty and the
+// copy-paste commands are left as-is (the script surfaces a clear server-side
+// no-worker error).
+templ addWorkerWorkerPicker(opts []WorkerOptionView, loadFailed bool) {
+	<div id="add-worker-worker-picker">
+		if loadFailed {
+			@labeledNote("Worker", "Couldn't load worker packages from the registry — the command will auto-select.")
+		} else if len(opts) > 0 {
+			<sl-select
+				size="small"
+				label="Worker"
+				hoist
+				data-attr:value="$addWorkerWorker"
+				data-on:sl-change="$addWorkerWorker = evt.target.value; @get('/api/workers/add-dialog-options')"
+			>
+				for _, o := range opts {
+					<sl-option value={ o.Name }>{ o.DisplayName }</sl-option>
+				}
+			</sl-select>
+		} else {
+			@labeledNote("Worker", "No workers for this runtime in the registry.")
+		}
+	</div>
+}
+
+// labeledNote renders a field label above a muted note, mirroring an
+// sl-select's label-over-control layout so a section keeps its place and
+// identity when there is nothing to list (zero options / registry failure).
+templ labeledNote(label, note string) {
+	<div>
+		<label class="mass-field-label">{ label }</label>
+		<p class="text-xs" style="color:var(--mass-text-muted)">{ note }</p>
+	</div>
+}
+
+// addWorkerBackendPicker is the backend <select> inside the Add-worker dialog.
+// It renders only when the selected worker package advertises more than one
+// backend (a choice worth making); otherwise the container stays empty and
+// hidden (an empty flex item still consumes a row-gap on both sides) and
+// $addWorkerBackend stays "" (Auto). "Auto" ('') is always the first option.
+templ addWorkerBackendPicker(backends []string) {
+	{{ show := len(backends) > 1 }}
+	<div
+		id="add-worker-backend-picker"
+		if !show {
+			style="display:none"
+		}
+	>
+		if show {
+			<sl-select
+				size="small"
+				label="Backend"
+				hoist
+				data-attr:value="$addWorkerBackend"
+				data-on:sl-change="$addWorkerBackend = evt.target.value"
+			>
+				<sl-option value="">Auto</sl-option>
+				for _, b := range backends {
+					<sl-option value={ b }>{ b }</sl-option>
+				}
+			</sl-select>
+		}
 	</div>
 }
 
@@ -464,7 +840,7 @@ templ runtimeListItems(rs []RuntimeViewData, active string) {
 								<sl-icon-button
 									name="trash3"
 									class="mass-sidebar-icon"
-									style="opacity:1;color:var(--sl-color-danger-400)"
+									style="opacity:1;color:var(--mass-danger)"
 									data-on:click={ fmt.Sprintf("$confirmUninstall='%s'; $confirmOpen=true", r.RuntimeName) }
 								></sl-icon-button>
 							</sl-tooltip>
@@ -486,7 +862,7 @@ templ runtimeAutoStartButton(kind string, autoStart bool) {
 				<sl-icon-button
 					name="lightning-fill"
 					class="mass-sidebar-icon"
-					style="opacity:1;color:var(--sl-color-warning-400)"
+					style="opacity:1;color:var(--mass-warning)"
 					data-on:click={ fmt.Sprintf("@post('/api/runtimes/%s/auto-start')", kind) }
 				></sl-icon-button>
 			} else {
@@ -506,7 +882,7 @@ templ runtimeRowActions(kind string, running bool) {
 			<sl-icon-button
 				name="stop-fill"
 				class="mass-sidebar-icon"
-				style="opacity:1;color:var(--sl-color-danger-400)"
+				style="opacity:1;color:var(--mass-danger)"
 				data-on:click={ fmt.Sprintf("@post('/api/runtimes/%s/stop')", kind) }
 			></sl-icon-button>
 		</sl-tooltip>
@@ -515,11 +891,274 @@ templ runtimeRowActions(kind string, running bool) {
 			<sl-icon-button
 				name="play-fill"
 				class="mass-sidebar-icon"
-				style="opacity:1;color:var(--sl-color-success-400)"
+				style="opacity:1;color:var(--mass-success)"
 				data-on:click={ fmt.Sprintf("@post('/api/runtimes/%s/start')", kind) }
 			></sl-icon-button>
 		</sl-tooltip>
 	}
+}
+
+templ registryLoading() {
+	<div class="flex items-center justify-center gap-2 py-6 text-sm text-neutral-500">
+		<sl-spinner></sl-spinner>
+		<span>Loading available runtimes…</span>
+	</div>
+}
+
+// registryAvailable renders the "Available" registry list into #registry-available.
+// filtered is true when a non-empty search query produced the (possibly empty)
+// result, so an empty list reads as "no match" rather than "empty registry".
+// The list pages a window at a time (next > 0 shows the widening row) and
+// scrolls internally once it outgrows its share of the viewport.
+templ registryAvailable(pkgs []RegistryPackageView, stale, filtered bool, errMsg string, next int) {
+	<div id="registry-available">
+		if stale {
+			<div class="flex items-center gap-2 mb-3 justify-end">
+				<sl-tag size="small" variant="warning" pill>cached</sl-tag>
+			</div>
+		}
+		if errMsg != "" {
+			<sl-alert variant="danger" open>
+				<sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+				{ errMsg }
+			</sl-alert>
+		} else if len(pkgs) == 0 {
+			if filtered {
+				<div class="text-xs text-neutral-500 py-4">No runtimes match your search.</div>
+			} else {
+				<div class="text-xs text-neutral-500 py-4">No runtimes available in the registry.</div>
+			}
+		} else {
+			<div class="space-y-2" style="max-height:60vh;overflow-y:auto">
+				for _, p := range pkgs {
+					@registryRow(p)
+				}
+			</div>
+			if next > 0 {
+				@showMoreRow(registryMoreClickExpr(next), "$registryInstalling !== ''")
+			}
+		}
+	</div>
+}
+
+templ registryRow(p RegistryPackageView) {
+	<div class="rounded-lg p-3 flex items-center gap-3" style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)">
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium truncate" style="color:var(--mass-text)">{ registryTitle(p) }</span>
+				if p.Version != "" {
+					<span class="text-neutral-500 text-xs">{ p.Version }</span>
+				}
+			</div>
+			if p.Description != "" {
+				<p class="text-xs text-neutral-400 mt-0.5">{ p.Description }</p>
+			}
+			if p.Installed {
+				<span class="text-xs" style="color:var(--mass-success)">Installed</span>
+			} else if !p.Installable {
+				<span class="text-xs text-neutral-500">No artifact for this platform</span>
+			}
+			if p.IncompatibleWorkers > 0 {
+				<div class="flex items-center gap-1 mt-1">
+					<sl-icon name="exclamation-triangle" style="color:var(--sl-color-warning-600);font-size:0.8rem"></sl-icon>
+					<span class="text-xs" style="color:var(--sl-color-warning-600)">{ incompatibleWorkersLabel(p.IncompatibleWorkers) }</span>
+				</div>
+			}
+		</div>
+		if p.Installed {
+			<sl-button
+				size="small"
+				variant="danger"
+				data-attr:disabled="$registryInstalling !== ''"
+				data-on:click={ registryRemoveClickExpr(p) }
+			>
+				<sl-icon slot="prefix" name="trash"></sl-icon>
+				Remove
+			</sl-button>
+		} else {
+			<sl-button
+				size="small"
+				variant="primary"
+				data-attr:disabled={ registryInstallDisabledExpr(p) }
+				data-attr:loading={ registryInstallLoadingExpr(p) }
+				data-on:click={ registryInstallClickExpr(p) }
+			>
+				<sl-icon slot="prefix" name="download"></sl-icon>
+				Install
+			</sl-button>
+		}
+	</div>
+}
+
+// themeMenu is the header palette dropdown's menu: one checkbox item per
+// registered theme plus the opener for the browse/manage dialog. Patched by id
+// after an install or removal so the picker follows without a reload.
+//
+// The dialog opener rides the same sl-select handler under a sentinel value —
+// theme ids are lowercase-alphanumeric (uikit validates), so it can't collide
+// with one.
+templ themeMenu() {
+	<sl-menu
+		id="theme-menu"
+		data-on:sl-select="if (evt.detail.item.value === '__browse') { $browseThemesOpen = true } else { $theme = evt.detail.item.value; @post('/internal/settings/theme') }"
+	>
+		for _, ti := range uikit.Themes() {
+			<sl-menu-item
+				type="checkbox"
+				value={ string(ti.Name) }
+				data-attr:checked={ "$theme === '" + string(ti.Name) + "'" }
+			>{ ti.Label }</sl-menu-item>
+		}
+		<sl-divider></sl-divider>
+		<sl-menu-item value="__browse">
+			<sl-icon slot="prefix" name="cloud-download"></sl-icon>
+			Browse themes…
+		</sl-menu-item>
+	</sl-menu>
+}
+
+templ themeLoading() {
+	<div class="flex items-center justify-center gap-2 py-6 text-sm text-neutral-500">
+		<sl-spinner></sl-spinner>
+		<span>Loading themes…</span>
+	</div>
+}
+
+// themeManager renders the themes dialog body: the installed themes (always —
+// they come from the live uikit registry, so this works offline) followed by the
+// registry's installable ones, or a labeled note in their place when the
+// registry is unreachable or nothing matches.
+//
+// Each section is its own grid row that grows with its content and scrolls once
+// it hits its share of the panel (see themeManagerStyle), and pages through its
+// list a window at a time via its own "Show More" row.
+templ themeManager(view ThemeManagerView) {
+	<div id="theme-manager" style={ themeManagerStyle }>
+		if len(view.Installed) == 0 {
+			@labeledNote("Installed", "No installed themes match your search.")
+		} else {
+			<div style={ themeSectionStyle }>
+				<label class="mass-field-label">Installed</label>
+				<div class="space-y-2" style={ themeRowsStyle }>
+					for _, t := range view.Installed {
+						@themeInstalledRow(t)
+					}
+				</div>
+				if view.InstalledNext > 0 {
+					@showMoreRow(themeMoreClickExpr("themeInstalledLimit", view.InstalledNext), themeBusyDisabledExpr())
+				}
+			</div>
+		}
+		if view.ErrMsg != "" {
+			@labeledNote("Available", view.ErrMsg)
+		} else if len(view.Available) == 0 {
+			if view.Filtered {
+				@labeledNote("Available", "No themes match your search.")
+			} else {
+				@labeledNote("Available", "Every theme in the registry is installed.")
+			}
+		} else {
+			<div style={ themeSectionStyle }>
+				<div class="flex items-center gap-2">
+					<label class="mass-field-label">Available</label>
+					if view.Stale {
+						<sl-tag size="small" variant="warning" pill>cached</sl-tag>
+					}
+				</div>
+				<div class="space-y-2" style={ themeRowsStyle }>
+					for _, t := range view.Available {
+						@themeAvailableRow(t)
+					}
+				</div>
+				if view.AvailableNext > 0 {
+					@showMoreRow(themeMoreClickExpr("themeAvailableLimit", view.AvailableNext), themeBusyDisabledExpr())
+				}
+			</div>
+		}
+	</div>
+}
+
+// showMoreRow is a list's window-widening row: centered and link-styled,
+// trailing the rows outside their scroll box so it stays reachable. disabledExpr
+// guards it while that list's install/remove is in flight.
+templ showMoreRow(clickExpr, disabledExpr string) {
+	<div class="text-center">
+		<sl-button
+			size="small"
+			variant="text"
+			data-attr:disabled={ disabledExpr }
+			data-on:click={ clickExpr }
+		>
+			<sl-icon slot="prefix" name="chevron-down"></sl-icon>
+			Show More
+		</sl-button>
+	</div>
+}
+
+// themeInstalledRow is both status and control: the row itself activates the
+// theme (like picking it in the palette — the active one wears a check), and
+// the trailing icon button removes pluggable themes.
+templ themeInstalledRow(t InstalledThemeView) {
+	<div
+		class="mass-theme-row rounded-lg p-3 flex items-center gap-3"
+		style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)"
+		data-on:click={ themeActivateClickExpr(t.ID) }
+	>
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium truncate" style="color:var(--mass-text)">{ t.Label }</span>
+				<sl-tag size="small" variant="neutral" pill>{ t.Base }</sl-tag>
+				<sl-icon
+					name="check-lg"
+					data-show={ themeActiveShowExpr(t.ID) }
+					style="color:var(--sl-color-primary-600)"
+				></sl-icon>
+			</div>
+		</div>
+		if t.Builtin {
+			<span class="text-xs text-neutral-500">built-in</span>
+		} else {
+			<sl-tooltip content="Remove">
+				<sl-button
+					size="small"
+					variant="danger"
+					outline
+					circle
+					data-attr:disabled={ themeBusyDisabledExpr() }
+					data-attr:loading={ themeBusyLoadingExpr(t.ID) }
+					data-on:click={ themeRemoveClickExpr(t.ID) }
+				>
+					<sl-icon name="trash" label="Remove"></sl-icon>
+				</sl-button>
+			</sl-tooltip>
+		}
+	</div>
+}
+
+templ themeAvailableRow(t AvailableThemeView) {
+	<div class="rounded-lg p-3 flex items-center gap-3" style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)">
+		<div class="flex-1 min-w-0">
+			<div class="flex items-center gap-2">
+				<span class="text-sm font-medium truncate" style="color:var(--mass-text)">{ t.Label }</span>
+				if t.Version != "" {
+					<span class="text-neutral-500 text-xs">{ t.Version }</span>
+				}
+			</div>
+			if t.Description != "" {
+				<p class="text-xs text-neutral-400 mt-0.5">{ t.Description }</p>
+			}
+		</div>
+		<sl-button
+			size="small"
+			variant="primary"
+			data-attr:disabled={ themeBusyDisabledExpr() }
+			data-attr:loading={ themeBusyLoadingExpr(t.Name) }
+			data-on:click={ themeInstallClickExpr(t.Name) }
+		>
+			<sl-icon slot="prefix" name="download"></sl-icon>
+			Install
+		</sl-button>
+	</div>
 }
 
 templ settingsPanel(data DashboardData) {
@@ -547,7 +1186,7 @@ templ settingsPanel(data DashboardData) {
 						placeholder="Platform default"
 						autocomplete="off"
 					></sl-input>
-					<sl-button size="small" variant="default" onclick="window.__massBrowseDir('dataDir')">
+					<sl-button size="small" variant="default" onclick="window.__massBrowse('dataDir', {dirsOnly:true})">
 						<sl-icon slot="prefix" name="folder2-open"></sl-icon>
 						Browse
 					</sl-button>
@@ -574,6 +1213,17 @@ templ settingsPanel(data DashboardData) {
 			></sl-input>
 
 			<sl-input
+				label="Load Attempts"
+				size="small"
+				type="number"
+				min="1"
+				data-bind="loadAttempts"
+				placeholder="1"
+				autocomplete="off"
+				help-text="Total times to try placing a job before failing (1 = no retry). Raise this when the fleet sees transient load failures and you want MASS to try another worker before surfacing the error."
+			></sl-input>
+
+			<sl-input
 				label="Registry URL"
 				size="small"
 				data-bind="registryURL"
@@ -585,6 +1235,7 @@ templ settingsPanel(data DashboardData) {
 			<sl-select
 				label="Log Level"
 				size="small"
+				hoist
 				data-attr:value="$logLevel"
 				data-on:sl-change="$logLevel = evt.target.value"
 				help-text="MASS log verbosity. Applied immediately."
@@ -642,7 +1293,7 @@ templ settingsPanel(data DashboardData) {
 					placeholder="/path/to/server.pem"
 					autocomplete="off"
 				></sl-input>
-				<sl-button size="small" variant="default" onclick="window.__massBrowseFile('tlsCertFile','.pem')">
+				<sl-button size="small" variant="default" onclick="window.__massBrowse('tlsCertFile','.pem')">
 					<sl-icon slot="prefix" name="folder2-open"></sl-icon>
 					Browse
 				</sl-button>
@@ -664,20 +1315,29 @@ templ settingsPanel(data DashboardData) {
 			</div>
 		</div>
 
-		if data.ConfigDir != "" {
-			<div class="text-xs space-y-1" style="color:var(--mass-text-faint)">
-				<div>Config: <span class="font-mono" style="color:var(--mass-text-muted)">{ data.ConfigDir }</span></div>
-				if data.LogsDir != "" {
-					<div>Logs: <span class="font-mono" style="color:var(--mass-text-muted)">{ data.LogsDir }</span></div>
-				}
-				if data.DataDir != "" {
-					<div>Data: <span class="font-mono" style="color:var(--mass-text-muted)">{ data.DataDir }</span></div>
-				}
+		<div class="rounded-lg p-5 space-y-4" style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)">
+			<h3 class="text-sm font-semibold uppercase tracking-wide" style="color:var(--mass-text)">About</h3>
+			<div class="space-y-2">
+				@aboutRow("Version", data.Version)
+				@aboutRow("Data dir", data.EffectiveDataDir)
+				@aboutRow("Logs", data.LogsDir)
+				@aboutRow("Config", data.ConfigFile)
 			</div>
-		}
-
-		@templ.Raw(settingsBrowseScript)
+		</div>
 	</div>
+}
+
+// aboutRow is one label/value line of the Settings panel's About section,
+// following the label-column row rhythm used by the other detail panels. The
+// value is plain selectable text; an empty one drops the row rather than
+// rendering a blank.
+templ aboutRow(label, value string) {
+	if value != "" {
+		<div class="flex items-baseline gap-3">
+			<span class="text-xs flex-shrink-0 whitespace-nowrap" style="color:var(--mass-text-faint);min-width:5.5rem">{ label }</span>
+			<span class="text-xs font-mono break-all min-w-0" style="color:var(--mass-text-muted)">{ value }</span>
+		</div>
+	}
 }
 
 // displayName picks the human label, falling back to the runtime kind.
@@ -695,3 +1355,4 @@ templ tabLoadingSpinner() {
 		<sl-spinner style="font-size:1.5rem;--track-width:3px"></sl-spinner>
 	</div>
 }
+

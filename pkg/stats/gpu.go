@@ -2,7 +2,7 @@ package stats
 
 // GPUProviderInterface enumerates GPUs and reports live VRAM/utilization.
 // Implementations live in the runtime that owns the device (e.g. NVML in
-// mass-worker-llama). Devices come back as Type=DeviceTypeGPU with IDs
+// mass-worker-llama-cpp). Devices come back as Type=DeviceTypeGPU with IDs
 // from [GPUDeviceID]. Composes with [Hardware] to form a full
 // [HardwareInterface] (host CPU + every detected GPU).
 type GPUProviderInterface interface {

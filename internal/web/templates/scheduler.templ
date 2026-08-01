@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/chinese-room-solutions/mass-sdk/format"
 )
 
 
@@ -22,10 +24,10 @@ type SchedulerInstanceView struct {
 	Fingerprint string // hash component, shown as a small monospace subtitle
 	WorkerID    string
 	WorkerName  string
-	RuntimeName string // e.g. "llama-cpp" — shown as a small pill
-	DeviceID    string // first device, for inline display ("gpu:0")
-	Source      string // caller identity, e.g. "app: playground", "direct"
-	Mode        string // "dynamic" — gateway-driven loads
+	RuntimeName string   // e.g. "llama-cpp" — shown as a small pill
+	DeviceIDs   []string // every device this model occupies; >1 means tensor split
+	Source      string   // caller identity, e.g. "app: playground", "direct"
+	Mode        string   // "dynamic" — gateway-driven loads
 	PoolSize    int
 	Active      int
 	Status      string // "Active" / "Idle" / "Loading"
@@ -51,9 +53,10 @@ templ SchedulerInstanceList(instances []SchedulerInstanceView) {
 templ schedulerInstanceRow(inst SchedulerInstanceView) {
 	<div
 		class="scheduler-row bg-neutral-800/60 rounded-lg border border-neutral-700/50 px-4 py-3 cursor-pointer hover:border-neutral-600/80 transition-colors"
-		data-attr:class={ fmt.Sprintf("$selectedSchedulerKey==='%s' ? 'scheduler-row bg-neutral-800/60 rounded-lg border border-blue-500/60 px-4 py-3 cursor-pointer' : 'scheduler-row bg-neutral-800/60 rounded-lg border border-neutral-700/50 px-4 py-3 cursor-pointer hover:border-neutral-600/80 transition-colors'", jsStringEscape(inst.Key)) }
+		data-attr:class={ fmt.Sprintf("$selectedSchedulerKey==='%s' ? 'scheduler-row bg-neutral-800/60 rounded-lg border border-blue-500/60 px-4 py-3 cursor-pointer' : 'scheduler-row bg-neutral-800/60 rounded-lg border border-neutral-700/50 px-4 py-3 cursor-pointer hover:border-neutral-600/80 transition-colors'", format.JSEscape(inst.Key)) }
 		data-filter-text={ strings.ToLower(inst.Filename + " " + inst.Fingerprint + " " + inst.WorkerName + " " + inst.Source + " " + inst.Mode + " " + inst.Status) }
-		data-on:click={ fmt.Sprintf("$selectedSchedulerKey='%s'", jsStringEscape(inst.Key)) }
+		data-scheduler-key={ inst.Key }
+		data-on:click={ fmt.Sprintf("$selectedSchedulerKey='%s'", format.JSEscape(inst.Key)) }
 	>
 		<!-- Top row: status dot + filename + evict -->
 		<div class="flex items-center gap-3">
@@ -67,7 +70,7 @@ templ schedulerInstanceRow(inst SchedulerInstanceView) {
 					<sl-tooltip content="Evict model">
 						<sl-icon-button
 							name="x-circle"
-							style="font-size:0.95rem;color:var(--sl-color-danger-400)"
+							style="font-size:0.95rem;color:var(--mass-danger)"
 							data-on:click={ fmt.Sprintf("@post('/api/scheduler/evict?worker=%s&model=%s')", url.QueryEscape(inst.WorkerID), url.QueryEscape(inst.ModelID)) }
 						></sl-icon-button>
 					</sl-tooltip>
@@ -83,14 +86,14 @@ templ schedulerInstanceRow(inst SchedulerInstanceView) {
 				<span
 					class="text-blue-400 hover:text-blue-300 cursor-pointer"
 					title={ "Open in Workers tab: " + inst.WorkerName }
-					data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToWorker('%s')", jsStringEscape(inst.WorkerID)) }
+					data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToWorker('%s')", format.JSEscape(inst.WorkerID)) }
 				>
 					<sl-icon name="pc-display" style="font-size:0.75rem;vertical-align:-1px;margin-right:2px"></sl-icon>
 					{ inst.WorkerName }
 				</span>
 			}
-			if inst.DeviceID != "" {
-				<span class="text-neutral-500" title="Device">{ inst.DeviceID }</span>
+			if len(inst.DeviceIDs) > 0 {
+				<span class="text-neutral-500" title={ deviceListTitle(inst.DeviceIDs) }>{ strings.Join(inst.DeviceIDs, ", ") }</span>
 			}
 			if inst.Active > 0 {
 				<span>{ fmt.Sprintf("%d active req%s", inst.Active, pluralS(inst.Active)) }</span>
@@ -120,7 +123,7 @@ type SchedulerInstancePropsView struct {
 	WorkerID    string
 	WorkerName  string
 	RuntimeName string
-	DeviceID    string
+	DeviceIDs   []string
 	Source      string
 	Mode        string
 	Status      string
@@ -157,15 +160,15 @@ templ SchedulerInstancePropsPanel(info SchedulerInstancePropsView) {
 					<span
 						class="text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono"
 						title={ "Open in Workers tab: " + info.WorkerName }
-						data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToWorker('%s')", jsStringEscape(info.WorkerID)) }
+						data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToWorker('%s')", format.JSEscape(info.WorkerID)) }
 					>
 						<sl-icon name="pc-display" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
 						{ info.WorkerName }
 					</span>
 				</div>
 			}
-			if info.DeviceID != "" {
-				@schedPropRow("Device", info.DeviceID)
+			if len(info.DeviceIDs) > 0 {
+				@schedPropRow(deviceLabel(info.DeviceIDs), strings.Join(info.DeviceIDs, ", "))
 			}
 			if info.Active > 0 {
 				@schedPropRow("Active", fmt.Sprintf("%d", info.Active))
@@ -178,7 +181,7 @@ templ SchedulerInstancePropsPanel(info SchedulerInstancePropsView) {
 				<span
 					class="text-xs text-blue-400 hover:text-blue-300 cursor-pointer font-mono break-all"
 					title={ "Open in Models tab: " + info.Filename }
-					data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToModel('%s')", jsStringEscape(info.ModelID)) }
+					data-on:click={ fmt.Sprintf("evt.stopPropagation(); window.__massGoToModel('%s')", format.JSEscape(info.ModelID)) }
 				>
 					<sl-icon name="box" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
 					{ info.Filename }
@@ -252,8 +255,7 @@ func runtimeNameBadge(kind string) string {
 	}
 }
 
-// sourceBadge highlights gateway-attributed callers ("app: <name>") in
-// teal, matching the pre-refactor "module: <name>" attribution color.
+// sourceBadge highlights gateway-attributed callers ("app: <name>") in teal.
 func sourceBadge(source string) string {
 	if strings.HasPrefix(source, "app") {
 		return "bg-teal-900/60 text-teal-300"
@@ -277,6 +279,22 @@ func instanceStatusBadge(status string) string {
 	default:
 		return "mass-badge"
 	}
+}
+
+// deviceLabel returns "Device" or "Devices" depending on placement-set size.
+func deviceLabel(ids []string) string {
+	if len(ids) > 1 {
+		return "Devices"
+	}
+	return "Device"
+}
+
+// deviceListTitle is the tooltip for the inline device chip on a scheduler row.
+func deviceListTitle(ids []string) string {
+	if len(ids) > 1 {
+		return fmt.Sprintf("Tensor split across %d devices", len(ids))
+	}
+	return "Device"
 }
 
 // ShortKey returns the last path segment of a model ID for compact display.

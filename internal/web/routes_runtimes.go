@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,19 +25,15 @@ type runtimeView struct {
 
 func (h *Handler) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
 	_ = r
-	if h.runtimes == nil {
-		h.writeJSON(w, http.StatusOK, []runtimeView{})
-		return
-	}
-	mfs := h.runtimes.List()
-	out := make([]runtimeView, len(mfs))
-	for i, mf := range mfs {
+	infos := h.listRuntimeInfos()
+	out := make([]runtimeView, len(infos))
+	for i, ri := range infos {
 		out[i] = runtimeView{
-			RuntimeName: mf.RuntimeName,
-			Version:     mf.Version,
-			DisplayName: mf.DisplayName,
-			Description: mf.Description,
-			Running:     h.runtimes.IsRunning(mf.RuntimeName),
+			RuntimeName: ri.RuntimeName,
+			Version:     ri.Version,
+			DisplayName: ri.DisplayName,
+			Description: ri.Description,
+			Running:     ri.Running,
 		}
 	}
 	h.writeJSON(w, http.StatusOK, out)
@@ -46,30 +43,27 @@ func (h *Handler) handleListRuntimes(w http.ResponseWriter, r *http.Request) {
 // from the request, installs the .mass package, and on success patches the
 // runtime list + closes the dialog by clearing signals. Errors render
 // inline into #install-error so the user stays in the dialog.
-//
-// Backward-compat: when the request body looks like JSON ({...}) or a JSON
-// content type with package_path, it falls through to the old shape so
-// scripts/tests can still drive it.
 func (h *Handler) handleInstallRuntime(w http.ResponseWriter, r *http.Request) {
 	if h.runtimes == nil {
-		patchInstallError(w, r, "Runtimes manager not available")
+		h.patchInstallError(w, r, "Runtimes manager not available")
 		return
 	}
 
 	var signals struct {
-		PackagePath string `json:"packagePath"`
+		PackagePath      string `json:"packagePath"`
+		AddWorkerRuntime string `json:"addWorkerRuntime"`
 	}
 	if err := datastar.ReadSignals(r, &signals); err != nil {
-		patchInstallError(w, r, "Invalid request: "+err.Error())
+		h.patchInstallError(w, r, "Invalid request: "+err.Error())
 		return
 	}
 	pkgPath := strings.TrimSpace(signals.PackagePath)
 	if pkgPath == "" {
-		patchInstallError(w, r, "Package path is required")
+		h.patchInstallError(w, r, "Package path is required")
 		return
 	}
 
-	if _, err := h.runtimes.InstallFromPath(pkgPath); err != nil {
+	if _, err := h.installRuntime(pkgPath, actorFromRequest(r)); err != nil {
 		msg := err.Error()
 		switch {
 		case errors.Is(err, runtimes.ErrRuntimeAlreadyInstalled):
@@ -78,48 +72,242 @@ func (h *Handler) handleInstallRuntime(w http.ResponseWriter, r *http.Request) {
 			msg = "Package is missing runtime.yml."
 		case errors.Is(err, runtimes.ErrBinaryMissing):
 			msg = "Package is missing the gateway binary."
-		default:
-			h.logger.Warn().Err(err).Msg("installing runtime")
 		}
-		patchInstallError(w, r, msg)
+		h.patchInstallError(w, r, msg)
 		return
 	}
 
 	sse := datastar.NewSSE(w, r)
-	// Refresh sidebar list.
-	if err := sse.PatchElements(
-		templates.RenderRuntimeList(h.runtimeViews(), ""),
-		datastar.WithSelector("#runtime-list"),
-		datastar.WithMode(datastar.ElementPatchModeOuter),
-	); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch runtime-list")
+	views := h.runtimeViews()
+	// Refresh sidebar list + welcome placard. Both patched by element id
+	// (the rendered HTML carries id="runtime-list" / "runtime-welcome-content")
+	// — the same id-based path the row Start/Stop patches use. Selector-scoped
+	// patches are avoided on purpose; they don't apply on the pinned frontend.
+	if err := sse.PatchElements(templates.RenderRuntimeList(views, "")); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-list")
 	}
+	if err := sse.PatchElements(templates.RenderWelcomeState(len(views) == 0)); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-welcome")
+	}
+	h.patchAddWorkerPicker(sse, views, signals.AddWorkerRuntime)
 	// Clear error + close dialog + reset path.
 	if err := sse.PatchElements(`<div id="install-error"></div>`); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE clear install-error")
+		h.logger.Debug().Err(err).Msg("sse clear install-error")
 	}
 	if b, err := json.Marshal(map[string]any{
-		"installRuntimeOpen": false,
-		"installing":         false,
-		"packagePath":        "",
+		"installLocalOpen": false,
+		"installing":       false,
+		"packagePath":      "",
 	}); err == nil {
 		if err := sse.PatchSignals(b); err != nil {
-			h.logger.Debug().Err(err).Msg("SSE patch signals after install")
+			h.logger.Debug().Err(err).Msg("sse patch signals after install")
 		}
+	}
+}
+
+// patchAddWorkerPicker re-renders the Add-worker dialog's runtime picker to
+// match the current runtime set, updates $hasRuntimes (which gates the Workers
+// tab's "Add worker" button), and corrects $addWorkerRuntime when the client's
+// selection is empty or names a runtime that's no longer installed. A valid
+// existing selection is left untouched. Called by every handler that changes
+// the installed-runtime set. current is the client's $addWorkerRuntime signal,
+// read before the SSE generator was created.
+func (h *Handler) patchAddWorkerPicker(sse *datastar.ServerSentEventGenerator, views []templates.RuntimeViewData, current string) {
+	if err := sse.PatchElements(templates.RenderAddWorkerRuntimePicker(views)); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch add-worker-runtime-picker")
+	}
+	signals := map[string]any{"hasRuntimes": len(views) > 0}
+	if corrected := templates.CorrectAddWorkerRuntime(views, current); corrected != current {
+		signals["addWorkerRuntime"] = corrected
+	}
+	if b, err := json.Marshal(signals); err == nil {
+		if err := sse.PatchSignals(b); err != nil {
+			h.logger.Debug().Err(err).Msg("sse patch add-worker signals")
+		}
+	}
+}
+
+// registrySignals is the runtime registry dialog's client state: the search
+// filter plus the list's current window.
+type registrySignals struct {
+	Query string `json:"registryQuery"`
+	Limit int    `json:"registryLimit"`
+}
+
+// withDefaults returns the signals with the window defaulted to one page.
+func (s registrySignals) withDefaults() registrySignals {
+	if s.Limit <= 0 {
+		s.Limit = templates.RegistryPageSize
+	}
+	return s
+}
+
+// readRegistrySignals reads the dialog's signals. Must be called before the
+// SSE generator is created (NewSSE consumes the request body).
+func (h *Handler) readRegistrySignals(r *http.Request) registrySignals {
+	var sig registrySignals
+	if err := datastar.ReadSignals(r, &sig); err != nil {
+		h.logger.Debug().Err(err).Msg("reading registry dialog signals")
+	}
+	return sig.withDefaults()
+}
+
+// patchRegistryAvailable fetches the registry (cache-tolerant) and re-renders
+// the dialog's available list at the current window, or an inline error alert
+// when the registry is unreachable.
+func (h *Handler) patchRegistryAvailable(ctx context.Context, sse *datastar.ServerSentEventGenerator, sig registrySignals) {
+	filtered := strings.TrimSpace(sig.Query) != ""
+	res, err := h.searchPackages(ctx, string(registryRuntimeKind), sig.Query, "")
+	if err != nil {
+		if perr := sse.PatchElements(templates.RenderRegistryAvailable(nil, false, filtered, "Registry unavailable: "+err.Error(), 0)); perr != nil {
+			h.logger.Debug().Err(perr).Msg("sse patch registry-available error")
+		}
+		return
+	}
+	views, next := windowRows(h.registryPackageViews(res.Packages), sig.Limit, templates.RegistryPageSize)
+	if perr := sse.PatchElements(templates.RenderRegistryAvailable(views, res.Stale, filtered, "", next)); perr != nil {
+		h.logger.Debug().Err(perr).Msg("sse patch registry-available")
+	}
+}
+
+// handleRegistryAvailable streams the registry's available-runtimes list into
+// #registry-available. It fetches the index (respecting request cancellation),
+// keeps only runtime packages, marks those already installed, and renders the
+// current window — or an inline error alert when the registry is unreachable.
+func (h *Handler) handleRegistryAvailable(w http.ResponseWriter, r *http.Request) {
+	sig := h.readRegistrySignals(r)
+	h.patchRegistryAvailable(r.Context(), datastar.NewSSE(w, r), sig)
+}
+
+// registryRuntimeKind is the package kind the runtimes tab lists.
+const registryRuntimeKind = "runtime"
+
+// registryPackageViews maps neutral registry package views onto the template
+// shape, folding each package's versions into a single "newest listed" version
+// and marking whether it's already installed. Only runtime packages appear on
+// the runtimes tab.
+func (h *Handler) registryPackageViews(pkgs []PackageView) []templates.RegistryPackageView {
+	installedVersion := make(map[string]string)
+	installed := make(map[string]bool)
+	for _, ri := range h.listRuntimeInfos() {
+		installed[ri.RuntimeName] = true
+		installedVersion[ri.RuntimeName] = ri.Version
+	}
+	fleet := h.fleetCompat()
+	out := make([]templates.RegistryPackageView, 0, len(pkgs))
+	for _, p := range pkgs {
+		if p.Kind != registryRuntimeKind {
+			continue
+		}
+		version, installable := "", false
+		if len(p.Versions) > 0 {
+			version = p.Versions[0].Version
+			for _, v := range p.Versions {
+				if v.HasArtifact {
+					installable = true
+					break
+				}
+			}
+		}
+		// Pre-upgrade fleet flag: only for an installed runtime whose newest
+		// listed version is strictly newer than what's on disk. Count the
+		// connected workers whose compatible range excludes that new version —
+		// the ones the upgrade would strand at Register.
+		incompatible := 0
+		if installed[p.RuntimeName] && version != "" && isNewerVersion(version, installedVersion[p.RuntimeName]) {
+			if n, err := countIncompatibleWorkers(fleet, p.RuntimeName, version); err == nil {
+				incompatible = n
+			}
+		}
+		out = append(out, templates.RegistryPackageView{
+			Name:                p.Name,
+			DisplayName:         p.DisplayName,
+			Description:         p.Description,
+			Version:             version,
+			RuntimeName:         p.RuntimeName,
+			Installable:         installable,
+			Installed:           installed[p.RuntimeName],
+			IncompatibleWorkers: incompatible,
+		})
+	}
+	return out
+}
+
+// handleRegistryInstall installs a runtime from the registry by package name
+// (newest resolvable version), then refreshes the sidebar list, the welcome
+// placard, and the available list so the row flips to "Installed".
+func (h *Handler) handleRegistryInstall(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	// Read the dialog signals before creating the SSE generator so the
+	// re-patched list preserves the active filter and window — NewSSE
+	// consumes the body, and it can only be read once.
+	var signals struct {
+		registrySignals
+		AddWorkerRuntime string `json:"addWorkerRuntime"`
+	}
+	if err := datastar.ReadSignals(r, &signals); err != nil {
+		h.logger.Debug().Err(err).Msg("reading registry install signals")
+	}
+	sig := signals.withDefaults()
+	sse := datastar.NewSSE(w, r)
+	if _, err := h.installRuntimeFromRegistry(r.Context(), name, "", actorFromRequest(r)); err != nil {
+		msg := err.Error()
+		if errors.Is(err, runtimes.ErrRuntimeAlreadyInstalled) {
+			msg = "This runtime is already installed."
+		}
+		if perr := sse.PatchElements(fmt.Sprintf(
+			`<sl-alert variant="danger" open closable id="registry-install-alert">%s</sl-alert>`,
+			escapeHTML(msg))); perr != nil {
+			h.logger.Debug().Err(perr).Msg("sse patch registry install error")
+		}
+		// Clear the per-row loading signal so the failed row stops spinning and
+		// every Install button re-enables — without this a failure disables them
+		// all forever.
+		h.clearRegistryInstalling(sse)
+		return
+	}
+	views := h.runtimeViews()
+	if err := sse.PatchElements(templates.RenderRuntimeList(views, "")); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-list after registry install")
+	}
+	if err := sse.PatchElements(templates.RenderWelcomeState(len(views) == 0)); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-welcome after registry install")
+	}
+	h.patchAddWorkerPicker(sse, views, signals.AddWorkerRuntime)
+	// Re-fetch the registry list so the just-installed row flips to "Installed".
+	// A fetch failure inside is non-fatal — the install already succeeded.
+	h.patchRegistryAvailable(r.Context(), sse, sig)
+	// Clear the per-row loading signal so the button stops spinning and the
+	// Install buttons re-enable. The re-patched list above already flipped the
+	// installed row to "Installed".
+	h.clearRegistryInstalling(sse)
+}
+
+// clearRegistryInstalling patches $registryInstalling back to "" over the SSE
+// stream, ending the per-row install spinner and re-enabling every Install
+// button. Called on both the success and error paths of a registry install.
+func (h *Handler) clearRegistryInstalling(sse *datastar.ServerSentEventGenerator) {
+	b, err := json.Marshal(map[string]any{"registryInstalling": ""})
+	if err != nil {
+		return
+	}
+	if err := sse.PatchSignals(b); err != nil {
+		h.logger.Debug().Err(err).Msg("sse clear registryInstalling")
 	}
 }
 
 // patchInstallError writes the install dialog's #install-error region with a
 // red alert and re-enables the Install button by clearing $installing.
-func patchInstallError(w http.ResponseWriter, r *http.Request, msg string) {
+func (h *Handler) patchInstallError(w http.ResponseWriter, r *http.Request, msg string) {
 	sse := datastar.NewSSE(w, r)
 	html := fmt.Sprintf(`<div id="install-error"><sl-alert variant="danger" open>%s</sl-alert></div>`, escapeHTML(msg))
 	if err := sse.PatchElements(html); err != nil {
-		// Best-effort: client will retry; nothing we can do here.
-		_ = err
+		h.logger.Debug().Err(err).Msg("sse patch install error")
 	}
 	if b, jerr := json.Marshal(map[string]any{"installing": false}); jerr == nil {
-		_ = sse.PatchSignals(b)
+		if err := sse.PatchSignals(b); err != nil {
+			h.logger.Debug().Err(err).Msg("sse patch signals after install error")
+		}
 	}
 }
 
@@ -133,23 +321,43 @@ func (h *Handler) handleUninstallRuntime(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	kind := r.PathValue("kind")
-	if err := h.runtimes.Uninstall(kind); err != nil {
-		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("uninstalling runtime")
-		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
+	// Read the signals before creating the SSE generator — NewSSE consumes
+	// the request body, so a read after it comes back empty. The registry
+	// dialog's signals ride along so a Remove clicked inside it re-renders
+	// the list at the same filter and window.
+	var signals struct {
+		registrySignals
+		AddWorkerRuntime string `json:"addWorkerRuntime"`
+	}
+	if err := datastar.ReadSignals(r, &signals); err != nil {
+		h.logger.Debug().Err(err).Msg("reading uninstall signals")
+	}
+	sig := signals.withDefaults()
+	if err := h.uninstallRuntime(kind, actorFromRequest(r)); err != nil {
+		h.writeJSONErrorMsg(w, http.StatusInternalServerError, "uninstall failed")
 		return
 	}
 	// Refresh the sidebar list so the row vanishes; clear $activeRuntime
 	// so the right pane returns to the welcome state.
 	sse := datastar.NewSSE(w, r)
-	if err := sse.PatchElements(
-		templates.RenderRuntimeList(h.runtimeViews(), ""),
-		datastar.WithSelector("#runtime-list"),
-		datastar.WithMode(datastar.ElementPatchModeOuter),
-	); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch runtime-list after uninstall")
+	views := h.runtimeViews()
+	// Patched by element id (see handleInstallRuntime). Re-rendering the
+	// welcome state also flips the placard from "Select a runtime" back to
+	// "No runtimes installed" when the last runtime is removed.
+	if err := sse.PatchElements(templates.RenderRuntimeList(views, "")); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-list after uninstall")
 	}
+	if err := sse.PatchElements(templates.RenderWelcomeState(len(views) == 0)); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch runtime-welcome after uninstall")
+	}
+	h.patchAddWorkerPicker(sse, views, signals.AddWorkerRuntime)
+	// Refresh the registry dialog list so a Remove clicked there flips the
+	// row back to Install. Cheap no-op visually when the dialog is closed.
+	h.patchRegistryAvailable(r.Context(), sse, sig)
 	if b, err := json.Marshal(map[string]any{"activeRuntime": ""}); err == nil {
-		_ = sse.PatchSignals(b)
+		if err := sse.PatchSignals(b); err != nil {
+			h.logger.Debug().Err(err).Msg("sse patch signals after uninstall")
+		}
 	}
 }
 
@@ -159,13 +367,12 @@ func (h *Handler) handleStartRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := r.PathValue("kind")
-	if _, err := h.runtimes.Start(r.Context(), kind); err != nil {
+	if err := h.startRuntime(r.Context(), kind, actorFromRequest(r)); err != nil {
 		if errors.Is(err, runtimes.ErrRuntimeNotFound) {
 			h.writeJSONErrorMsg(w, http.StatusNotFound, err.Error())
 			return
 		}
-		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("starting runtime")
-		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
+		h.writeJSONErrorMsg(w, http.StatusInternalServerError, "start failed")
 		return
 	}
 	h.patchRuntimeRowState(w, r, kind)
@@ -177,9 +384,8 @@ func (h *Handler) handleStopRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := r.PathValue("kind")
-	if err := h.runtimes.Stop(kind); err != nil && !errors.Is(err, runtimes.ErrRuntimeNotRunning) {
-		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("stopping runtime")
-		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
+	if err := h.stopRuntime(kind, actorFromRequest(r)); err != nil {
+		h.writeJSONErrorMsg(w, http.StatusInternalServerError, "stop failed")
 		return
 	}
 	h.patchRuntimeRowState(w, r, kind)
@@ -198,10 +404,10 @@ func (h *Handler) patchRuntimeRowState(w http.ResponseWriter, r *http.Request, k
 	running := h.runtimes.IsRunning(kind)
 	sse := datastar.NewSSE(w, r)
 	if err := sse.PatchElements(templates.RenderRuntimeRowActions(kind, running)); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch runtime row actions")
+		h.logger.Debug().Err(err).Msg("sse patch runtime row actions")
 	}
 	if err := sse.PatchElements(templates.RenderRuntimeSidebarDot(kind, running, autoStart)); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch runtime sidebar dot")
+		h.logger.Debug().Err(err).Msg("sse patch runtime sidebar dot")
 	}
 }
 

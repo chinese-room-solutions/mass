@@ -1,4 +1,7 @@
-@import "../../mass-sdk/uikit/theme.css";
+/* theme.css is staged into web/vendor/ by the Makefile from the pinned
+   mass-sdk module (go list -m). It is gitignored — never edit it here; edit it
+   in mass-sdk and bump the module version. */
+@import "./vendor/theme.css";
 
 @tailwind base;
 @tailwind components;
@@ -7,9 +10,6 @@
 /* ── Warm off-white text overrides (MASS-specific) ───────────────────────── */
 html.sl-theme-dark .text-white,
 html:not(.sl-theme-light) .text-white { color: #faf8f6 !important; }
-.sl-theme-dark sl-button[variant="primary"]::part(base) {
-  color: #faf8f6;
-}
 
 /* ── Structural elements ─────────────────────────────────────────────────── */
 header                    { background: var(--mass-bg-panel) !important; border-color: var(--mass-border) !important; }
@@ -25,9 +25,17 @@ header                    { background: var(--mass-bg-panel) !important; border-
 .mass-badge-alt { background: var(--mass-badge-alt-bg) !important; color: var(--mass-badge-alt-text) !important; }
 
 /* ── Worker cards (sl-details) ───────────────────────────────────────────── */
-sl-details.worker-card::part(base)    { background: var(--mass-bg-panel); border-color: var(--mass-border); }
-sl-details.worker-card::part(header)  { background: var(--mass-bg-panel); color: var(--mass-text); }
-sl-details.worker-card::part(content) { background: var(--mass-bg-base); }
+sl-details.worker-card::part(base),
+sl-details.queue-card::part(base)     { background: var(--mass-bg-panel); border-color: var(--mass-border); }
+sl-details.worker-card::part(header),
+sl-details.queue-card::part(header)   { background: var(--mass-bg-panel); color: var(--mass-text); }
+sl-details.worker-card::part(content),
+sl-details.queue-card::part(content)  { background: var(--mass-bg-base); }
+
+/* ── Queue row action icons — strip the icon-button's internal padding so
+   the visible edge of the icon aligns with the row's right margin, matching
+   the priority chip below. */
+sl-icon-button.queue-row-action::part(base) { padding: 0; }
 
 /* ── App rows ────────────────────────────────────────────────────────────── */
 .mass-row-hover:hover { background: var(--mass-bg-hover)  !important; }
@@ -58,6 +66,36 @@ html.sl-theme-light .text-neutral-300 { color: var(--mass-text) !important; }
 html.sl-theme-light .text-neutral-400 { color: var(--mass-text-muted) !important; }
 html.sl-theme-light .text-neutral-500 { color: var(--mass-text-faint) !important; }
 
+/* ── Tailwind neutral → theme variable mapping (pluggable themes) ─────────────
+   Build-time CSS can't know pluggable theme names, so a theme file only ships
+   --mass-* tokens; this generic block (carried by the mass-theme-custom marker
+   the loader adds to every non-built-in theme) maps the dark utility classes
+   onto those tokens, mirroring the light block above. */
+html.mass-theme-custom .bg-neutral-950  { background-color: var(--mass-bg-base)  !important; }
+html.mass-theme-custom .bg-neutral-900  { background-color: var(--mass-bg-panel) !important; }
+html.mass-theme-custom .bg-neutral-800  { background-color: var(--mass-bg-hover) !important; }
+html.mass-theme-custom .bg-neutral-800\/60 { background-color: var(--mass-bg-panel) !important; }
+html.mass-theme-custom .bg-neutral-700  { background-color: var(--mass-avatar-bg) !important; }
+html.mass-theme-custom .bg-neutral-700\/60 { background-color: var(--mass-bg-active) !important; }
+html.mass-theme-custom .border-neutral-800,
+html.mass-theme-custom .border-neutral-700,
+html.mass-theme-custom .border-neutral-700\/50 { border-color: var(--mass-border) !important; }
+html.mass-theme-custom .text-white,
+html.mass-theme-custom .text-neutral-100,
+html.mass-theme-custom .text-neutral-200,
+html.mass-theme-custom .text-neutral-300 { color: var(--mass-text) !important; }
+html.mass-theme-custom .text-neutral-400 { color: var(--mass-text-muted) !important; }
+html.mass-theme-custom .text-neutral-500 { color: var(--mass-text-faint) !important; }
+html.mass-theme-custom .hover\:bg-neutral-700\/40:hover { background-color: var(--mass-bg-hover) !important; }
+html.mass-theme-custom .bg-neutral-600 { background-color: var(--mass-text-faint) !important; }
+
+/* Neon hooks: themes opt in by setting the --mass-glow-* tokens (default none).
+   The active tab carries border-blue-500; sidebar status dots carry a
+   sidebar-dot-* id; the header logo is the only header img. */
+button.border-blue-500 { text-shadow: var(--mass-glow-tab, none); }
+header img { filter: var(--mass-glow-logo, none); }
+span[id^="sidebar-dot-"] { box-shadow: var(--mass-glow-success, none); }
+
 /* Small selects: shrink dropdown options to match trigger height */
 sl-select[size="small"] sl-option::part(base) { padding: 0.35rem 0.5rem; font-size: var(--sl-font-size-small); }
 sl-select[size="small"] sl-option::part(checked-icon) { display: none; }
@@ -71,26 +109,50 @@ html.sl-theme-light sl-select::part(combobox) { background-color: var(--sl-color
 html.sl-theme-light sl-input::part(form-control-label),
 html.sl-theme-light sl-select::part(form-control-label) { color: var(--mass-text) !important; }
 
+/* Label for a field that has no Shoelace control to carry one (Add-worker's
+   Worker row when the registry lists no packages). Mirrors the two rules above
+   and the theme's ::part(form-control-label) so the row reads identically
+   whether or not a select is there. */
+.mass-field-label {
+  display: block;
+  font-size: var(--sl-input-label-font-size-small);
+  color: var(--mass-text-muted);
+  margin-bottom: var(--sl-spacing-3x-small);
+}
+html.sl-theme-light .mass-field-label { color: var(--mass-text); }
+
+/* Themes dialog: installed rows activate on click; the inline border color
+   needs !important to lose to the hover highlight. */
+.mass-theme-row { cursor: pointer; transition: border-color 120ms; }
+.mass-theme-row:hover { border-color: var(--sl-color-primary-500) !important; }
+
 html.sl-theme-light .hover\:bg-neutral-700\/40:hover { background-color: var(--mass-bg-hover) !important; }
 
 /* Tab nav: inactive tabs need to be visibly muted in light mode */
-html.sl-theme-light [data-tab-name].text-neutral-400 { color: #6b7280 !important; }
+html.sl-theme-light [data-tab-name].text-neutral-400 { color: var(--mass-text-muted) !important; }
 html.sl-theme-light [data-tab-name].text-neutral-400:hover { color: var(--mass-text) !important; }
 
-/* Colored badges: pastel bg + saturated text for light mode */
+/* Colored badges: warm pastel bg + dusty text for the cream light mode (AA) */
 html.sl-theme-light .bg-blue-900\/40,
-html.sl-theme-light .bg-blue-900\/60   { background-color: #dbeafe !important; }
-html.sl-theme-light .text-blue-300     { color: #1d4ed8 !important; }
-html.sl-theme-light .bg-purple-900\/60 { background-color: #ede9fe !important; }
-html.sl-theme-light .text-purple-300   { color: #8b4fd0 !important; }
-html.sl-theme-light .bg-teal-900\/60   { background-color: #ccfbf1 !important; }
-html.sl-theme-light .text-teal-300     { color: #0f766e !important; }
-html.sl-theme-light .bg-orange-900\/60 { background-color: #ffedd5 !important; }
-html.sl-theme-light .text-orange-300   { color: #c2410c !important; }
-html.sl-theme-light .bg-green-900\/60  { background-color: #dcfce7 !important; }
-html.sl-theme-light .text-green-300    { color: #15803d !important; }
-html.sl-theme-light .bg-yellow-900\/60 { background-color: #fef9c3 !important; }
-html.sl-theme-light .text-yellow-300   { color: #a16207 !important; }
+html.sl-theme-light .bg-blue-900\/60   { background-color: #dde7f5 !important; }
+html.sl-theme-light .text-blue-300     { color: #3a5f92 !important; }
+html.sl-theme-light .bg-purple-900\/60 { background-color: #e9e4f4 !important; }
+html.sl-theme-light .text-purple-300   { color: #744fa8 !important; }
+html.sl-theme-light .bg-teal-900\/60   { background-color: #d8ede8 !important; }
+html.sl-theme-light .text-teal-300     { color: #1f6f66 !important; }
+html.sl-theme-light .bg-orange-900\/60 { background-color: #f7e6d0 !important; }
+html.sl-theme-light .text-orange-300   { color: #9c5417 !important; }
+html.sl-theme-light .bg-green-900\/60  { background-color: #e2eed6 !important; }
+html.sl-theme-light .text-green-300    { color: #44702a !important; }
+html.sl-theme-light .bg-yellow-900\/60 { background-color: #f6eec9 !important; }
+html.sl-theme-light .text-yellow-300   { color: #85630c !important; }
+html.sl-theme-light .bg-cyan-900\/60   { background-color: #d9ecee !important; }
+html.sl-theme-light .text-cyan-300     { color: #1f7078 !important; }
+html.sl-theme-light .bg-indigo-900\/60 { background-color: #e4e4f4 !important; }
+html.sl-theme-light .text-indigo-300   { color: #5058a8 !important; }
+
+/* Stopped status dot: readable on the light surfaces */
+html.sl-theme-light .bg-neutral-600 { background-color: var(--mass-text-faint) !important; }
 
 /* Re-pin dark-forced dialogs (slotted content inherits page overrides) */
 sl-dialog.sl-theme-dark .bg-neutral-900  { background-color: var(--mass-bg-panel) !important; }
@@ -105,13 +167,14 @@ sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
    token the avatar uses → automatic per-theme adaptation. */
 [id^="sidebar-dot-"] { border-color: var(--mass-avatar-bg) !important; }
 
-/* ── Brand color overrides for Tailwind utilities ──────────────────────── */
-/* Active tab underline */
-.border-blue-500 { border-color: var(--mass-blue) !important; }
-/* Status dots: running = green, on-demand idle = blue */
-.bg-green-400 { background-color: var(--mass-green) !important; }
-.bg-blue-400  { background-color: var(--mass-blue) !important; }
-.bg-red-400   { background-color: var(--mass-red) !important; }
+/* ── Theme token overrides for Tailwind utilities ──────────────────────── */
+/* Active tab underline + selected-row border */
+.border-blue-500 { border-color: var(--mass-accent) !important; }
+.border-blue-500\/60 { border-color: color-mix(in srgb, var(--mass-accent) 60%, transparent) !important; }
+/* Status dots: running = success, on-demand idle = accent */
+.bg-green-400 { background-color: var(--mass-success) !important; }
+.bg-blue-400  { background-color: var(--mass-accent) !important; }
+.bg-red-400   { background-color: var(--mass-danger) !important; }
 
 
 /* Center Apps-tab dialogs relative to the right content panel (not full viewport).
@@ -128,6 +191,12 @@ sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
 #mass-file-browser::part(body),
 #settings-file-browser::part(body) { overflow: hidden; padding-bottom: 0; }
 
+/* Install-Model dialog: the iframe inside is the single scroll surface
+   (its height is JS-capped to viewport in install.js). Disabling the
+   dialog body's auto-scroll prevents a redundant outer scrollbar from
+   appearing alongside the iframe's. */
+#mass-install-model-dialog::part(body) { overflow: hidden; }
+
 /* File browser dialogs: compact, centered footer */
 #mass-file-browser::part(footer),
 #settings-file-browser::part(footer) {
@@ -136,24 +205,6 @@ sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
 
 /* File browser: selected file highlight */
 .mass-fb-selected { background: var(--mass-fb-selected) !important; }
-
-/* Dialog opt-in: center the header title against the dialog's full width.
-   The close button shares the flex row by default, which shifts the
-   text-center midpoint left. Pull the close button out of flow so the
-   title can claim the full width and center on the dialog's true axis. */
-sl-dialog.mass-dialog-centered-title::part(header) {
-  position: relative;
-}
-sl-dialog.mass-dialog-centered-title::part(title) {
-  text-align: center;
-  width: 100%;
-}
-sl-dialog.mass-dialog-centered-title::part(close-button) {
-  position: absolute;
-  top: 50%;
-  right: var(--sl-spacing-large);
-  transform: translateY(-50%);
-}
 
 /* ── Resize handles ─────────────────────────────────────────────────────── */
 .mass-resize-handle {
@@ -174,31 +225,24 @@ sl-dialog.mass-dialog-centered-title::part(close-button) {
   transition: background 0.15s;
 }
 .mass-resize-handle:hover .mass-resize-bar {
-  background: var(--mass-blue);
+  background: var(--mass-accent);
 }
 
 /* ── Scrollbars ────────────────────────────────────────────────────────── */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--mass-border) transparent;
-}
-*:hover {
-  scrollbar-color: var(--mass-text-muted) transparent;
-}
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--mass-border);
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--mass-text-muted);
-}
-::-webkit-scrollbar-corner {
-  background: transparent;
+/* The shared theme styles scrollbars two ways: the standard scrollbar-width/
+   -color on `*` for engines that can only tint the native widget, and 6px
+   ::-webkit-scrollbar rules for engines that draw a custom one. Chrome and the
+   WebKit webview MASS ships implement both, and there either standard property
+   being set suppresses the pseudo-element rules — every scroller falls back to a
+   compositor-drawn native bar, which can paint on top of an overlapping popup.
+   Dropping the standard properties where the pseudo-elements exist puts every
+   scroller on the theme's 6px bar, drawn as content inside its own scroller so
+   panels stay above it. Firefox reports this @supports test false and keeps the
+   theme's thin tinted bar. Scrollers inside a shadow root (Shoelace panels) are
+   beyond both mechanisms and keep the engine's default bar. */
+@supports selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 }

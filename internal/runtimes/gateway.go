@@ -8,11 +8,13 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
+	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-plugin"
@@ -36,12 +38,22 @@ import (
 type LoadedGateway struct {
 	Kind     string
 	Manifest Manifest
+	// DefaultCostAxis is the runtime's required fallback axis from the
+	// gateway's InitResponse. Every worker for this runtime must bench
+	// this axis (workers may advertise additional axes). MASS uses it
+	// as the fallback when a Submit names an axis the worker hasn't
+	// measured. Required — empty is rejected at Init time.
+	DefaultCostAxis string
 
 	pluginClient *plugin.Client
 	client       *gatewayClient
 	callbackSrv  *grpc.Server // serves MassScheduler back to the gateway
 	closeOnce    sync.Once
 	logger       zerolog.Logger
+
+	// exited reports whether the gateway subprocess has terminated. Set to
+	// the go-plugin client's Exited by startGateway; overridable in tests.
+	exited func() bool
 }
 
 // RuntimeName reports the loaded gateway's runtime kind. Defined as a method
@@ -71,24 +83,6 @@ func (g *LoadedGateway) ListGroups(ctx context.Context) ([]*gatewaypb.Group, err
 	return resp.GetGroups(), nil
 }
 
-// PlanModelFiles asks the gateway for the file set MASS must fetch
-// to install one model. groupName is required — the operator-typed
-// label that becomes the group's display name and clusters every
-// file in the install (chat + projector, additional quants, etc.)
-// under one Group.
-func (g *LoadedGateway) PlanModelFiles(ctx context.Context, source, repoID, filename, groupName string) ([]*gatewaypb.DownloadFile, error) {
-	resp, err := g.client.gateway.PlanModelFiles(ctx, &gatewaypb.PlanModelFilesRequest{
-		Source:    source,
-		RepoId:    repoID,
-		Filename:  filename,
-		GroupName: groupName,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetFiles(), nil
-}
-
 // PlanLocalImport plans a Browse Local install. groupName is the
 // operator-typed identity (required). MASS calls this once per
 // picked file; same-name imports merge into one Group.
@@ -101,6 +95,30 @@ func (g *LoadedGateway) PlanLocalImport(ctx context.Context, srcPath, groupName 
 		return nil, err
 	}
 	return resp.GetFiles(), nil
+}
+
+// PlanRemoteImport asks the gateway to resolve a remote pick (repo+filename)
+// into the files MASS should fetch. The gateway plans; MASS downloads.
+func (g *LoadedGateway) PlanRemoteImport(ctx context.Context, repoID, filename, groupName string) ([]*gatewaypb.DownloadFile, error) {
+	resp, err := g.client.gateway.PlanRemoteImport(ctx, &gatewaypb.PlanRemoteImportRequest{
+		RepoId:    repoID,
+		Filename:  filename,
+		GroupName: groupName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetFiles(), nil
+}
+
+// PlanDelete asks the gateway which store-relative files make up the model
+// identified by id (primary + companions). MASS removes them.
+func (g *LoadedGateway) PlanDelete(ctx context.Context, id string) ([]string, error) {
+	resp, err := g.client.gateway.PlanDelete(ctx, &gatewaypb.PlanDeleteRequest{Id: id})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetRelPaths(), nil
 }
 
 // RenameGroup asks the gateway to rewrite every catalogue entry
@@ -132,7 +150,7 @@ func (g *LoadedGateway) Close() {
 // brings up the MassScheduler callback service on go-plugin's broker.
 //
 // Returns the LoadedGateway ready for HandleRequest / ListModels calls.
-func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, modelsDir, logLevel string, sched *scheduler.Scheduler, logger zerolog.Logger) (*LoadedGateway, error) {
+func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, modelsDir, logLevel string, sched *scheduler.Scheduler, dl *downloads.Manager, logger zerolog.Logger) (*LoadedGateway, error) {
 	if binaryPath == "" {
 		return nil, fmt.Errorf("startGateway: binary path required")
 	}
@@ -173,12 +191,13 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		pluginClient: pluginClient,
 		client:       gw,
 		logger:       gwLogger,
+		exited:       pluginClient.Exited,
 	}
 
 	// Stand up the MassScheduler callback service on go-plugin's broker.
 	// The gateway dials it through brokered gRPC; we never expose a TCP
 	// port to the host network.
-	callbackSrv, brokerID, err := startCallbackService(gw.broker, mf.RuntimeName, sched, gwLogger)
+	callbackSrv, brokerID, err := startCallbackService(gw.broker, mf.RuntimeName, sched, dl, gwLogger)
 	if err != nil {
 		loaded.Close()
 		return nil, err
@@ -194,6 +213,7 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		ModelsDir:             modelsDir,
 		LogLevel:              logLevel,
 		MassSchedulerBrokerId: brokerID,
+		MassGatewayApiVersion: gatewaypb.GatewayAPIVersion,
 	})
 	if err != nil {
 		loaded.Close()
@@ -203,6 +223,33 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		loaded.Close()
 		return nil, ctxerr.With(fmt.Errorf("gateway reported runtime_name %q but install expected %q", resp.RuntimeName, mf.RuntimeName), map[string]any{"runtime_name": mf.RuntimeName, "reported": resp.RuntimeName})
 	}
+	// Reject gateways built against a wire version MASS cannot speak.
+	// Gateways too old return GatewayApiVersion=0 (zero value); gateways
+	// too new advertise a version above MASS's pinned constant. Either
+	// way refuse the launch with a clear message — operators should
+	// reinstall a compatible package.
+	if resp.GatewayApiVersion != gatewaypb.GatewayAPIVersion {
+		loaded.Close()
+		return nil, ctxerr.With(
+			fmt.Errorf("gateway api version mismatch: gateway reports %d, MASS speaks %d", resp.GatewayApiVersion, gatewaypb.GatewayAPIVersion),
+			map[string]any{
+				"runtime_name":    mf.RuntimeName,
+				"gateway_version": resp.GatewayApiVersion,
+				"mass_version":    gatewaypb.GatewayAPIVersion,
+			},
+		)
+	}
+	// default_cost_axis is required — it's the throughput axis MASS falls
+	// back to when a Submit names an axis a worker hasn't benched. Without
+	// it MASS would have nothing to divide cost by for unupgraded workers.
+	if resp.DefaultCostAxis == "" {
+		loaded.Close()
+		return nil, ctxerr.With(
+			fmt.Errorf("gateway did not declare default_cost_axis"),
+			map[string]any{"runtime_name": mf.RuntimeName},
+		)
+	}
+	loaded.DefaultCostAxis = resp.DefaultCostAxis
 	// Reconcile the in-memory manifest with what the gateway just reported.
 	loaded.Manifest.Version = resp.Version
 	if resp.DisplayName != "" {
@@ -211,7 +258,7 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 	if resp.Description != "" {
 		loaded.Manifest.Description = resp.Description
 	}
-	gwLogger.Info().Str("version", resp.Version).Msg("gateway started")
+	gwLogger.Info().Str("version", resp.Version).Str("default_cost_axis", resp.DefaultCostAxis).Msg("gateway started")
 	return loaded, nil
 }
 
@@ -219,14 +266,14 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 // connection so the gateway can invoke Schedule / EnsureModelLoaded / etc.
 // Returns the broker stream ID the gateway must Dial to reach it; this is
 // passed to the gateway via InitRequest.MassSchedulerBrokerId.
-func startCallbackService(broker *plugin.GRPCBroker, runtimeName string, sched *scheduler.Scheduler, logger zerolog.Logger) (*grpc.Server, uint32, error) {
+func startCallbackService(broker *plugin.GRPCBroker, runtimeName string, sched *scheduler.Scheduler, dl *downloads.Manager, logger zerolog.Logger) (*grpc.Server, uint32, error) {
 	if broker == nil {
 		return nil, 0, errors.New("startCallbackService: broker not provided by go-plugin")
 	}
 	brokerID := broker.NextId()
 
 	srv := grpc.NewServer()
-	gatewaypb.RegisterMassSchedulerServer(srv, newSchedulerServiceServer(runtimeName, sched, logger))
+	gatewaypb.RegisterMassSchedulerServer(srv, newSchedulerServiceServer(runtimeName, sched, dl, logger))
 
 	go func() {
 		listener, err := broker.Accept(brokerID)
@@ -308,7 +355,12 @@ func (z *zlogHCAdapter) StandardLogger(_ *hclog.StandardLoggerOptions) *log.Logg
 	return log.New(z, "", 0)
 }
 func (z *zlogHCAdapter) StandardWriter(_ *hclog.StandardLoggerOptions) io.Writer { return z }
+
+// Write receives raw, unstructured subprocess output (go-plugin relays the
+// plugin's stderr through here). It's diagnostic chatter, not an operational
+// event, so it lands at Debug; the trailing newline is trimmed so the line
+// isn't logged with a dangling break.
 func (z *zlogHCAdapter) Write(p []byte) (int, error) {
-	z.logger.Info().Msg(string(p))
+	z.logger.Debug().Msg(strings.TrimRight(string(p), "\n"))
 	return len(p), nil
 }

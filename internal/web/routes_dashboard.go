@@ -1,12 +1,9 @@
 package web
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"io/fs"
 	"net/http"
@@ -18,13 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KernelPryanic/ctxerr"
+	"github.com/chinese-room-solutions/mass/internal/audit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/runtimes"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/web/templates"
 	"github.com/chinese-room-solutions/mass/internal/worker"
 	"github.com/chinese-room-solutions/mass/pkg/stats"
+	"github.com/rs/zerolog"
 	"github.com/starfederation/datastar-go/datastar"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -168,18 +166,17 @@ func (h *Handler) handleRuntimeAutoStartToggle(w http.ResponseWriter, r *http.Re
 		return
 	}
 	target := !mf.AutoStart
-	if err := h.runtimes.SetAutoStart(kind, target); err != nil {
-		h.logger.Warn().Err(err).Str("runtime_name", kind).Msg("toggling auto-start")
+	if err := h.setRuntimeAutoStart(kind, target, actorFromRequest(r)); err != nil {
 		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// SSE-patch the toggle button + sidebar dot in place.
 	sse := datastar.NewSSE(w, r)
 	if err := sse.PatchElements(templates.RenderRuntimeAutoStartButton(kind, target)); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch auto-start button")
+		h.logger.Debug().Err(err).Msg("sse patch auto-start button")
 	}
 	if err := sse.PatchElements(templates.RenderRuntimeSidebarDot(kind, h.runtimes.IsRunning(kind), target)); err != nil {
-		h.logger.Debug().Err(err).Msg("SSE patch sidebar dot")
+		h.logger.Debug().Err(err).Msg("sse patch sidebar dot")
 	}
 }
 
@@ -235,7 +232,7 @@ func (h *Handler) handleRuntimeLogsSSE(w http.ResponseWriter, r *http.Request) {
 	ch := h.sysLog.Subscribe()
 	defer h.sysLog.Unsubscribe(ch)
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := newHeartbeatTicker()
 	defer heartbeat.Stop()
 
 	for {
@@ -295,7 +292,7 @@ func (h *Handler) handleSchedulerDetail(w http.ResponseWriter, r *http.Request) 
 			WorkerID:    item.WorkerID,
 			WorkerName:  item.WorkerName,
 			RuntimeName: item.RuntimeName,
-			DeviceID:    item.DeviceID,
+			DeviceIDs:   item.DeviceIDs,
 			Source:      item.Source,
 			Mode:        item.Mode,
 			Status:      item.Status,
@@ -316,27 +313,16 @@ func (h *Handler) handleSchedulerEvict(w http.ResponseWriter, r *http.Request) {
 	}
 	workerID := r.URL.Query().Get("worker")
 	modelID := r.URL.Query().Get("model")
-	if workerID == "" || modelID == "" {
-		h.writeJSONErrorMsg(w, http.StatusBadRequest, "worker and model are required")
-		return
-	}
-	for _, w2 := range h.workers.All() {
-		sw, ok := w2.(*worker.StreamWorker)
-		if !ok || sw.ID() != workerID {
-			continue
-		}
-		if err := sw.UnloadModel(modelID); err != nil {
-			h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// Push a Scheduler-tab refresh straight away — the next heartbeat
-		// would also wake subscribers via the loaded-set diff, but that's
-		// seconds away and the operator clicked the button just now.
-		h.workers.NotifyLoadedChanged(sw.ID())
+	switch err := h.evictInstance(workerID, modelID, actorFromRequest(r)); {
+	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
-		return
+	case errors.Is(err, ErrOpInvalid):
+		h.writeJSONErrorMsg(w, http.StatusBadRequest, "worker and model are required")
+	case errors.Is(err, ErrOpNotFound):
+		h.writeJSONErrorMsg(w, http.StatusNotFound, "worker not found")
+	default:
+		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
 	}
-	h.writeJSONErrorMsg(w, http.StatusNotFound, "worker not found")
 }
 
 // --- Scheduler tab live updates ------------------------------------------
@@ -348,46 +334,7 @@ func (h *Handler) handleSchedulerEvict(w http.ResponseWriter, r *http.Request) {
 // without the periodic stats tick — Scheduler-tab values only move when
 // load/active counters change, so polling on a timer is wasted work.
 func (h *Handler) handleSchedulerEventsSSE(w http.ResponseWriter, r *http.Request) {
-	if h.schedulerBroker == nil || h.workers == nil {
-		http.Error(w, "scheduler SSE unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	ch := h.schedulerBroker.Subscribe()
-	defer h.schedulerBroker.Unsubscribe(ch)
-
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case _, ok := <-ch:
-			if !ok {
-				return
-			}
-			if _, err := fmt.Fprintf(w, "event: change\ndata: \n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		case <-heartbeat.C:
-			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
+	streamChangeEvents(w, r, h.schedulerBroker, "scheduler SSE unavailable")
 }
 
 // --- Settings auto-save ---------------------------------------------------
@@ -398,6 +345,7 @@ type settingsPostBody struct {
 	DataDir         string `json:"dataDir"`
 	ResultTTL       string `json:"resultTTL"`
 	IdleEvictionTTL string `json:"idleEvictionTTL"`
+	LoadAttempts    int    `json:"loadAttempts"`
 	RegistryURL     string `json:"registryURL"`
 	LogLevel        string `json:"logLevel"`
 	AuthToken       string `json:"authToken"`
@@ -417,6 +365,9 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	h.cfg.DataDir = strings.TrimSpace(body.DataDir)
 	h.cfg.ResultTTL = strings.TrimSpace(body.ResultTTL)
 	h.cfg.IdleEvictionTTL = strings.TrimSpace(body.IdleEvictionTTL)
+	if body.LoadAttempts > 0 {
+		h.cfg.LoadAttempts = body.LoadAttempts
+	}
 	h.cfg.RegistryURL = strings.TrimSpace(body.RegistryURL)
 	h.cfg.DevMode = body.DevMode
 	h.cfg.TLS.Enabled = body.TLSEnabled
@@ -426,6 +377,13 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		var lvl config.LogLevel
 		if err := lvl.UnmarshalText([]byte(body.LogLevel)); err == nil {
 			h.cfg.Logger.Level = lvl
+			// Apply immediately: SetGlobalLevel takes effect on MASS at once;
+			// runtimes pick the new level up at their next Init (already-running
+			// gateways keep their level until restarted).
+			zerolog.SetGlobalLevel(zerolog.Level(lvl))
+			if h.runtimes != nil {
+				h.runtimes.SetLogLevel(zerolog.Level(lvl).String())
+			}
 		}
 	}
 
@@ -445,11 +403,15 @@ func (h *Handler) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.SetAuthHash(hash)
+		audit.Log(h.logger, "auth.token_rotated", "", audit.OutcomeOK).
+			Str("actor", actorFromRequest(r)).Msg("")
 	}
 
 	if h.saveFn != nil {
 		h.saveFn()
 	}
+	audit.Log(h.logger, "settings.saved", "", audit.OutcomeOK).
+		Str("actor", actorFromRequest(r)).Msg("")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -494,7 +456,7 @@ func (h *Handler) handleSysLogsSSE(w http.ResponseWriter, r *http.Request) {
 
 	ch := h.sysLog.Subscribe()
 	defer h.sysLog.Unsubscribe(ch)
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := newHeartbeatTicker()
 	defer heartbeat.Stop()
 	for {
 		select {
@@ -619,14 +581,16 @@ func (h *Handler) sendWorkersEvent(w io.Writer, f http.Flusher, kind, data strin
 }
 
 // benchResult is one device's benchmark outcome, returned in the
-// /api/workers/benchmark JSON response.
+// /api/workers/benchmark JSON response. Throughput is the worker's
+// runtime-private axis map (e.g. {"q4k_matvec": 154.0}).
 type benchResult struct {
-	WorkerID      string  `json:"worker_id"`
-	DeviceID      string  `json:"device_id"`
-	DeviceName    string  `json:"device_name"`
-	MemoryGBs     float64 `json:"memory_gbs"`
-	ComputeGFlops float64 `json:"compute_gflops"`
-	Error         string  `json:"error,omitempty"`
+	WorkerID   string             `json:"worker_id"`
+	DeviceID   string             `json:"device_id"`
+	DeviceName string             `json:"device_name"`
+	MemoryGBs  float64            `json:"memory_gbs"`
+	LoadGBs    float64            `json:"load_gbs"`
+	Throughput map[string]float64 `json:"throughput"`
+	Error      string             `json:"error,omitempty"`
 }
 
 // handleWorkersBenchmark runs a benchmark on the targeted workers/devices,
@@ -642,32 +606,10 @@ func (h *Handler) handleWorkersBenchmark(w http.ResponseWriter, r *http.Request)
 		h.writeJSONErrorMsg(w, http.StatusServiceUnavailable, "no worker fleet")
 		return
 	}
-	wantWorkers := parseCSVSet(r.URL.Query().Get("workerIds"))
-	wantDevices := parseCSVSet(r.URL.Query().Get("deviceIds"))
-
-	var (
-		mu      sync.Mutex
-		results []benchResult
-		wg      sync.WaitGroup
+	results := h.benchmarkWorkers(
+		parseCSV(r.URL.Query().Get("workerIds")),
+		parseCSV(r.URL.Query().Get("deviceIds")),
 	)
-
-	for _, wkr := range h.workers.All() {
-		if !wkr.Status().Online {
-			continue
-		}
-		if len(wantWorkers) > 0 && !wantWorkers[wkr.ID()] {
-			continue
-		}
-		wg.Add(1)
-		go func(wkr worker.WorkerInterface) {
-			defer wg.Done()
-			h.benchmarkWorker(wkr, wantDevices, &mu, &results)
-		}(wkr)
-	}
-	wg.Wait()
-
-	h.workersBroker.Broadcast(WorkersEvent{Kind: WorkersEventChange})
-
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{"results": results}); err != nil {
 		h.logger.Warn().Err(err).Msg("encoding benchmark response")
@@ -735,24 +677,43 @@ func (h *Handler) benchmarkWorker(wkr worker.WorkerInterface, wantDevices map[st
 			continue
 		}
 		if err := h.store.SaveBenchmark(store.BenchmarkRow{
-			WorkerID:      wkr.ID(),
-			DeviceID:      res.DeviceID,
-			DeviceName:    res.DeviceName,
-			MemoryGBs:     res.MemoryGBs,
-			ComputeGFlops: res.ComputeGFlops,
-			BenchedAt:     res.BenchedAt,
+			WorkerID:   wkr.ID(),
+			DeviceID:   res.DeviceID,
+			DeviceName: res.DeviceName,
+			MemoryGBs:  res.MemoryGBs,
+			LoadGBs:    res.LoadGBs,
+			Throughput: res.Throughput,
+			BenchedAt:  res.BenchedAt,
 		}); err != nil {
 			h.logger.Warn().Err(err).Str("worker", wkr.ID()).Str("device", dev.ID).Msg("saving benchmark")
 		}
+		// Drop the scheduler's cached row for this (worker, device) so
+		// the next scoring pass picks up the fresh throughput numbers
+		// instead of the stale (or absent) cached entry.
+		if h.orch != nil {
+			h.orch.InvalidateBench(wkr.ID(), res.DeviceID)
+		}
 		mu.Lock()
 		*out = append(*out, benchResult{
-			WorkerID:      wkr.ID(),
-			DeviceID:      res.DeviceID,
-			DeviceName:    res.DeviceName,
-			MemoryGBs:     res.MemoryGBs,
-			ComputeGFlops: res.ComputeGFlops,
+			WorkerID:   wkr.ID(),
+			DeviceID:   res.DeviceID,
+			DeviceName: res.DeviceName,
+			MemoryGBs:  res.MemoryGBs,
+			LoadGBs:    res.LoadGBs,
+			Throughput: res.Throughput,
 		})
 		mu.Unlock()
+	}
+	// Bench data drives the scheduler's "is this worker schedulable"
+	// gate. A worker that connected without any bench rows had
+	// OnWorkerConnected refuse to materialise a queue; calling it
+	// again now (idempotent) lets the freshly-benched devices unlock
+	// scheduling on this worker. Without this, the first
+	// post-connect envelope hangs on the global queue forever.
+	if h.orch != nil {
+		if sw, ok := wkr.(*worker.StreamWorker); ok {
+			h.orch.OnWorkerConnected(sw)
+		}
 	}
 }
 
@@ -764,39 +725,31 @@ func (h *Handler) benchmarkWorker(wkr worker.WorkerInterface, wantDevices map[st
 // models stay where they are. If a model can't fit on the remaining
 // enabled devices it will fail to load with a normal error.
 func (h *Handler) handleToggleDevice(w http.ResponseWriter, r *http.Request) {
-	if h.workers == nil || h.store == nil {
-		h.writeJSONErrorMsg(w, http.StatusServiceUnavailable, "no worker fleet")
-		return
-	}
 	workerID := r.PathValue("id")
 	deviceID := r.PathValue("devID")
-	if workerID == "" || deviceID == "" {
-		h.writeJSONErrorMsg(w, http.StatusBadRequest, "worker id and device id required")
-		return
-	}
-	wkr := h.workers.Get(workerID)
-	if wkr == nil {
+	next := !h.deviceEnabled(workerID, deviceID)
+	err := h.setWorkerDeviceEnabled(r.Context(), workerID, deviceID, next, actorFromRequest(r))
+	h.respondWorkerToggle(w, err)
+}
+
+// respondWorkerToggle maps a worker-toggle op error onto the toggle handlers'
+// exact HTTP statuses (shared by device + worker toggles).
+func (h *Handler) respondWorkerToggle(w http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, ErrOpUnavailable):
+		h.writeJSONErrorMsg(w, http.StatusServiceUnavailable, "no worker fleet")
+	case errors.Is(err, ErrOpInvalid):
+		h.writeJSONErrorMsg(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrOpNotFound):
 		h.writeJSONErrorMsg(w, http.StatusNotFound, "worker not found")
-		return
+	case errors.Is(err, ErrOpBusy):
+		h.writeJSONErrorMsg(w, http.StatusConflict,
+			"worker is busy re-estimating queued jobs after a recent toggle; retry in a moment")
+	default:
+		h.writeJSONErrorMsg(w, http.StatusInternalServerError, err.Error())
 	}
-
-	current := true
-	if row, err := h.store.GetWorkerDeviceEnabled(workerID, deviceID); err == nil {
-		current = row.Enabled
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		h.logger.Warn().Err(err).Str("worker", workerID).Str("device", deviceID).Msg("reading device enabled state")
-	}
-	next := !current
-	if err := h.store.SetWorkerDeviceEnabled(workerID, deviceID, next); err != nil {
-		h.writeJSONErrorMsg(w, http.StatusInternalServerError, "persisting toggle: "+err.Error())
-		return
-	}
-
-	if err := h.pushEnabledDevices(wkr); err != nil {
-		h.logger.Warn().Err(err).Str("worker", workerID).Msg("pushing enabled devices to worker")
-	}
-	h.workersBroker.Broadcast(WorkersEvent{Kind: WorkersEventChange})
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleToggleWorker flips every device on the worker in one transaction.
@@ -819,45 +772,174 @@ func (h *Handler) handleToggleWorker(w http.ResponseWriter, r *http.Request) {
 		h.writeJSONErrorMsg(w, http.StatusNotFound, "worker not found")
 		return
 	}
+	// "Worker enabled" is derived: any device enabled = worker enabled. If the
+	// worker is currently fully or partially enabled, the toggle disables every
+	// device; otherwise it enables every device.
+	next := !h.workerAnyEnabled(workerID, safeDevices(wkr))
+	err := h.setWorkerEnabled(r.Context(), workerID, next, actorFromRequest(r))
+	h.respondWorkerToggle(w, err)
+}
 
-	devices := safeDevices(wkr)
-	if len(devices) == 0 {
-		w.WriteHeader(http.StatusNoContent)
+// handleAddWorkerToken mints a join token when the Add-worker dialog opens and
+// patches the token + expiry note into the dialog's signals so the rendered
+// commands carry a real, usable token. The operator session is already
+// authenticated (this route sits behind AuthMiddleware — auth-exempt paths
+// cannot reach it), so minting here is safe. When auth is disabled no token is
+// minted: $addWorkerAuthDisabled flips true and the commands render without a
+// --token argument.
+func (h *Handler) handleAddWorkerToken(w http.ResponseWriter, r *http.Request) {
+	sse := datastar.NewSSE(w, r)
+
+	if h.AuthDisabled() {
+		h.patchAddWorkerToken(sse, map[string]any{
+			"addWorkerAuthDisabled": true,
+			"addWorkerToken":        "",
+			"addWorkerTokenExpiry":  "",
+			"addWorkerTokenError":   "",
+		})
 		return
 	}
 
-	enabledByDev := map[string]bool{}
-	rows, err := h.store.ListWorkerDevicesEnabled(workerID)
+	token, expiresAt, err := h.mintJoinToken(0, actorFromRequest(r))
 	if err != nil {
-		h.logger.Warn().Err(err).Str("worker", workerID).Msg("listing device enabled state")
+		h.logger.Warn().Err(err).Msg("minting join token for add-worker dialog")
+		h.patchAddWorkerToken(sse, map[string]any{
+			"addWorkerToken":       "",
+			"addWorkerTokenExpiry": "",
+			"addWorkerTokenError":  "Could not mint a join token. Check server logs.",
+		})
+		return
 	}
-	for _, r := range rows {
-		enabledByDev[r.DeviceID] = r.Enabled
+	h.patchAddWorkerToken(sse, map[string]any{
+		"addWorkerAuthDisabled": false,
+		"addWorkerToken":        token,
+		"addWorkerTokenExpiry":  joinTokenExpiryNote(expiresAt),
+		"addWorkerTokenError":   "",
+	})
+}
+
+// handleAddWorkerOptions populates the Add-worker dialog's worker-package and
+// backend selects for the currently-selected runtime. It reads $addWorkerRuntime
+// (which runtime) and $addWorkerWorker (the current package, kept when still
+// valid) from the request signals, lists the resolvable worker packages via
+// workerOptionsFor, and SSE-patches #add-worker-worker-picker,
+// #add-worker-backend-picker, and $addWorkerWorker/$addWorkerBackend.
+//
+// Selection: a lone package leaves $addWorkerWorker "" (the setup script
+// auto-selects it, keeping the command clean); several set it to the first (or
+// the retained current) package. The backend picker shows only for a package
+// with >1 backend; $addWorkerBackend is kept when still valid, else reset to "".
+// On a registry-fetch failure a muted note replaces the worker select and both
+// signals stay "" — the commands still work via server-side auto-selection.
+func (h *Handler) handleAddWorkerOptions(w http.ResponseWriter, r *http.Request) {
+	// Read signals before NewSSE consumes the body. For a GET action Datastar
+	// carries them in the "datastar" query param.
+	var signals struct {
+		AddWorkerRuntime string `json:"addWorkerRuntime"`
+		AddWorkerWorker  string `json:"addWorkerWorker"`
+		AddWorkerBackend string `json:"addWorkerBackend"`
 	}
-	anyEnabled := false
-	for _, d := range devices {
-		v, ok := enabledByDev[d.ID]
-		if !ok || v {
-			anyEnabled = true
-			break
+	if err := datastar.ReadSignals(r, &signals); err != nil {
+		h.logger.Debug().Err(err).Msg("reading add-worker options signals")
+	}
+
+	opts, err := h.workerOptionsFor(r.Context(), signals.AddWorkerRuntime)
+	sse := datastar.NewSSE(w, r)
+	if err != nil {
+		h.logger.Debug().Err(err).Str("runtime", signals.AddWorkerRuntime).Msg("listing worker options")
+		if perr := sse.PatchElements(templates.RenderAddWorkerWorkerPicker(nil, true)); perr != nil {
+			h.logger.Debug().Err(perr).Msg("sse patch add-worker-worker-picker error note")
+		}
+		if perr := sse.PatchElements(templates.RenderAddWorkerBackendPicker(nil)); perr != nil {
+			h.logger.Debug().Err(perr).Msg("sse patch add-worker-backend-picker clear")
+		}
+		if b, jerr := json.Marshal(map[string]any{"addWorkerWorker": "", "addWorkerBackend": ""}); jerr == nil {
+			if perr := sse.PatchSignals(b); perr != nil {
+				h.logger.Debug().Err(perr).Msg("sse patch add-worker signals on error")
+			}
+		}
+		return
+	}
+
+	views := make([]templates.WorkerOptionView, len(opts))
+	for i, o := range opts {
+		views[i] = templates.WorkerOptionView{Name: o.Name, DisplayName: o.DisplayName, Backends: o.Backends}
+	}
+	worker, backend := templates.AddWorkerSelection(views, signals.AddWorkerWorker, signals.AddWorkerBackend)
+
+	if perr := sse.PatchElements(templates.RenderAddWorkerWorkerPicker(views, false)); perr != nil {
+		h.logger.Debug().Err(perr).Msg("sse patch add-worker-worker-picker")
+	}
+	if perr := sse.PatchElements(templates.RenderAddWorkerBackendPicker(templates.BackendsForWorker(views, worker))); perr != nil {
+		h.logger.Debug().Err(perr).Msg("sse patch add-worker-backend-picker")
+	}
+	if b, jerr := json.Marshal(map[string]any{"addWorkerWorker": worker, "addWorkerBackend": backend}); jerr == nil {
+		if perr := sse.PatchSignals(b); perr != nil {
+			h.logger.Debug().Err(perr).Msg("sse patch add-worker signals")
 		}
 	}
+}
 
-	next := !anyEnabled
-	toUpdate := make([]string, 0, len(devices))
-	for _, d := range devices {
-		toUpdate = append(toUpdate, d.ID)
-	}
-	if err := h.store.SetWorkerDevicesEnabledBulk(workerID, toUpdate, next); err != nil {
-		h.writeJSONErrorMsg(w, http.StatusInternalServerError, "persisting toggle: "+err.Error())
+// patchAddWorkerToken marshals the add-worker dialog signal patch and sends it,
+// logging at debug on failure (a closed dialog/connection is not actionable).
+func (h *Handler) patchAddWorkerToken(sse *datastar.ServerSentEventGenerator, signals map[string]any) {
+	b, err := json.Marshal(signals)
+	if err != nil {
+		h.logger.Debug().Err(err).Msg("marshaling add-worker token signals")
 		return
 	}
-
-	if err := h.pushEnabledDevices(wkr); err != nil {
-		h.logger.Warn().Err(err).Str("worker", workerID).Msg("pushing enabled devices to worker")
+	if err := sse.PatchSignals(b); err != nil {
+		h.logger.Debug().Err(err).Msg("sse patch add-worker token signals")
 	}
-	h.workersBroker.Broadcast(WorkersEvent{Kind: WorkersEventChange})
-	w.WriteHeader(http.StatusNoContent)
+}
+
+// joinTokenExpiryNote renders a compact validity note from a unix expiry,
+// e.g. "valid for 1h" — trailing zero units trimmed.
+func joinTokenExpiryNote(expiresAt int64) string {
+	d := time.Until(time.Unix(expiresAt, 0))
+	if d <= 0 {
+		return "expired"
+	}
+	if d >= time.Minute {
+		d = d.Round(time.Minute)
+	} else {
+		d = d.Round(time.Second)
+	}
+	return "valid for " + compactDuration(d)
+}
+
+// compactDuration formats d trimming trailing zero components that
+// time.Duration.String leaves, so 1h0m0s → "1h", 1h30m0s → "1h30m", and
+// 2m30s stays "2m30s". Only whole zero units at the tail are dropped.
+func compactDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
+// handleRevokeWorker deletes an enrolled worker's credential, revoking it. The
+// worker id is the server-assigned enrollment id. Returns 204 on success.
+func (h *Handler) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
+	workerID := r.PathValue("id")
+	err := h.revokeWorker(workerID, actorFromRequest(r))
+	h.respondWorkerToggle(w, err)
+}
+
+// tryReestimateLock takes the per-worker re-estimation lock so a toggle
+// handler can perform "update enable mask + recompute queued estimates"
+// atomically. Returns (release, true) on success or (nil, false) when
+// another toggle is in flight for the same worker. Falls through to a
+// no-op release when the scheduler isn't wired (headless tests).
+func (h *Handler) tryReestimateLock(workerID string) (release func(), ok bool) {
+	if h.orch == nil {
+		return func() {}, true
+	}
+	return h.orch.TryReestimateLock(workerID)
 }
 
 // pushEnabledDevices computes the current enabled-device whitelist for
@@ -870,52 +952,40 @@ func (h *Handler) pushEnabledDevices(wkr worker.WorkerInterface) error {
 		return nil
 	}
 	devices := safeDevices(wkr)
-	enabled := h.computeEnabledDeviceIDs(wkr.ID(), devices)
+	enabled := h.computeEnabledDevices(wkr.ID(), devices)
 	return sw.SetEnabledDevices(enabled)
 }
 
-// computeEnabledDeviceIDs returns the device IDs the operator has not
-// disabled. Absent persisted rows mean "enabled" (sane default for newly-
-// connected workers without any toggle history).
-func (h *Handler) computeEnabledDeviceIDs(workerID string, devices []stats.Device) []string {
-	enabledByDev := map[string]bool{}
-	if rows, err := h.store.ListWorkerDevicesEnabled(workerID); err == nil {
-		for _, r := range rows {
-			enabledByDev[r.DeviceID] = r.Enabled
-		}
+// computeEnabledDevices maps the operator's persisted toggle rows onto the
+// explicit three-state whitelist for wkr's advertised devices. No rows (or
+// an unreadable store) means all-enabled; otherwise the exact enabled
+// subset, which may be empty when everything is disabled.
+func (h *Handler) computeEnabledDevices(workerID string, devices []stats.Device) worker.EnabledDevices {
+	rows, err := h.store.ListWorkerDevicesEnabled(workerID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("worker", workerID).Msg("listing device enabled state")
+		return worker.EnabledDevices{All: true}
 	}
-	out := make([]string, 0, len(devices))
-	for _, d := range devices {
-		v, ok := enabledByDev[d.ID]
-		if !ok || v {
-			out = append(out, d.ID)
-		}
+	state := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		state[r.DeviceID] = r.Enabled
 	}
-	return out
+	advertised := make([]string, len(devices))
+	for i, d := range devices {
+		advertised[i] = d.ID
+	}
+	return worker.ComputeEnabledDevices(advertised, state)
 }
 
-// parseCSVSet splits a comma-separated query value into a non-empty set.
-func parseCSVSet(s string) map[string]bool {
-	out := map[string]bool{}
+// parseCSV splits a comma-separated query value into a slice, dropping empties.
+func parseCSV(s string) []string {
+	var out []string
 	for _, v := range strings.Split(s, ",") {
-		v = strings.TrimSpace(v)
-		if v != "" {
-			out[v] = true
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
 		}
 	}
 	return out
 }
 
 // --- helpers -------------------------------------------------------------
-
-// renderRuntimeRow re-renders a single runtime row's actions area. Helper
-// retained for future SSE patches; not currently called from this file.
-func renderRuntimeRow(kind string, running bool) string {
-	return templates.RenderRuntimeRowActions(kind, running)
-}
-
-// _ keeps ctxerr referenced in the package even when other files come/go.
-var _ = ctxerr.With
-var _ = html.EscapeString
-var _ = context.Background
-var _ = renderRuntimeRow

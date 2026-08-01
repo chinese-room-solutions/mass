@@ -12,12 +12,13 @@ func TestBenchmarks(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	row := BenchmarkRow{
-		WorkerID:      "local",
-		DeviceID:      "cpu:0",
-		DeviceName:    "12-core x86_64/linux",
-		MemoryGBs:     25.5,
-		ComputeGFlops: 42.3,
-		BenchedAt:     now,
+		WorkerID:   "local",
+		DeviceID:   "cpu:0",
+		DeviceName: "12-core x86_64/linux",
+		MemoryGBs:  25.5,
+		LoadGBs:    8.4,
+		Throughput: map[string]float64{"q4k_matvec": 42.3},
+		BenchedAt:  now,
 	}
 
 	tests := []struct {
@@ -50,7 +51,8 @@ func TestBenchmarks(t *testing.T) {
 				require.Equal(t, row.DeviceID, got.DeviceID)
 				require.Equal(t, row.DeviceName, got.DeviceName)
 				require.InDelta(t, row.MemoryGBs, got.MemoryGBs, 0.01)
-				require.InDelta(t, row.ComputeGFlops, got.ComputeGFlops, 0.01)
+				require.InDelta(t, row.LoadGBs, got.LoadGBs, 0.01)
+				require.InDelta(t, row.Throughput["q4k_matvec"], got.Throughput["q4k_matvec"], 0.01)
 			},
 		},
 		{
@@ -60,13 +62,15 @@ func TestBenchmarks(t *testing.T) {
 
 				updated := row
 				updated.MemoryGBs = 30.0
-				updated.ComputeGFlops = 50.0
+				updated.LoadGBs = 10.0
+				updated.Throughput = map[string]float64{"q4k_matvec": 50.0}
 				require.NoError(t, s.SaveBenchmark(updated))
 
 				got, err := s.GetBenchmark("local", "cpu:0")
 				require.NoError(t, err)
 				require.InDelta(t, 30.0, got.MemoryGBs, 0.01)
-				require.InDelta(t, 50.0, got.ComputeGFlops, 0.01)
+				require.InDelta(t, 10.0, got.LoadGBs, 0.01)
+				require.InDelta(t, 50.0, got.Throughput["q4k_matvec"], 0.01)
 			},
 		},
 		{
@@ -85,12 +89,12 @@ func TestBenchmarks(t *testing.T) {
 				require.NoError(t, s.SaveBenchmark(row))
 
 				remoteRow := BenchmarkRow{
-					WorkerID:      "remote-1",
-					DeviceID:      "cpu:0",
-					DeviceName:    "8-core arm64/linux",
-					MemoryGBs:     15.0,
-					ComputeGFlops: 20.0,
-					BenchedAt:     now,
+					WorkerID:   "remote-1",
+					DeviceID:   "cpu:0",
+					DeviceName: "8-core arm64/linux",
+					MemoryGBs:  15.0,
+					Throughput: map[string]float64{"q4k_matvec": 20.0},
+					BenchedAt:  now,
 				}
 				require.NoError(t, s.SaveBenchmark(remoteRow))
 
@@ -109,12 +113,12 @@ func TestBenchmarks(t *testing.T) {
 				require.NoError(t, s.SaveBenchmark(row))
 
 				row2 := BenchmarkRow{
-					WorkerID:      "local",
-					DeviceID:      "gpu:0",
-					DeviceName:    "NVIDIA RTX 4090",
-					MemoryGBs:     1008.0,
-					ComputeGFlops: 330.0,
-					BenchedAt:     now,
+					WorkerID:   "local",
+					DeviceID:   "gpu:0",
+					DeviceName: "NVIDIA RTX 4090",
+					MemoryGBs:  1008.0,
+					Throughput: map[string]float64{"q4k_matvec": 330.0},
+					BenchedAt:  now,
 				}
 				require.NoError(t, s.SaveBenchmark(row2))
 

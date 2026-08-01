@@ -11,9 +11,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
+	"github.com/chinese-room-solutions/mass-sdk/format"
 	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/runtimes"
 	"github.com/rs/zerolog"
@@ -34,9 +34,8 @@ import (
 //  3. Re-runs on runtime install / state change so the view stays current
 //     without polling.
 //
-// The earlier per-row SSE multiplex is gone — gateways no longer stream
-// Models. Cache-warm ListModels is fast enough that one-shot grouped
-// renders are simpler and look better.
+// Cache-warm ListModels is fast enough that one-shot grouped renders beat
+// the cost of a per-row SSE multiplex.
 func (h *Handler) handleModelsStreamSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -69,7 +68,7 @@ func (h *Handler) handleModelsStreamSSE(w http.ResponseWriter, r *http.Request) 
 		defer stopDl()
 	}
 
-	heartbeat := time.NewTicker(15 * time.Second)
+	heartbeat := newHeartbeatTicker()
 	defer heartbeat.Stop()
 
 	for {
@@ -255,7 +254,7 @@ func (r *modelsRenderer) aggregate(ctx context.Context, running []*runtimes.Load
 	for _, gw := range running {
 		gws, err := gw.ListGroups(ctx)
 		if err != nil {
-			r.logger.Warn().Err(err).Str("runtime", gw.RuntimeName()).Msg("ListGroups failed")
+			r.logger.Warn().Err(err).Str("runtime", gw.RuntimeName()).Msg("listing model groups from gateway")
 			continue
 		}
 		for _, g := range gws {
@@ -366,7 +365,7 @@ const modelsEmptyNoRuntimeHTML = `<div class="flex flex-col items-center justify
 const modelsEmptyNoModelsHTML = `<div class="flex flex-col items-center justify-center py-16 text-center">` +
 	`<sl-icon name="box-seam" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>` +
 	`<p class="text-sm" style="color:var(--mass-text-muted)">No models installed.</p>` +
-	`<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Use Install New Model or Browse Local below.</p>` +
+	`<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Use Install Model or Browse Local below.</p>` +
 	`</div>`
 
 // modelsLoadingHTML is the spinner placeholder shown while a running
@@ -382,7 +381,12 @@ const modelsLoadingHTML = `<div class="flex flex-col items-center justify-center
 // least one model in the group.
 func writeModelGroup(b *strings.Builder, g *gatewaypb.Group, runtimePills []string) {
 	esc := html.EscapeString
-	filterParts := append([]string{g.GetDisplayName()}, g.GetModelTypes()...)
+	filterParts := []string{g.GetDisplayName()}
+	for _, mt := range g.GetModelTypes() {
+		if label := modelTypeLabel(mt); label != "" {
+			filterParts = append(filterParts, label)
+		}
+	}
 	for _, rt := range runtimePills {
 		filterParts = append(filterParts, rt, prettyRuntimeName(rt))
 	}
@@ -409,9 +413,9 @@ func writeModelGroup(b *strings.Builder, g *gatewaypb.Group, runtimePills []stri
 			esc(prettyRuntimeName(rt)))
 	}
 	for _, mt := range g.GetModelTypes() {
-		if t := titleCaseModelType(mt); t != "" {
+		if label := modelTypeLabel(mt); label != "" {
 			fmt.Fprintf(b, `<span class="mass-badge-alt font-mono text-xs font-bold rounded px-1.5 py-0.5">%s</span>`,
-				esc(t))
+				esc(label))
 		}
 	}
 	writeCapabilityIcons(b, g.GetCapabilities(), capIconStyleGroup)
@@ -430,7 +434,7 @@ func writeModelGroup(b *strings.Builder, g *gatewaypb.Group, runtimePills []stri
 	// attribute value early.
 	groupClick := fmt.Sprintf(
 		`$confirmDeleteGroupPayload='%s'; $confirmDeleteGroupLabel='%s'; $confirmDeleteGroupCount=%d; $confirmDeleteGroupOpen=true`,
-		jsStringEscape(groupPayload), jsStringEscape(g.GetDisplayName()), n)
+		format.JSEscape(groupPayload), format.JSEscape(g.GetDisplayName()), n)
 	fmt.Fprintf(b,
 		`<div onclick="event.stopPropagation()"><sl-tooltip content="Delete entire group"><sl-icon-button name="trash3" style="font-size:0.85rem;color:var(--sl-color-danger-400)" data-on:click="%s"></sl-icon-button></sl-tooltip></div>`,
 		html.EscapeString(groupClick))
@@ -470,12 +474,12 @@ func groupDeletePayloadJSON(g *gatewaypb.Group, runtime string) string {
 func writeModelRow(b *strings.Builder, m *gatewaypb.Model, primaryRuntime string) {
 	esc := html.EscapeString
 	id := m.GetId()
-	idJS := jsStringEscape(id)
+	idJS := format.JSEscape(id)
 	displayName := m.GetDisplayName()
 	if displayName == "" {
 		displayName = id
 	}
-	rtJS := jsStringEscape(primaryRuntime)
+	rtJS := format.JSEscape(primaryRuntime)
 
 	fmt.Fprintf(b, `<div class="model-row flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer" data-row-id="%s" data-attr:class="$selectedModelID==='%s' ? 'model-row flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer border border-blue-500/60' : 'model-row flex items-center gap-2 px-3 py-2 hover:bg-neutral-700/40 rounded cursor-pointer'" data-on:click="$selectedModelID='%s'; $selectedModelRuntime='%s'">`,
 		esc(id), idJS, idJS, rtJS)
@@ -489,19 +493,38 @@ func writeModelRow(b *strings.Builder, m *gatewaypb.Model, primaryRuntime string
 		esc(displayName), esc(displayName))
 	writeCapabilityIcons(b, m.GetCapabilities(), capIconStyleRow)
 	fmt.Fprintf(b, `<span class="text-xs text-neutral-400 flex-shrink-0" style="width:5rem;text-align:right">%s</span>`,
-		humanSizeLabel(m.GetSizeBytes()))
+		format.Bytes(m.GetSizeBytes()))
 	fmt.Fprintf(b, `<div onclick="event.stopPropagation()"><sl-tooltip content="Delete model"><sl-icon-button name="trash3" style="font-size:0.85rem;color:var(--sl-color-danger-400)" data-on:click="$confirmDeleteModelID='%s'; $confirmDeleteModelKind='%s'; $confirmDeleteModelOpen=true"></sl-icon-button></sl-tooltip></div></div>`,
 		idJS, rtJS)
 }
 
-// titleCaseModelType renders the gateway-supplied taxonomy label. The
-// taxonomy itself ("chat", "embedding", anything a future gateway invents)
-// is opaque to MASS — we just display the first rune capitalised.
-func titleCaseModelType(t string) string {
-	if t == "" {
+// modelTypeLabel returns the display string MASS shows for one
+// ModelTypeEntry. Gateway-supplied label wins when set; otherwise we
+// fall back to a canonical title-cased name for the typed kind.
+// Returns empty string for unspecified entries (MASS skips them).
+func modelTypeLabel(mt *gatewaypb.ModelTypeEntry) string {
+	if mt == nil {
 		return ""
 	}
-	return strings.ToUpper(t[:1]) + t[1:]
+	if l := mt.GetLabel(); l != "" {
+		return l
+	}
+	switch mt.GetKind() {
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_CHAT:
+		return "Chat"
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_EMBEDDING:
+		return "Embedding"
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_RERANK:
+		return "Rerank"
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_IMAGE_GEN:
+		return "Image Gen"
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_SPEECH_TO_TEXT:
+		return "Speech-to-Text"
+	case gatewaypb.ModelTypeKind_MODEL_TYPE_TEXT_TO_SPEECH:
+		return "Text-to-Speech"
+	default:
+		return ""
+	}
 }
 
 func prettyRuntimeName(name string) string {
@@ -509,29 +532,6 @@ func prettyRuntimeName(name string) string {
 		return "llama.cpp"
 	}
 	return name
-}
-
-func humanSizeLabel(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
-	case bytes >= MB:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
-	case bytes >= KB:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
-}
-
-func jsStringEscape(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`, "\n", `\n`, "\r", `\r`)
-	return r.Replace(s)
 }
 
 // capIconStyle picks the visual weight for capability icons. Group

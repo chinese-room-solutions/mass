@@ -1,9 +1,6 @@
 // Package web hosts MASS's HTTP surface: the dashboard UI, the management
-// RPC layer, and (in Stage 2) the /mass.<runtime>.* gateway proxy.
-//
-// Stage 1 keeps the surface intentionally minimal: login, theme/auth-token
-// settings, a workers tab, and a runtimes scaffold. Inference + apps live
-// elsewhere now (gateways) and will not return here.
+// RPC layer, and the /mass.<runtime>.* gateway proxy. Inference and apps
+// live in runtime gateways, not here.
 package web
 
 import (
@@ -13,14 +10,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/KernelPryanic/ctxerr"
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
+	"github.com/chinese-room-solutions/mass-proto/gen/go/rpcconnect"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
+	"github.com/chinese-room-solutions/mass-sdk/uikit"
+	"github.com/chinese-room-solutions/mass/internal/audit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/runtimes"
@@ -36,6 +34,7 @@ import (
 
 // HandlerOptions wires Handler to the rest of the process.
 type HandlerOptions struct {
+	Version   string
 	Config    *config.Config
 	Scheduler *scheduler.Scheduler
 	Runtimes  *runtimes.Manager
@@ -48,6 +47,7 @@ type HandlerOptions struct {
 	SysLog    *SystemLogBuffer
 	Workers   *worker.Fleet
 	WorkerHub *worker.Hub
+	Enroller  *worker.Enroller
 	ConfigDir string
 	LogsDir   string
 	DataDir   string
@@ -55,6 +55,7 @@ type HandlerOptions struct {
 
 // Handler implements http.Handler for the MASS web UI and management API.
 type Handler struct {
+	version   string
 	cfg       *config.Config
 	orch      *scheduler.Scheduler
 	runtimes  *runtimes.Manager
@@ -66,6 +67,7 @@ type Handler struct {
 	sysLog    *SystemLogBuffer
 	workers   *worker.Fleet
 	workerHub *worker.Hub
+	enroller  *worker.Enroller
 	configDir string
 	logsDir   string
 	dataDir   string
@@ -76,8 +78,11 @@ type Handler struct {
 	themeMu       sync.RWMutex
 	onThemeChange func(dark bool)
 
-	workersBroker   *WorkersBroker
-	schedulerBroker *SchedulerBroker
+	workersBroker   *Broker[WorkersEvent]
+	schedulerBroker *Broker[changeEvent]
+	queueBroker     *Broker[changeEvent]
+
+	artifactCache *artifactCache
 
 	mux *http.ServeMux
 }
@@ -85,6 +90,7 @@ type Handler struct {
 // NewHandler builds the web handler.
 func NewHandler(opts HandlerOptions) (*Handler, error) {
 	h := &Handler{
+		version:         opts.Version,
 		cfg:             opts.Config,
 		orch:            opts.Scheduler,
 		runtimes:        opts.Runtimes,
@@ -96,12 +102,20 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 		sysLog:          opts.SysLog,
 		workers:         opts.Workers,
 		workerHub:       opts.WorkerHub,
+		enroller:        opts.Enroller,
 		configDir:       opts.ConfigDir,
 		logsDir:         opts.LogsDir,
 		dataDir:         opts.DataDir,
 		authHash:        opts.AuthHash,
-		workersBroker:   NewWorkersBroker(opts.Logger),
-		schedulerBroker: NewSchedulerBroker(opts.Logger),
+		workersBroker:   NewBroker[WorkersEvent](opts.Logger, "workers-broker"),
+		schedulerBroker: NewBroker[changeEvent](opts.Logger, "scheduler-broker"),
+		queueBroker:     NewBroker[changeEvent](opts.Logger, "queue-broker"),
+	}
+	h.artifactCache = newArtifactCache(filepath.Join(h.registryCacheDir(), "artifacts"))
+	if h.orch != nil {
+		h.orch.SetQueueChangeCallback(func() {
+			h.queueBroker.Broadcast(changeEvent{})
+		})
 	}
 	if h.workers != nil {
 		h.workers.AddChangeCallback(func(evt worker.FleetChangeEvent) {
@@ -113,7 +127,7 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 			h.workersBroker.Broadcast(WorkersEvent{Kind: WorkersEventChange})
 			// Add/remove also moves rows on the Scheduler tab — when a
 			// worker drops, every model loaded on it disappears.
-			h.schedulerBroker.Broadcast(SchedulerEvent{})
+			h.schedulerBroker.Broadcast(changeEvent{})
 			// Auto-bench newly-connected workers in the background so the
 			// UI fills in numbers without an operator click. Devices that
 			// already have stored results are skipped.
@@ -122,10 +136,10 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 			}
 		})
 		// Loaded-set / pool-counter changes wake every Scheduler-tab
-		// subscriber. Models tab no longer needs a fan-out here — its
-		// per-row SSE stream is sourced directly from each runtime gateway.
+		// subscriber. The Models tab's per-row SSE stream is sourced
+		// directly from each runtime gateway, so no fan-out here.
 		h.workers.AddLoadedChangedCallback(func(_ string) {
-			h.schedulerBroker.Broadcast(SchedulerEvent{})
+			h.schedulerBroker.Broadcast(changeEvent{})
 		})
 	}
 	h.mux = h.buildRoutes()
@@ -147,6 +161,16 @@ func (h *Handler) SetAuthHash(hash []byte) {
 	h.authHashMu.Unlock()
 }
 
+// AuthDisabled reports whether MASS runs with no operator token configured. The
+// worker hub reads this live so enrollment mirrors the dashboard: with no token,
+// a worker may enroll without a join token; with one, it must present a valid
+// join token.
+func (h *Handler) AuthDisabled() bool {
+	h.authHashMu.RLock()
+	defer h.authHashMu.RUnlock()
+	return len(h.authHash) == 0
+}
+
 // ServeHTTP delegates to the internal mux.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
@@ -160,6 +184,16 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 		mux.Handle("GET /public/", http.StripPrefix("/public/", http.FileServer(pubFS)))
 	}
 
+	// Ops probes (no auth, see AuthMiddleware bypass list).
+	mux.HandleFunc("GET /metrics", h.handleMetrics)
+	mux.HandleFunc("GET /health", h.handleHealth)
+	mux.HandleFunc("GET /ready", h.handleReady)
+
+	// Worker installer proxy (no auth, see AuthMiddleware bypass list): serves
+	// a public installer binary; the join token rides only in the pasted
+	// command line the dashboard hands out.
+	mux.HandleFunc("GET /setup/worker-bin/{runtime_name}", h.handleSetupWorkerBin)
+
 	// Login.
 	mux.HandleFunc("GET /login", h.handleLoginPage)
 	mux.HandleFunc("POST /login", h.handleLoginSubmit)
@@ -170,11 +204,19 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	mux.HandleFunc("GET /{$}", h.handleDashboard)
 
 	// Internal browser-only HTML/SSE — not part of the public mass.v1 contract.
-	mux.HandleFunc("POST /internal/settings/theme", h.handleToggleTheme)
+	mux.HandleFunc("POST /internal/settings/theme", h.handleSetTheme)
 
 	// Runtime gateway management.
+	// Themes: browse/manage dialog (installed list is local, available list
+	// comes from the package registry).
+	mux.HandleFunc("GET /api/themes/registry", h.handleThemeRegistry)
+	mux.HandleFunc("POST /api/themes/install/{name}", h.handleThemeInstall)
+	mux.HandleFunc("POST /api/themes/remove/{id}", h.handleThemeRemove)
+
 	mux.HandleFunc("GET /api/runtimes", h.handleListRuntimes)
 	mux.HandleFunc("POST /api/runtimes/install", h.handleInstallRuntime)
+	mux.HandleFunc("GET /api/runtimes/registry", h.handleRegistryAvailable)
+	mux.HandleFunc("POST /api/runtimes/registry/install/{name}", h.handleRegistryInstall)
 	mux.HandleFunc("DELETE /api/runtimes/{kind}", h.handleUninstallRuntime)
 	mux.HandleFunc("POST /api/runtimes/{kind}/start", h.handleStartRuntime)
 	mux.HandleFunc("POST /api/runtimes/{kind}/stop", h.handleStopRuntime)
@@ -187,17 +229,20 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	// state shifted) so the JS aggregator re-fans the list.
 	mux.HandleFunc("GET /api/models/stream", h.handleModelsStreamSSE)
 
-	// Install / download lifecycle.
-	mux.HandleFunc("POST /api/models/install", h.handleInstallModel)
+	// Install / download lifecycle. Registry installs (HF, etc.) are
+	// gateway-hosted UIs mounted under /mass.<runtime>.*/install via
+	// the gateway HTTP proxy; gateways call back into MASS via the
+	// MassScheduler.DownloadFiles RPC for the actual fetch. Browse
+	// Local stays MASS-side because filesystem access lives on the
+	// MASS host.
 	mux.HandleFunc("POST /api/models/import", h.handleImportLocalModel)
+	mux.HandleFunc("POST /api/models/delete", h.handleDeleteModel)
 	mux.HandleFunc("GET /api/groups/names", h.handleListGroupNames)
 	mux.HandleFunc("POST /api/groups/rename", h.handleRenameGroup)
 	mux.HandleFunc("POST /api/models/download/pause", h.handleDownloadPause)
 	mux.HandleFunc("POST /api/models/download/resume", h.handleDownloadResume)
 	mux.HandleFunc("POST /api/models/download/cancel", h.handleDownloadCancel)
 	mux.HandleFunc("GET /api/models/downloads/events", h.handleDownloadsEventsSSE)
-	mux.HandleFunc("POST /api/models/search", h.handleSearchHF)
-	mux.HandleFunc("POST /api/models/search/more", h.handleSearchHFMore)
 
 	// Scheduler view.
 	mux.HandleFunc("GET /api/scheduler/list", h.handleSchedulerList)
@@ -211,6 +256,16 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	mux.HandleFunc("POST /api/workers/benchmark", h.handleWorkersBenchmark)
 	mux.HandleFunc("POST /api/workers/{id}/toggle", h.handleToggleWorker)
 	mux.HandleFunc("POST /api/workers/{id}/devices/{devID}/toggle", h.handleToggleDevice)
+	mux.HandleFunc("POST /api/workers/{id}/revoke", h.handleRevokeWorker)
+	mux.HandleFunc("GET /api/workers/join-token", h.handleAddWorkerToken)
+	mux.HandleFunc("GET /api/workers/add-dialog-options", h.handleAddWorkerOptions)
+
+	// Queue tab.
+	mux.HandleFunc("GET /api/queue/list", h.handleQueueList)
+	mux.HandleFunc("GET /api/queue/events", h.handleQueueEventsSSE)
+	mux.HandleFunc("POST /api/queue/cancel", h.handleQueueCancel)
+	mux.HandleFunc("POST /api/queue/evict", h.handleQueueEvict)
+	mux.HandleFunc("POST /api/queue/cancel-running", h.handleQueueCancelRunning)
 
 	// File browser (used by Settings + Install dialogs).
 	mux.HandleFunc("GET /api/v1/browse/roots", h.handleBrowseRoots)
@@ -241,6 +296,15 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 		mux.Handle(path, handler)
 	}
 
+	// Public mass.v1.Mass management API (Connect = gRPC + JSON-over-HTTP).
+	// Its path is "/mass.v1.Mass/..."; ServeMux longest-prefix matching makes
+	// it win over the "/" runtime-proxy catch-all above (which only acts on the
+	// "/mass.<runtime>." shapes).
+	{
+		path, handler := rpcconnect.NewMassHandler(&massService{h: h})
+		mux.Handle(path, handler)
+	}
+
 	return mux
 }
 
@@ -252,92 +316,78 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// activated, keeping initial dashboard render O(1) regardless of model
 	// count or worker fleet size. Runtimes is rendered inline because it's
 	// already cheap (just a manifest list, no RPCs).
+	theme := string(uikit.ParseTheme(h.cfg.Theme))
 	data := templates.DashboardData{
-		Theme:           h.cfg.Theme,
-		ConfigDir:       h.configDir,
-		LogsDir:         h.logsDir,
-		DataDir:         h.cfg.DataDir,
-		ListenAddr:      h.cfg.ListenAddr,
-		AuthTokenSet:    func() bool { h.authHashMu.RLock(); defer h.authHashMu.RUnlock(); return len(h.authHash) > 0 }(),
-		LogLevel:        logLevelString(h.cfg.Logger.Level),
-		DevMode:         h.cfg.DevMode,
-		ResultTTL:       h.cfg.ResultTTL,
-		IdleEvictionTTL: h.cfg.IdleEvictionTTL,
-		RegistryURL:     h.cfg.RegistryURL,
-		TLSEnabled:      h.cfg.TLS.Enabled,
-		TLSCertFile:     h.cfg.TLS.CertFile,
-		Runtimes:        h.runtimeViews(),
+		Theme:            theme,
+		Version:          h.version,
+		ConfigFile:       config.FilePath(h.configDir),
+		LogsDir:          h.logsDir,
+		DataDir:          h.cfg.DataDir,
+		EffectiveDataDir: h.dataDir,
+		ListenAddr:       h.cfg.ListenAddr,
+		AuthTokenSet:     func() bool { h.authHashMu.RLock(); defer h.authHashMu.RUnlock(); return len(h.authHash) > 0 }(),
+		LogLevel:         logLevelString(h.cfg.Logger.Level),
+		DevMode:          h.cfg.DevMode,
+		ResultTTL:        h.cfg.ResultTTL,
+		IdleEvictionTTL:  h.cfg.IdleEvictionTTL,
+		LoadAttempts:     h.cfg.EffectiveLoadAttempts(),
+		RegistryURL:      h.cfg.RegistryURL,
+		TLSEnabled:       h.cfg.TLS.Enabled,
+		TLSCertFile:      h.cfg.TLS.CertFile,
+		Runtimes:         h.runtimeViews(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := templates.Layout("MASS", templates.Shell(data), h.cfg.Theme).Render(r.Context(), w); err != nil {
+	if err := templates.Layout("MASS", templates.Shell(data), theme).Render(r.Context(), w); err != nil {
 		h.logger.Warn().Err(err).Msg("rendering dashboard")
 	}
 }
 
+// runtimeViews maps the neutral runtime views onto the dashboard template
+// shape.
 func (h *Handler) runtimeViews() []templates.RuntimeViewData {
-	if h.runtimes == nil {
+	infos := h.listRuntimeInfos()
+	if infos == nil {
 		return nil
 	}
-	mfs := h.runtimes.List()
-	out := make([]templates.RuntimeViewData, len(mfs))
-	for i, mf := range mfs {
+	out := make([]templates.RuntimeViewData, len(infos))
+	for i, ri := range infos {
 		out[i] = templates.RuntimeViewData{
-			RuntimeName: mf.RuntimeName,
-			DisplayName: mf.DisplayName,
-			Version:     mf.Version,
-			Description: mf.Description,
-			AutoStart:   mf.AutoStart,
-			Running:     h.runtimes.IsRunning(mf.RuntimeName),
+			RuntimeName: ri.RuntimeName,
+			DisplayName: ri.DisplayName,
+			Version:     ri.Version,
+			Description: ri.Description,
+			AutoStart:   ri.AutoStart,
+			Running:     ri.Running,
 		}
 	}
 	return out
 }
 
-// schedulerInstances builds the typed Scheduler-tab views from the live
-// worker fleet. One instance per (worker, loaded-model) pair.
+// schedulerInstances maps the neutral loaded-instance views onto the
+// Scheduler-tab template shape.
 func (h *Handler) schedulerInstances() []templates.SchedulerInstanceView {
-	if h.workers == nil {
+	infos := h.instanceInfos()
+	if infos == nil {
 		return nil
 	}
-	var out []templates.SchedulerInstanceView
-	for _, w := range h.workers.All() {
-		sw, ok := w.(*worker.StreamWorker)
-		if !ok {
-			continue
-		}
-		// Pick the first device as a compact display chip.
-		deviceID := ""
-		if devs := sw.Devices(); len(devs) > 0 {
-			deviceID = devs[0].ID
-		}
-		for _, lm := range sw.LoadedModels() {
-			status := "Active"
-			if lm.Active == 0 {
-				status = "Idle"
-			}
-			filename, fingerprint := splitModelID(lm.ModelID)
-			source := lm.Source
-			if source == "" {
-				source = "direct"
-			}
-			out = append(out, templates.SchedulerInstanceView{
-				Key:         sw.ID() + ":" + lm.ModelID,
-				ModelID:     lm.ModelID,
-				Filename:    filename,
-				Fingerprint: fingerprint,
-				WorkerID:    sw.ID(),
-				WorkerName:  sw.Name(),
-				RuntimeName: sw.RuntimeName(),
-				DeviceID:    deviceID,
-				Source:      source,
-				Mode:        "dynamic", // gateway-driven loads are dynamic by definition
-				PoolSize:    lm.PoolSize,
-				Active:      lm.Active,
-				Status:      status,
-			})
+	out := make([]templates.SchedulerInstanceView, len(infos))
+	for i, in := range infos {
+		out[i] = templates.SchedulerInstanceView{
+			Key:         in.Key,
+			ModelID:     in.ModelID,
+			Filename:    in.Filename,
+			Fingerprint: in.Fingerprint,
+			WorkerID:    in.WorkerID,
+			WorkerName:  in.WorkerName,
+			RuntimeName: in.RuntimeName,
+			DeviceIDs:   in.DeviceIDs,
+			Source:      in.Source,
+			Mode:        in.Mode,
+			PoolSize:    in.PoolSize,
+			Active:      in.Active,
+			Status:      in.Status,
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
 
@@ -348,21 +398,10 @@ func logLevelString(l config.LogLevel) string {
 	return string(b)
 }
 
-// splitModelID splits a gateway-built model ID at its trailing
-// "#<fingerprint>" suffix, returning the prefix as filename and the
-// fingerprint separately. Shape is gateway-defined and opaque to MASS;
-// today llama-cpp emits "<filename>#<sha-prefix>". Returns the full ID
-// as filename when no '#' is present.
-func splitModelID(id string) (filename, fingerprint string) {
-	if i := strings.LastIndexByte(id, '#'); i >= 0 {
-		return id[:i], id[i+1:]
-	}
-	return id, ""
-}
-
 func (h *Handler) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := templates.Layout("MASS - Login", templates.LoginPage(""), h.cfg.Theme).Render(r.Context(), w); err != nil {
+	theme := string(uikit.ParseTheme(h.cfg.Theme))
+	if err := templates.Layout("MASS - Login", templates.LoginPage(""), theme).Render(r.Context(), w); err != nil {
 		h.logger.Warn().Err(err).Msg("rendering login page")
 	}
 }
@@ -379,8 +418,13 @@ func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	h.authHashMu.RUnlock()
 
 	if len(hash) == 0 || bcrypt.CompareHashAndPassword(hash, []byte(token)) != nil {
+		audit.Log(h.logger, "auth.login", remoteAddr(r), audit.OutcomeDenied).
+			Str("reason", "invalid token").Msg("")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = templates.Layout("MASS - Login", templates.LoginPage("Invalid token."), h.cfg.Theme).Render(r.Context(), w)
+		theme := string(uikit.ParseTheme(h.cfg.Theme))
+		if err := templates.Layout("MASS - Login", templates.LoginPage("Invalid token."), theme).Render(r.Context(), w); err != nil {
+			h.logger.Warn().Err(err).Msg("rendering login page")
+		}
 		return
 	}
 
@@ -389,7 +433,8 @@ func (h *Handler) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
-	setSessionCookie(w, id)
+	audit.Log(h.logger, "auth.login", remoteAddr(r), audit.OutcomeOK).Msg("")
+	setSessionCookie(w, id, h.cfg.TLS.Enabled)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -397,18 +442,39 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("mass_session"); err == nil && h.sessions != nil {
 		h.sessions.Invalidate(c.Value)
 	}
+	audit.Log(h.logger, "auth.logout", remoteAddr(r), audit.OutcomeOK).Msg("")
 	http.SetCookie(w, &http.Cookie{Name: "mass_session", Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 // --- Internal endpoints ---
 
-func (h *Handler) handleToggleTheme(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.Theme == "light" {
-		h.cfg.Theme = "dark"
-	} else {
-		h.cfg.Theme = "light"
+func (h *Handler) handleSetTheme(w http.ResponseWriter, r *http.Request) {
+	// Read the $theme signal before creating the SSE generator — NewSSE
+	// consumes the request body, so a read after it comes back empty.
+	var signals struct {
+		Theme string `json:"theme"`
 	}
+	if err := datastar.ReadSignals(r, &signals); err != nil {
+		h.logger.Debug().Err(err).Msg("reading theme signal")
+		return
+	}
+	info, ok := uikit.LookupTheme(signals.Theme)
+	if !ok {
+		// Unknown or empty theme: no-op (don't persist, don't patch).
+		return
+	}
+	h.applyTheme(datastar.NewSSE(w, r), info)
+}
+
+// applyTheme makes info the active theme: persists it, notifies the native
+// chrome callback, and patches $theme (name) + $themeBase so every
+// data-attr-bound element (page background, logo image, dialog tints) flips
+// alongside the OS window. The native callback only affects host chrome — the
+// page itself listens for these signals. Shared by the theme picker and the
+// fallback taken when the active theme is uninstalled.
+func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.ThemeInfo) {
+	h.cfg.Theme = string(info.Name)
 	if h.saveFn != nil {
 		h.saveFn()
 	}
@@ -416,97 +482,70 @@ func (h *Handler) handleToggleTheme(w http.ResponseWriter, r *http.Request) {
 	cb := h.onThemeChange
 	h.themeMu.RUnlock()
 	if cb != nil {
-		cb(h.cfg.Theme != "light")
+		// Native chrome tracks the theme's base, so any pluggable theme maps
+		// its window frame onto dark/light correctly.
+		cb(info.Base == uikit.ThemeDark)
 	}
-	// Patch the $theme Datastar signal so every data-attr-bound element
-	// (page background, logo image, sl-icon glyph, dialog tints) flips
-	// alongside the OS window. The native window callback above only
-	// affects the host chrome — the page itself listens for this signal.
-	sse := datastar.NewSSE(w, r)
-	if b, err := json.Marshal(map[string]any{"theme": h.cfg.Theme}); err == nil {
+	if b, err := json.Marshal(map[string]any{"theme": string(info.Name), "themeBase": string(info.Base)}); err == nil {
 		if err := sse.PatchSignals(b); err != nil {
-			h.logger.Debug().Err(err).Msg("patching theme signal")
+			h.logger.Debug().Err(err).Msg("patching theme signals")
 		}
 	}
 }
 
 // --- Workers tab ---
 
-// buildWorkerViews assembles per-worker render data from the live fleet
-// plus any stored benchmark rows. Returned in fleet enumeration order.
+// buildWorkerViews maps the neutral worker views onto the Workers-tab template
+// shape.
 func (h *Handler) buildWorkerViews() []templates.WorkerView {
-	all := h.workers.All()
-	views := make([]templates.WorkerView, 0, len(all))
-	for _, wkr := range all {
-		status := wkr.Status()
-
-		statsMap := make(map[string]stats.DeviceStats)
-		for _, s := range wkr.Stats() {
-			statsMap[s.DeviceID] = s
+	infos := h.workerInfos()
+	views := make([]templates.WorkerView, 0, len(infos))
+	for _, wi := range infos {
+		devices := make([]templates.ComputeView, 0, len(wi.Devices))
+		for _, di := range wi.Devices {
+			devices = append(devices, templates.ComputeView{
+				DeviceID:       di.DeviceID,
+				DeviceName:     di.DeviceName,
+				Type:           di.Type,
+				Enabled:        di.Enabled,
+				MemoryMB:       di.TotalMemoryMB,
+				UsedMemoryMB:   di.UsedMemoryMB,
+				UtilizationPct: di.UtilizationPct,
+				HasUtilization: di.HasUtilization,
+				HasStats:       di.HasStats,
+				MemoryGBs:      di.MemoryGBs,
+				LoadGBs:        di.LoadGBs,
+				ComputeGFlops:  di.ComputeGFlops,
+				HasBenchmark:   di.HasBenchmark,
+			})
 		}
-
-		// Snapshot the operator's per-device toggle state once per worker
-		// — absent rows mean "enabled" (sane default for newly-connected
-		// workers without any persisted intent).
-		enabledByDev := map[string]bool{}
-		if h.store != nil {
-			if rows, err := h.store.ListWorkerDevicesEnabled(wkr.ID()); err == nil {
-				for _, r := range rows {
-					enabledByDev[r.DeviceID] = r.Enabled
-				}
-			}
-		}
-
-		var devices []templates.ComputeView
-		anyEnabled := false
-		for _, dev := range safeDevices(wkr) {
-			devEnabled := true
-			if v, ok := enabledByDev[dev.ID]; ok {
-				devEnabled = v
-			}
-			if devEnabled {
-				anyEnabled = true
-			}
-			cv := templates.ComputeView{
-				DeviceID:   dev.ID,
-				DeviceName: dev.Name,
-				Type:       string(dev.Type),
-				Enabled:    devEnabled,
-				MemoryMB:   dev.TotalMemoryMB,
-			}
-			if row, err := h.store.GetBenchmark(wkr.ID(), dev.ID); err == nil {
-				cv.MemoryGBs = row.MemoryGBs
-				cv.ComputeGFlops = row.ComputeGFlops
-				cv.HasBenchmark = true
-			}
-			if s, ok := statsMap[dev.ID]; ok {
-				if s.TotalMemoryMB > 0 {
-					cv.UsedMemoryMB = s.UsedMemoryMB
-					cv.MemoryMB = s.TotalMemoryMB
-					cv.HasStats = true
-				}
-				cv.UtilizationPct = s.UtilizationPct
-				cv.HasUtilization = true
-			}
-			devices = append(devices, cv)
-		}
-		// "Worker enabled" is derived: any non-disabled device counts.
-		// A worker with no devices yet (race window before first heartbeat)
-		// is treated as enabled.
-		workerEnabled := anyEnabled || len(devices) == 0
-
 		views = append(views, templates.WorkerView{
-			ID:          wkr.ID(),
-			Name:        wkr.Name(),
-			RuntimeName: wkr.RuntimeName(),
-			Online:      status.Online,
-			Enabled:     workerEnabled,
+			ID:          wi.ID,
+			Name:        wi.Name,
+			RuntimeName: wi.RuntimeName,
+			Version:     wi.Version,
+			Online:      wi.Online,
+			Enabled:     wi.Enabled,
 			Devices:     devices,
-			ActiveJobs:  wkr.ActiveJobs(),
-			Capacity:    wkr.AvailableCapacity(),
+			ActiveJobs:  wi.ActiveJobs,
 		})
 	}
 	return views
+}
+
+// primaryThroughput returns one representative throughput number from a
+// device's runtime-private axis map for the Workers tab card. Today the
+// UI shows one "Compute" line per device; we pick the highest value so a
+// worker that advertises multiple axes still shows its strongest number.
+// Returns 0 when the map is empty.
+func primaryThroughput(axes map[string]float64) float64 {
+	var best float64
+	for _, v := range axes {
+		if v > best {
+			best = v
+		}
+	}
+	return best
 }
 
 // safeDevices calls Devices() with panic recovery — a misbehaving worker
@@ -529,10 +568,14 @@ func safeDevices(wkr worker.WorkerInterface) (devices []stats.Device) {
 
 func (h *Handler) handleRuntimeProxy(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/mass.")
-	// Two route shapes share this proxy:
-	//   /mass.<kind>.<rest>   — typed HTTP + OpenAI-compat (kind is followed by '.')
-	//   /mass.<kind>/<rest>   — typed gRPC (kind is followed by '/')
-	// The kind ends at whichever separator appears first.
+	// Two route shapes share this proxy; the kind ends at whichever
+	// separator appears first, and the separator stays on the forwarded
+	// sub-path, so it decides which gateway routes are reachable:
+	//   /mass.<kind>.<rest>   — forwards ".<rest>" (the gateway's typed
+	//                           HTTP API, e.g. ".v1/Chat")
+	//   /mass.<kind>/<rest>   — forwards "/<rest>" (the gateway's plain
+	//                           HTTP routes — OpenAI-compat shim — and
+	//                           typed gRPC services)
 	sepIdx := -1
 	for i := 0; i < len(rest); i++ {
 		if rest[i] == '.' || rest[i] == '/' {
@@ -698,8 +741,7 @@ func expectedClientDisconnect(err error) bool {
 		return true
 	}
 	// http.ErrAbortHandler is a panic value, not an error; everything else
-	// flows through as a network-level error. Stage 2 keeps this minimal —
-	// add tighter classification when real bug reports demand it.
+	// flows through as a network-level error.
 	return false
 }
 
@@ -718,22 +760,3 @@ func (h *Handler) writeJSONError(w http.ResponseWriter, status int, msg, runtime
 		h.logger.Debug().Err(err).Msg("writing runtime proxy error response")
 	}
 }
-
-// --- Misc ---
-
-// Bcrypt is re-exported so cmd/mass can hash tokens without importing
-// the underlying package directly.
-func Bcrypt(token string) ([]byte, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, ctxerr.With(fmt.Errorf("hashing token: %w", err), nil)
-	}
-	return hash, nil
-}
-
-// Ensure unused imports don't break builds while routes are stubbed.
-var (
-	_ = context.Background
-	_ = time.Now
-	_ = json.Marshal
-)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
+	"github.com/chinese-room-solutions/mass/internal/store"
 )
 
 // ResultStatus tracks the lifecycle of a queued job.
@@ -32,19 +33,23 @@ type Result struct {
 // crash-recovery. The body is gateway-defined opaque bytes — MASS does not
 // inspect it. Identity dedup belongs to the gateway, not MASS.
 type ResultStore struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect Dialect
 }
 
 // NewResultStore creates a new ResultStore using the given database.
-func NewResultStore(db *sql.DB) *ResultStore {
-	return &ResultStore{db: db}
+func NewResultStore(db *sql.DB, dialect Dialect) *ResultStore {
+	return &ResultStore{db: db, dialect: dialect}
 }
+
+// rebind rewrites `?` to `$N` placeholders for the store's dialect.
+func (s *ResultStore) rebind(query string) string { return store.Rebind(s.dialect, query) }
 
 // Create inserts a new pending result entry. Called when a request is enqueued.
 func (s *ResultStore) Create(id string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO queue_results (id, status) VALUES (?, ?)`,
-		id, ResultStatusPending,
+		s.rebind(`INSERT INTO queue_results (id, status, created_at) VALUES (?, ?, ?)`),
+		id, ResultStatusPending, time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return ctxerr.With(fmt.Errorf("creating result entry: %w", err), map[string]any{"id": id})
@@ -52,20 +57,40 @@ func (s *ResultStore) Create(id string) error {
 	return nil
 }
 
-// MarkProcessing transitions a result to processing status.
-func (s *ResultStore) MarkProcessing(id string) error {
+// Processing marks a pending result as processing — the job has actually
+// started running on a worker. Guarded on the current status so a terminal
+// write racing this call is never regressed: only a pending row flips.
+func (s *ResultStore) Processing(id string) error {
 	_, err := s.db.Exec(
-		`UPDATE queue_results SET status = ? WHERE id = ?`,
-		ResultStatusProcessing, id,
+		s.rebind(`UPDATE queue_results SET status = ? WHERE id = ? AND status = ?`),
+		ResultStatusProcessing, id, ResultStatusPending,
 	)
-	return err
+	if err != nil {
+		return ctxerr.With(fmt.Errorf("marking result processing: %w", err), map[string]any{"id": id})
+	}
+	return nil
+}
+
+// Pending reverts a processing result back to pending — the job lost its
+// worker and awaits redistribution. Guarded the same way as
+// [ResultStore.Processing]: only a processing row flips, so a terminal
+// status can never be regressed by a racing revert.
+func (s *ResultStore) Pending(id string) error {
+	_, err := s.db.Exec(
+		s.rebind(`UPDATE queue_results SET status = ? WHERE id = ? AND status = ?`),
+		ResultStatusPending, id, ResultStatusProcessing,
+	)
+	if err != nil {
+		return ctxerr.With(fmt.Errorf("reverting result to pending: %w", err), map[string]any{"id": id})
+	}
+	return nil
 }
 
 // Complete stores the response body and marks the result as done.
 func (s *ResultStore) Complete(id string, body []byte) error {
 	_, err := s.db.Exec(
-		`UPDATE queue_results SET status = ?, body = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ') WHERE id = ?`,
-		ResultStatusDone, body, id,
+		s.rebind(`UPDATE queue_results SET status = ?, body = ?, completed_at = ? WHERE id = ?`),
+		ResultStatusDone, body, time.Now().UTC().Format(time.RFC3339Nano), id,
 	)
 	return err
 }
@@ -73,8 +98,8 @@ func (s *ResultStore) Complete(id string, body []byte) error {
 // Fail marks a result as failed with an error message.
 func (s *ResultStore) Fail(id string, errMsg string) error {
 	_, err := s.db.Exec(
-		`UPDATE queue_results SET status = ?, error = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ') WHERE id = ?`,
-		ResultStatusError, errMsg, id,
+		s.rebind(`UPDATE queue_results SET status = ?, error = ?, completed_at = ? WHERE id = ?`),
+		ResultStatusError, errMsg, time.Now().UTC().Format(time.RFC3339Nano), id,
 	)
 	return err
 }
@@ -84,7 +109,7 @@ func (s *ResultStore) Get(id string) (*Result, error) {
 	r := &Result{}
 	var completedAt, errMsg sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, status, body, error, created_at, completed_at FROM queue_results WHERE id = ?`,
+		s.rebind(`SELECT id, status, body, error, created_at, completed_at FROM queue_results WHERE id = ?`),
 		id,
 	).Scan(&r.ID, &r.Status, &r.Body, &errMsg, &r.CreatedAt, &completedAt)
 	if err == sql.ErrNoRows {
@@ -95,44 +120,28 @@ func (s *ResultStore) Get(id string) (*Result, error) {
 	}
 	r.Error = errMsg.String
 	if completedAt.Valid {
-		t, _ := time.Parse("2006-01-02T15:04:05.000Z", completedAt.String)
+		t, err := time.Parse(time.RFC3339Nano, completedAt.String)
+		if err != nil {
+			return nil, ctxerr.With(fmt.Errorf("parsing completed_at: %w", err), map[string]any{"id": id})
+		}
 		r.CompletedAt = &t
 	}
 	return r, nil
 }
 
-// Cleanup removes results older than the given TTL.
+// Cleanup removes terminal (done/error) results whose completion is older
+// than the given TTL. Live rows (pending/processing) are never TTL-pruned —
+// a job queued or running longer than the TTL must keep its result row so
+// the eventual Complete/Fail lands somewhere. Never-terminal leftovers are
+// the job of the buffer reaper and the startup sweeper, not this cleanup.
 func (s *ResultStore) Cleanup(ttl time.Duration) (int64, error) {
-	cutoff := time.Now().UTC().Add(-ttl).Format("2006-01-02T15:04:05.000Z")
+	cutoff := time.Now().UTC().Add(-ttl).Format(time.RFC3339Nano)
 	res, err := s.db.Exec(
-		`DELETE FROM queue_results WHERE created_at < ?`,
-		cutoff,
+		s.rebind(`DELETE FROM queue_results WHERE status IN (?, ?) AND completed_at < ?`),
+		ResultStatusDone, ResultStatusError, cutoff,
 	)
 	if err != nil {
 		return 0, ctxerr.With(fmt.Errorf("cleaning up results: %w", err), map[string]any{"ttl": ttl.String()})
 	}
 	return res.RowsAffected()
-}
-
-// WaitForResult polls the result store until the given result is completed or done is closed.
-// Returns the completed result or an error.
-func (s *ResultStore) WaitForResult(id string, pollInterval time.Duration, done <-chan struct{}) (*Result, error) {
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		r, err := s.Get(id)
-		if err != nil {
-			return nil, err
-		}
-		if r != nil && (r.Status == ResultStatusDone || r.Status == ResultStatusError) {
-			return r, nil
-		}
-
-		select {
-		case <-done:
-			return nil, fmt.Errorf("context cancelled while waiting for result %s", id)
-		case <-ticker.C:
-		}
-	}
 }
