@@ -1316,14 +1316,14 @@ func registryRow(p RegistryPackageView) templ.Component {
 			}
 		}
 		if p.IncompatibleWorkers > 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 105, "<div class=\"flex items-center gap-1 mt-1\"><sl-icon name=\"exclamation-triangle\" style=\"color:var(--sl-color-warning-600);font-size:0.8rem\"></sl-icon> <span class=\"text-xs\" style=\"color:var(--sl-color-warning-600)\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 105, "<div class=\"flex items-center gap-1 mt-1\"><sl-icon name=\"exclamation-triangle\" style=\"color:var(--mass-warning);font-size:0.8rem\"></sl-icon> <span class=\"text-xs\" style=\"color:var(--mass-warning)\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var50 string
 			templ_7745c5c3_Var50, templ_7745c5c3_Err = templ.JoinStringErrs(incompatibleWorkersLabel(p.IncompatibleWorkers))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 964, Col: 118}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 964, Col: 110}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var50))
 			if templ_7745c5c3_Err != nil {

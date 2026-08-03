@@ -101,10 +101,6 @@ sl-select[size="small"] sl-option::part(base) { padding: 0.35rem 0.5rem; font-si
 sl-select[size="small"] sl-option::part(checked-icon) { display: none; }
 
 
-/* Shoelace inputs/selects: match creamy white in light mode */
-html.sl-theme-light sl-input::part(base),
-html.sl-theme-light sl-select::part(combobox) { background-color: var(--sl-color-neutral-0) !important; }
-
 /* Shoelace form labels: match heading color in light mode */
 html.sl-theme-light sl-input::part(form-control-label),
 html.sl-theme-light sl-select::part(form-control-label) { color: var(--mass-text) !important; }
@@ -133,9 +129,6 @@ html.sl-theme-light [data-tab-name].text-neutral-400 { color: var(--mass-text-mu
 html.sl-theme-light [data-tab-name].text-neutral-400:hover { color: var(--mass-text) !important; }
 
 /* Colored badges: warm pastel bg + dusty text for the cream light mode (AA) */
-html.sl-theme-light .bg-blue-900\/40,
-html.sl-theme-light .bg-blue-900\/60   { background-color: #dde7f5 !important; }
-html.sl-theme-light .text-blue-300     { color: #3a5f92 !important; }
 html.sl-theme-light .bg-purple-900\/60 { background-color: #e9e4f4 !important; }
 html.sl-theme-light .text-purple-300   { color: #744fa8 !important; }
 html.sl-theme-light .bg-teal-900\/60   { background-color: #d8ede8 !important; }
@@ -175,6 +168,19 @@ sl-dialog.sl-theme-dark                   { color: #f5f5f5; }
 .bg-green-400 { background-color: var(--mass-success) !important; }
 .bg-blue-400  { background-color: var(--mass-accent) !important; }
 .bg-red-400   { background-color: var(--mass-danger) !important; }
+
+/* Clickable model/worker names (Scheduler, Queues). Tailwind's blue-400/300 are
+   a warmer hue than any theme's accent, so drive them off the primary ramp
+   instead — the accent itself is too close to body text on Carbon to read as a
+   link. Light needs the darker steps: the ramp's 300/400 fail AA on cream. The
+   hover selector is repeated because Tailwind's own :hover rule outranks a bare
+   class, !important or not. */
+.text-blue-400 { color: var(--sl-color-primary-400) !important; }
+.text-blue-300,
+.hover\:text-blue-300:hover { color: var(--sl-color-primary-300) !important; }
+html.sl-theme-light .text-blue-400 { color: var(--sl-color-primary-600) !important; }
+html.sl-theme-light .text-blue-300,
+html.sl-theme-light .hover\:text-blue-300:hover { color: var(--sl-color-primary-700) !important; }
 
 
 /* Center Apps-tab dialogs relative to the right content panel (not full viewport).
