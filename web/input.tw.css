@@ -120,7 +120,7 @@ html.sl-theme-light .mass-field-label { color: var(--mass-text); }
 /* Themes dialog: installed rows activate on click; the inline border color
    needs !important to lose to the hover highlight. */
 .mass-theme-row { cursor: pointer; transition: border-color 120ms; }
-.mass-theme-row:hover { border-color: var(--sl-color-primary-500) !important; }
+.mass-theme-row:hover { border-color: var(--mass-accent) !important; }
 
 html.sl-theme-light .hover\:bg-neutral-700\/40:hover { background-color: var(--mass-bg-hover) !important; }
 
