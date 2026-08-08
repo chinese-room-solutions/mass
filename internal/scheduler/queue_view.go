@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/KernelPryanic/ctxerr"
@@ -507,15 +508,23 @@ func (s *Scheduler) GetResult(requestID string) (*queue.Result, error) {
 // CancelByRequestID cancels a submitted job by its request_id, whether it
 // is still pending (queued, not yet dispatched) or already running.
 //
-// Pending rows live on the global queue keyed by an opaque GlobalMsgID, not
-// the request_id, so we scan the unleased global rows for the matching
-// [queue.Envelope.RequestID] and cancel that row. If no pending row matches,
-// the job has already been dispatched, so we fall through to the in-flight
-// cancel path. Returns [ErrNotInflight] when neither matches — already
-// completed, never existed, or expired.
+// Queue rows are keyed by an opaque message ID, not the request_id, so
+// each pending shape is found by scanning for the matching
+// [queue.Envelope.RequestID]:
 //
-// A row can race pending->leased->inflight between the two checks; that's
-// benign: a row that just left the pending scan is caught by the running
+//   - unplaced: an unleased row on the global queue;
+//   - placed but not yet dispatched: an unleased row on a worker queue,
+//     behind a global anchor leased for [anchorLeaseDuration] (the common
+//     case — Submit places inline, so the anchor is already hidden).
+//
+// If neither matches, the job has already been dispatched, so we fall
+// through to the mid-dispatch marker and then the in-flight cancel path.
+// Leased worker rows are deliberately left to those two — a leased row is
+// being dispatched or is running. Returns [ErrNotInflight] when nothing
+// matches: already completed, never existed, or expired.
+//
+// A row can race pending->leased->inflight between the checks; that's
+// benign: a row that just left a pending scan is caught by the running
 // path, and one that just completed surfaces as ErrNotInflight.
 func (s *Scheduler) CancelByRequestID(_ context.Context, requestID string) error {
 	// Cancellation mutates durable state (deleting the pending row, writing
@@ -539,6 +548,13 @@ func (s *Scheduler) CancelByRequestID(_ context.Context, requestID string) error
 		if found {
 			return s.cancelGlobal(ctx, globalQ, msgID)
 		}
+	}
+	q, msgID, found, err := s.findPendingWorkerRow(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	if found {
+		return s.cancelWorkerQueue(ctx, q, msgID, globalQ)
 	}
 	// A job that's left the pending queue but isn't yet inflight is mid-
 	// dispatch (leased, loading the model). Record the cancel intent;
@@ -570,6 +586,32 @@ func (s *Scheduler) findPendingGlobalRow(ctx context.Context, globalQ queue.Queu
 		}
 	}
 	return "", false, nil
+}
+
+// findPendingWorkerRow scans every worker queue's unleased rows for the one
+// whose envelope carries requestID, returning the queue it sits on and its
+// message ID. found=false means no worker queue holds it pending.
+func (s *Scheduler) findPendingWorkerRow(ctx context.Context, requestID string) (queue.QueueInterface, queue.MessageID, bool, error) {
+	s.queueMu.RLock()
+	queues := slices.Collect(maps.Values(s.devQueues))
+	s.queueMu.RUnlock()
+
+	for _, q := range queues {
+		msgs, err := q.Peek(ctx, queuePeekLimit)
+		if err != nil {
+			return nil, "", false, ctxerr.With(fmt.Errorf("peeking worker queue for cancel: %w", err), map[string]any{"request_id": requestID, "queue": q.Name()})
+		}
+		for _, m := range msgs {
+			env, envErr := queue.UnmarshalEnvelope(m.Body)
+			if envErr != nil {
+				continue
+			}
+			if env.RequestID == requestID {
+				return q, m.ID, true, nil
+			}
+		}
+	}
+	return nil, "", false, nil
 }
 
 // findUnleasedRow looks for msgID among the queue's currently-visible

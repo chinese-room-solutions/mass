@@ -137,6 +137,75 @@ func TestCancelByRequestID(t *testing.T) {
 		require.Equal(t, queue.ResultStatusError, r.Status)
 	})
 
+	// Submit places inline, so a job that is merely queued normally sits
+	// unleased on a WORKER queue behind a global anchor that's hidden for
+	// anchorLeaseDuration. Scanning global alone misses it and the cancel
+	// 404s against a job nobody has started.
+	t.Run("row queued on a worker queue cancelled via worker scan", func(t *testing.T) {
+		const runtimeName, modelID = "llama-cpp", "m-1"
+		s, st := newTestScheduler(t)
+		ctx := context.Background()
+		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+			WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		}))
+
+		assigns := make(chan string, 4)
+		w := worker.NewFakeStreamWorker("w1", runtimeName,
+			[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+		w.SetFakeCapacity(4)
+		w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+		w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+			if aj := msg.GetAssignJob(); aj != nil {
+				select {
+				case assigns <- aj.GetJobId():
+				default:
+				}
+			}
+			return nil
+		})
+		require.NoError(t, s.workers.Register(w))
+		s.OnWorkerConnected(w)
+
+		// Submitted, placed, not yet dispatched.
+		rid, err := s.Submit(ctx, SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
+			Cost: 100, CostAxis: "q4k_matvec",
+		})
+		require.NoError(t, err)
+		s.queueMu.RLock()
+		wq := s.devQueues[workerQueueName("w1")]
+		s.queueMu.RUnlock()
+		require.NotNil(t, wq)
+		rows, err := wq.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Len(t, rows, 1, "Submit must place the job on the worker queue")
+		require.False(t, rows[0].Leased, "the placed row waits unleased until dispatch")
+
+		require.NoError(t, s.CancelByRequestID(ctx, rid))
+
+		rows, err = wq.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Empty(t, rows, "the cancelled worker row must be deleted")
+		gRows, err := s.globalQ.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Empty(t, gRows, "the leased global anchor must be deleted too, not just hidden")
+
+		r, err := s.GetResult(rid)
+		require.NoError(t, err)
+		require.Equal(t, queue.ResultStatusError, r.Status)
+		require.Equal(t, "cancelled by operator", r.Error)
+
+		// Nothing left for the dispatcher to hand to the worker.
+		s.dispatchPass(ctx)
+		waitDispatchIdle(t, s)
+		select {
+		case jobID := <-assigns:
+			t.Fatalf("cancelled job was still dispatched (job_id %q)", jobID)
+		default:
+		}
+	})
+
 	t.Run("no live job returns ErrNotInflight", func(t *testing.T) {
 		s, _ := newTestScheduler(t)
 		// Nothing pending, nothing inflight: pending scan misses, running
