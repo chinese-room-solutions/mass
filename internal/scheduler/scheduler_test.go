@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -1124,13 +1125,99 @@ func TestScheduler_ReapAbandonedAtStartup(t *testing.T) {
 	require.Empty(t, wRows, "abandoned worker row must be deleted")
 }
 
-// The dispatch lease keep-alive must re-extend both the worker row and
-// the global anchor for as long as it runs — nothing else extends them,
-// and a cold load or a long pre-first-chunk gap outlives any single
-// lease window. After the (synchronous) stop, the leases must lapse so
-// the rows become reachable again. Uses a short lease duration so
-// expiry is observable; production passes dispatchLeaseDuration.
-func TestLeaseKeepAlive_ExtendsBothRowsUntilStopped(t *testing.T) {
+// A job placed on a worker queue waits there until the jobs ahead of it
+// finish — routinely much longer than one dispatch window, and nothing
+// tops the anchor's lease up. So the anchor lease must span the whole
+// wait: an anchor that resurfaces is read as a never-placed job, and the
+// startup reap then kills a perfectly viable pending row.
+func TestScheduler_PlacedJobSurvivesLongWorkerQueueWait(t *testing.T) {
+	s, st := newTestScheduler(t)
+	ctx := context.Background()
+
+	const wqName = "worker|w1"
+	require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{
+		QueueName: wqName, WorkerID: "w1", DeviceIDs: []string{"gpu:0"},
+	}))
+	wq := s.queuePool.Open(wqName)
+	require.NoError(t, s.results.Create("rid-wait"))
+	globalMsgID, workerMsgID := placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+		Priority: queue.PriorityMedium, RuntimeName: "rt", RequestID: "rid-wait", Payload: []byte("p"),
+	})
+
+	// Ten minutes pass with the job still queued behind its peers.
+	rewindQueueTimeout(t, st.DB(), globalMsgID, 10*time.Minute)
+	rewindQueueTimeout(t, st.DB(), workerMsgID, 10*time.Minute)
+
+	// MASS restarts: a fresh scheduler over the same database reaps first.
+	second := New(&config.Config{}, zerolog.Nop(), worker.NewFleet())
+	second.InitQueue(queue.NewPool(st.DB(), st.Dialect()), queue.NewResultStore(st.DB(), st.Dialect()), st)
+	second.reapAbandonedAtStartup(ctx)
+
+	res, err := second.results.Get("rid-wait")
+	require.NoError(t, err)
+	require.Equal(t, queue.ResultStatusPending, res.Status,
+		"a job still waiting on its worker queue must not be failed as abandoned")
+	wRows, err := wq.PeekAll(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, wRows, 1, "the pending worker row must survive the reap")
+	require.False(t, wRows[0].Leased)
+
+	// The anchor stays invisible: not counted as global-pending, and not
+	// re-scored by drainGlobal's peek.
+	depth, err := second.globalQ.Depth(ctx)
+	require.NoError(t, err)
+	require.Zero(t, depth, "a placed job's anchor must not count as global-pending")
+	msgs, err := second.globalQ.Peek(ctx, 32)
+	require.NoError(t, err)
+	require.Empty(t, msgs, "a placed job's anchor must stay hidden from drainGlobal")
+}
+
+// Crash mid-flight: the worker row was delivered and its lease died with
+// the process, so the reap fails and deletes it. Its global anchor holds
+// a lease that will outlive many restarts, so the reap has to drop it in
+// the same pass or it lingers as an orphan.
+func TestScheduler_ReapAbandonedDropsWorkerRowAnchor(t *testing.T) {
+	s, st := newTestScheduler(t)
+	ctx := context.Background()
+
+	const wqName = "worker|crashed"
+	require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{
+		QueueName: wqName, WorkerID: "crashed", DeviceIDs: []string{"gpu:0"},
+	}))
+	wq := s.queuePool.Open(wqName)
+	require.NoError(t, s.results.Create("rid-crash"))
+	_, workerMsgID := placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+		Priority: queue.PriorityMedium, RuntimeName: "rt", RequestID: "rid-crash", Payload: []byte("p"),
+	})
+
+	// In flight at crash time: delivered once, lease no longer renewed.
+	leased, err := wq.LeaseByID(ctx, queue.MessageID(workerMsgID), dispatchLeaseDuration)
+	require.NoError(t, err)
+	require.NotNil(t, leased)
+	rewindQueueTimeout(t, st.DB(), workerMsgID, 10*time.Minute)
+
+	s.reapAbandonedAtStartup(ctx)
+
+	res, err := s.results.Get("rid-crash")
+	require.NoError(t, err)
+	require.Equal(t, queue.ResultStatusError, res.Status)
+	wRows, err := wq.PeekAll(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, wRows, "abandoned worker row must be deleted")
+	gRows, err := s.globalQ.PeekAll(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, gRows, "the reaped row's anchor must go with it")
+}
+
+// The dispatch lease keep-alive must re-extend the worker row for as long
+// as it runs — nothing else extends it, and a cold load or a long
+// pre-first-chunk gap outlives any single lease window. After the
+// (synchronous) stop, the lease must lapse so the row becomes reachable
+// again. The global anchor is not the keep-alive's business: it holds the
+// long placement lease throughout, before and after the stop. Uses a short
+// lease duration so expiry is observable; production passes
+// dispatchLeaseDuration.
+func TestLeaseKeepAlive_ExtendsWorkerRowUntilStopped(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	ctx := context.Background()
 
@@ -1141,14 +1228,14 @@ func TestLeaseKeepAlive_ExtendsBothRowsUntilStopped(t *testing.T) {
 	env.GlobalMsgID = gres.ID
 
 	const leaseDur = time.Second
-	wres, leased, err := s.globalQ.LeaseAndSubmit(ctx, queue.MessageID(gres.ID), leaseDur, wq, env)
+	wres, leased, err := s.globalQ.LeaseAndSubmit(ctx, queue.MessageID(gres.ID), anchorLeaseDuration, wq, env)
 	require.NoError(t, err)
 	require.True(t, leased)
 	leasedMsg, err := wq.LeaseByID(ctx, queue.MessageID(wres.ID), leaseDur)
 	require.NoError(t, err)
 	require.NotNil(t, leasedMsg)
 
-	stop := s.startLeaseKeepAlive(wq, queue.MessageID(wres.ID), gres.ID, leaseDur)
+	stop := s.startLeaseKeepAlive(wq, queue.MessageID(wres.ID), leaseDur)
 
 	peekEmpty := func(q queue.QueueInterface) bool {
 		msgs, err := q.Peek(ctx, 10)
@@ -1156,23 +1243,24 @@ func TestLeaseKeepAlive_ExtendsBothRowsUntilStopped(t *testing.T) {
 		return len(msgs) == 0
 	}
 
-	// 2.5 lease windows later both rows must still be hidden — only the
-	// keep-alive can have carried them past the initial 1s lease.
+	// 2.5 lease windows later the worker row must still be hidden — only
+	// the keep-alive can have carried it past the initial 1s lease.
 	time.Sleep(2500 * time.Millisecond)
 	require.True(t, peekEmpty(wq), "worker row must stay leased while the keep-alive runs")
 	require.True(t, peekEmpty(s.globalQ), "global anchor must stay leased while the keep-alive runs")
 
 	// stop is synchronous: once it returns, no further Extend can fire,
-	// so both leases lapse within one window.
+	// so the worker row's lease lapses within one window.
 	stop()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !peekEmpty(wq) && !peekEmpty(s.globalQ) {
+		if !peekEmpty(wq) {
+			require.True(t, peekEmpty(s.globalQ), "global anchor keeps its placement lease past the keep-alive")
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("rows never became visible after keep-alive stop + lease expiry")
+	t.Fatal("worker row never became visible after keep-alive stop + lease expiry")
 }
 
 // --- helpers ---
@@ -1196,16 +1284,36 @@ func newTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
 // path: a global durability anchor is submitted and lease-handed to the
 // worker queue, exactly as placeOnWorkerQueue does. Tests must not plant
 // anchorless rows directly on worker queues — every production envelope
-// carries a GlobalMsgID and the drain paths rely on it.
-func placeOnWorkerQueueForTest(t *testing.T, s *Scheduler, wq queue.QueueInterface, env queue.Envelope) {
+// carries a GlobalMsgID and the drain paths rely on it. Returns both row
+// IDs for tests that manipulate the rows afterwards.
+func placeOnWorkerQueueForTest(t *testing.T, s *Scheduler, wq queue.QueueInterface, env queue.Envelope) (globalMsgID, workerMsgID string) {
 	t.Helper()
 	ctx := context.Background()
 	gres, err := s.globalQ.Submit(ctx, env)
 	require.NoError(t, err)
 	env.GlobalMsgID = gres.ID
-	_, leased, err := s.globalQ.LeaseAndSubmit(ctx, queue.MessageID(gres.ID), dispatchLeaseDuration, wq, env)
+	wres, leased, err := s.globalQ.LeaseAndSubmit(ctx, queue.MessageID(gres.ID), anchorLeaseDuration, wq, env)
 	require.NoError(t, err)
 	require.True(t, leased)
+	return gres.ID, wres.ID
+}
+
+// rewindQueueTimeout moves a goqite row's visibility timeout back by d,
+// simulating d of wall-clock time passing against that row's lease
+// without making the test sleep. SQLite stores the column as
+// RFC3339-milli text.
+func rewindQueueTimeout(t *testing.T, db *sql.DB, msgID string, d time.Duration) {
+	t.Helper()
+	const layout = "2006-01-02T15:04:05.000Z"
+	var raw string
+	require.NoError(t, db.QueryRow(`SELECT timeout FROM goqite WHERE id = ?`, msgID).Scan(&raw))
+	ts, err := time.Parse(layout, raw)
+	require.NoError(t, err)
+	res, err := db.Exec(`UPDATE goqite SET timeout = ? WHERE id = ?`, ts.Add(-d).UTC().Format(layout), msgID)
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected, "row %s must exist to be rewound", msgID)
 }
 
 // waitDispatchIdle blocks until every per-queue drain goroutine spawned by

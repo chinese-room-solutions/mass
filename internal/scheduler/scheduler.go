@@ -24,7 +24,11 @@
 // Persistence: device queue identities are tracked in [store.WorkerQueueState]
 // so a restart can reattach to the right SQL rows. Job payloads survive
 // in goqite; on crash recovery the queue sweeper ([queue.ReapAbandoned])
-// fails any rows past their delivery budget so callers don't hang.
+// fails any rows past their delivery budget so callers don't hang. A
+// placed job keeps its global row as a durability anchor, leased for
+// [anchorLeaseDuration] — long enough to cover the whole worker-queue
+// wait, so a job queued behind its peers is never mistaken for one that
+// was never placed.
 //
 // Worker handoff is the seam: this package does not know what a llama.cpp
 // payload looks like, and the worker hub does not know what a device queue
@@ -114,14 +118,24 @@ type DeviceEnabledFn func(workerID, deviceID string) bool
 // admits workers that bench the exact requested axis.
 type RuntimeDefaultAxisFn func(runtimeName string) string
 
-// dispatchLeaseDuration is how long a dispatcher-leased row stays invisible
-// to other consumers per extension. A dispatch routinely outlives one
-// window (a cold LoadModel takes minutes; prompt processing can gap
-// longer than this before the first chunk), so the invariant is NOT
-// "the dispatcher finishes within the window" — it's the keep-alive
-// started in dispatchEnvelope, which re-extends both queue rows every
+// dispatchLeaseDuration is how long a dispatcher-leased WORKER-queue row
+// stays invisible to other consumers per extension. A dispatch routinely
+// outlives one window (a cold LoadModel takes minutes; prompt processing
+// can gap longer than this before the first chunk), so the invariant is
+// NOT "the dispatcher finishes within the window" — it's the keep-alive
+// started in dispatchEnvelope, which re-extends the row every
 // dispatchLeaseDuration/3 until the dispatch reaches a terminal path.
 const dispatchLeaseDuration = 60 * time.Second
+
+// anchorLeaseDuration is how long the global durability anchor stays
+// hidden once its job has been placed on a worker queue. Nothing extends
+// it — the job may sit pending behind its peers for as long as that queue
+// takes to reach it, so the lease has to cover the whole wait, not one
+// dispatch window. A visible anchor is read as an unplaced job: the
+// startup reap fails it, drainGlobal re-scores it, and Depth counts it
+// twice. Bounded by [jobBufferMaxAge], which reaps any job still without
+// a terminal frame after that long anyway.
+const anchorLeaseDuration = jobBufferMaxAge
 
 // disconnectRequeueBudget caps how many times an in-flight job may be
 // re-placed after losing its worker before its result fails terminally.
@@ -613,9 +627,11 @@ type SubmitRequest struct {
 // unleased on global and drainGlobal re-scores it every tick.
 //
 // The global row remains leased after a successful handoff — it is the
-// recovery anchor for the in-flight job. It's released + deleted on the
-// terminal frame (dispatchEnvelope), or released-only on a worker
-// disconnect (OnWorkerDisconnected) so drainGlobal can re-place it.
+// recovery anchor for the placed job, and the lease runs for
+// [anchorLeaseDuration] because the job may wait on the worker queue that
+// long. It's deleted on the terminal frame (dispatchEnvelope), or
+// released-only on a worker disconnect (OnWorkerDisconnected) so
+// drainGlobal can re-place it.
 //
 // Returns ErrNoWorker when no online worker matches the runtime.
 // Returns ErrInvalidCost / ErrInvalidCostAxis when the gateway omitted
@@ -704,9 +720,10 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 }
 
 // placeOnWorkerQueue scores env against online workers, picks the cheapest,
-// and hands env off via LeaseAndSubmit. The global row is left leased
-// (not deleted) — it remains the durability anchor until the terminal
-// frame.
+// and hands env off via LeaseAndSubmit. The global row is left leased for
+// [anchorLeaseDuration] (not deleted) — it remains the durability anchor
+// until the terminal frame, and stays hidden for the whole time the job
+// may sit on the worker queue.
 //
 // Returns silently when no candidate exists (caller relies on drainGlobal
 // to retry) or when LeaseAndSubmit races a concurrent placer (the other
@@ -727,7 +744,7 @@ func (s *Scheduler) placeOnWorkerQueue(ctx context.Context, env queue.Envelope) 
 	if globalQ == nil {
 		return
 	}
-	_, leased, err := globalQ.LeaseAndSubmit(ctx, queue.MessageID(env.GlobalMsgID), dispatchLeaseDuration, target.q, env)
+	_, leased, err := globalQ.LeaseAndSubmit(ctx, queue.MessageID(env.GlobalMsgID), anchorLeaseDuration, target.q, env)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("message_id", env.GlobalMsgID).Str("target", target.name).Msg("lease-and-submit to worker queue")
 		return
@@ -1381,6 +1398,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 // budget by a MASS crash get a failure result instead of hanging their
 // callers forever. Best-effort: errors log and startup proceeds (the
 // rows stay dormant; goqite never redelivers past-budget rows).
+//
+// Jobs merely waiting on a worker queue are untouched: their rows are
+// pending (never delivered) and their anchors hold an
+// [anchorLeaseDuration] lease, so neither looks abandoned.
 func (s *Scheduler) reapAbandonedAtStartup(ctx context.Context) {
 	s.queueMu.RLock()
 	pool := s.queuePool
@@ -1392,17 +1413,17 @@ func (s *Scheduler) reapAbandonedAtStartup(ctx context.Context) {
 		return
 	}
 
-	queues := []queue.QueueInterface{globalQ}
+	var workerQueues []queue.QueueInterface
 	rows, err := st.ListWorkerQueueStates()
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reap: listing persisted worker queues")
 	} else {
 		for _, row := range rows {
-			queues = append(queues, pool.Open(row.QueueName))
+			workerQueues = append(workerQueues, pool.Open(row.QueueName))
 		}
 	}
 
-	reaped, err := queue.ReapAbandoned(ctx, queues, results, s.logger)
+	reaped, err := queue.ReapAbandoned(ctx, globalQ, workerQueues, results, s.logger)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reaping abandoned queue rows at startup")
 	}
@@ -1446,8 +1467,10 @@ func (s *Scheduler) refreshGauges() {
 
 	// Queue depth — pending rows only. Global is unleased global rows;
 	// worker is the sum of pending (unleased) rows across every worker
-	// queue. Leased global rows mean "placed on a worker", which would
-	// double-count. Depth shares Peek's visibility predicate (timeout <=
+	// queue. Leased global rows are anchors for jobs already placed on a
+	// worker — counting them would double up with the worker row they
+	// anchor, which is why the anchor lease spans the whole queue wait
+	// ([anchorLeaseDuration]). Depth shares Peek's visibility predicate (timeout <=
 	// now) but is a bare COUNT(*) — Peek would drag every pending body
 	// (payloads can carry multi-MB blobs) through the driver just to be
 	// counted, every sweep.
@@ -1655,10 +1678,11 @@ func (s *Scheduler) dispatchPass(ctx context.Context) (pending bool) {
 // worker queue. Rows that can't be placed right now (no workers, none
 // benched, etc.) stay unleased on global and are retried next pass.
 //
-// Successful placements leave the global row LEASED — it remains the
-// recovery anchor for the in-flight envelope. The lease is renewed by
-// the pump and released on terminal frame (DeleteBoth) or worker
-// disconnect (DeleteAndReleaseLease).
+// Successful placements leave the global row LEASED for
+// [anchorLeaseDuration] — it remains the recovery anchor for the placed
+// envelope until the terminal frame (DeleteBoth) or a worker disconnect
+// (DeleteAndReleaseLease) resolves it. Nothing renews that lease: it is
+// sized to outlast the wait rather than be topped up.
 // Returns true when at least one peeked row had no eligible target this
 // pass (so it stays on global) — the dispatch loop uses that to retry on a
 // short interval instead of waiting for the slow ticker.
@@ -1687,7 +1711,7 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 			continue
 		}
 		env.QueuedSeconds = queuedSeconds
-		_, leased, err := globalQ.LeaseAndSubmit(ctx, msg.ID, dispatchLeaseDuration, target.q, env)
+		_, leased, err := globalQ.LeaseAndSubmit(ctx, msg.ID, anchorLeaseDuration, target.q, env)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("message_id", string(msg.ID)).Str("target", target.name).Msg("lease-and-submit to worker queue")
 			continue
@@ -2499,12 +2523,13 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 		return
 	}
 
-	// Keep both queue rows leased while this dispatch owns them (the
+	// Keep the worker queue row leased while this dispatch owns it (the
 	// gate's evict round-trips, LoadModel, and streaming can each outlive
 	// dispatchLeaseDuration). Stopped — synchronously — on every exit
-	// path before the rows are released or deleted; the success path
-	// hands the stop to pumpWorkerChunks.
-	stopKeepAlive := s.startLeaseKeepAlive(q, msgID, env.GlobalMsgID, dispatchLeaseDuration)
+	// path before the row is released or deleted; the success path hands
+	// the stop to pumpWorkerChunks. The global anchor needs no keep-alive:
+	// it holds an [anchorLeaseDuration] lease from placement time.
+	stopKeepAlive := s.startLeaseKeepAlive(q, msgID, dispatchLeaseDuration)
 
 	// Single device-set gate: walk every resident that blocks a fresh
 	// load (target's own stale placement + other-model overlaps), bounce
@@ -2654,12 +2679,14 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 }
 
 // startLeaseKeepAlive launches a goroutine that re-extends the
-// worker-queue row's lease — and, when globalMsgID is set, the global
-// durability anchor's — every leaseDur/3 for as long as the dispatch
-// owns the rows. Nothing else extends these leases: without the
-// keep-alive a cold LoadModel or a long prompt-processing gap would
-// outlive the initial window and expose a running job's rows to
-// re-dispatch and stealing.
+// worker-queue row's lease every leaseDur/3 for as long as the dispatch
+// owns the row. Nothing else extends it: without the keep-alive a cold
+// LoadModel or a long prompt-processing gap would outlive the initial
+// window and expose a running job's row to re-dispatch and stealing.
+//
+// The global anchor is deliberately left alone — it was leased for
+// [anchorLeaseDuration] at placement, which already outlasts any
+// dispatch; extending it to now+leaseDur would shorten it.
 //
 // The tick is jittered ±10% per job: every in-flight job runs its own
 // keep-alive, and unjittered they pile their Extends into the same instant
@@ -2668,15 +2695,11 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 //
 // The returned stop function is SYNCHRONOUS and idempotent: it cancels
 // the goroutine and waits for it to exit, so a caller about to release
-// or delete the rows knows no further Extend can fire afterwards — an
+// or delete the row knows no further Extend can fire afterwards — an
 // Extend racing a ReleaseLease would re-hide the released row for up to
 // a full lease window. Extend failures are logged at debug and retried
 // next tick: the row may legitimately be gone already (terminal race).
-func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.MessageID, globalMsgID string, leaseDur time.Duration) (stop func()) {
-	s.queueMu.RLock()
-	globalQ := s.globalQ
-	s.queueMu.RUnlock()
-
+func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.MessageID, leaseDur time.Duration) (stop func()) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
@@ -2689,14 +2712,8 @@ func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.Mess
 				return
 			case <-ticker.C:
 			}
-			ctx := context.Background()
-			if err := q.Extend(ctx, msgID, leaseDur); err != nil {
+			if err := q.Extend(context.Background(), msgID, leaseDur); err != nil {
 				s.logger.Debug().Err(err).Str("message_id", string(msgID)).Msg("extending worker row lease")
-			}
-			if globalQ != nil && globalMsgID != "" {
-				if err := globalQ.Extend(ctx, queue.MessageID(globalMsgID), leaseDur); err != nil {
-					s.logger.Debug().Err(err).Str("global_msg_id", globalMsgID).Msg("extending global anchor lease")
-				}
 			}
 		}
 	}()

@@ -17,31 +17,40 @@ import (
 // received but the result-writing goroutine died with the process. Reap
 // cleans those up so callers don't hang on stale rows.
 //
-// Pass every queue that may hold prior-lifetime messages: global plus one
-// per persisted device queue (even ones whose worker hasn't reconnected).
+// globalQ is the durability-anchor queue; workerQueues holds one entry per
+// persisted device queue (even ones whose worker hasn't reconnected). Both
+// may carry prior-lifetime messages, and reaping a worker row also drops
+// the global anchor it names — otherwise the anchor outlives its job under
+// a lease no live dispatch is renewing.
 //
 // Returns total rows reaped. Per-row errors are logged; only DB-level
 // errors abort.
-func ReapAbandoned(ctx context.Context, queues []QueueInterface, results ResultStoreInterface, logger zerolog.Logger) (int, error) {
-	total := 0
-	for _, q := range queues {
-		n, err := reapQueue(ctx, q, results, logger)
+func ReapAbandoned(ctx context.Context, globalQ QueueInterface, workerQueues []QueueInterface, results ResultStoreInterface, logger zerolog.Logger) (int, error) {
+	total, err := reapQueue(ctx, globalQ, nil, results, logger)
+	if err != nil {
+		return total, err
+	}
+	for _, q := range workerQueues {
+		n, err := reapQueue(ctx, q, globalQ, results, logger)
+		total += n
 		if err != nil {
 			return total, err
 		}
-		total += n
 	}
 	return total, nil
 }
 
-func reapQueue(ctx context.Context, q QueueInterface, results ResultStoreInterface, logger zerolog.Logger) (int, error) {
+// reapQueue reaps one queue. anchorQ is the global queue when q is a
+// worker queue (so anchors get dropped along with their rows), nil when q
+// IS the global queue.
+func reapQueue(ctx context.Context, q, anchorQ QueueInterface, results ResultStoreInterface, logger zerolog.Logger) (int, error) {
 	abandoned, err := q.ListAbandoned(ctx)
 	if err != nil {
 		return 0, err
 	}
 	reaped := 0
 	for _, msg := range abandoned {
-		if err := reapOne(ctx, q, results, logger, msg); err != nil {
+		if err := reapOne(ctx, q, anchorQ, results, logger, msg); err != nil {
 			logger.Warn().Err(err).Str("message_id", string(msg.ID)).Msg("reaping abandoned message")
 			continue
 		}
@@ -51,13 +60,18 @@ func reapQueue(ctx context.Context, q QueueInterface, results ResultStoreInterfa
 }
 
 // reapOne writes a failure result for one abandoned message and deletes
-// it. Terminal results (Done/Error) are NOT overwritten — guards the race
-// where a worker reported success and the result landed but the queue
-// Delete didn't before the process died.
-func reapOne(ctx context.Context, q QueueInterface, results ResultStoreInterface, logger zerolog.Logger, msg *Message) error {
+// it, together with its global anchor when it has one. Terminal results
+// (Done/Error) are NOT overwritten — guards the race where a worker
+// reported success and the result landed but the queue Delete didn't
+// before the process died.
+func reapOne(ctx context.Context, q, anchorQ QueueInterface, results ResultStoreInterface, logger zerolog.Logger, msg *Message) error {
 	requestID := string(msg.ID)
-	if env, err := UnmarshalEnvelope(msg.Body); err == nil && env.RequestID != "" {
-		requestID = env.RequestID
+	anchorID := ""
+	if env, err := UnmarshalEnvelope(msg.Body); err == nil {
+		if env.RequestID != "" {
+			requestID = env.RequestID
+		}
+		anchorID = env.GlobalMsgID
 	}
 
 	existing, err := results.Get(requestID)
@@ -74,6 +88,12 @@ func reapOne(ctx context.Context, q QueueInterface, results ResultStoreInterface
 		logger.Debug().Str("request_id", requestID).Str("status", string(existing.Status)).Msg("abandoned row had a terminal result already; preserving it")
 	}
 
+	if anchorQ != nil && anchorID != "" {
+		if err := q.DeleteBoth(ctx, msg.ID, anchorQ, MessageID(anchorID)); err != nil {
+			return fmt.Errorf("deleting abandoned message %s and its anchor %s: %w", msg.ID, anchorID, err)
+		}
+		return nil
+	}
 	if err := q.Delete(ctx, msg.ID); err != nil {
 		return fmt.Errorf("deleting abandoned message %s: %w", msg.ID, err)
 	}
