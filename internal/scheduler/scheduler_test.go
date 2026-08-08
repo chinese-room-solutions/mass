@@ -1060,6 +1060,109 @@ func TestScheduler_RecoverPersistedQueues(t *testing.T) {
 	require.True(t, workerPresent, "worker|w1 row should reattach")
 }
 
+// A worker that was already offline when MASS restarted leaves its queue
+// behind in worker_queue_state. recoverPersistedQueues reattaches it, but
+// nothing else ever touches it: drainOneWorkerQueue bails with no fleet
+// entry and steals only source from online peers, so its rows — and the
+// pending result rows behind them — would sit forever. The orphan sweep
+// drains them back to global once the grace period lapses. A queue whose
+// worker IS registered must be left alone.
+func TestScheduler_SweepOrphanQueues_DrainsUnreconnectedWorker(t *testing.T) {
+	s, st := newTestScheduler(t)
+	ctx := context.Background()
+
+	const orphanName, liveName = "worker|gone", "worker|live"
+	for _, q := range []struct{ name, workerID string }{{orphanName, "gone"}, {liveName, "live"}} {
+		require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{
+			QueueName: q.name, WorkerID: q.workerID, DeviceIDs: []string{"gpu:0"},
+		}))
+	}
+	// "live" is in the fleet; "gone" never reconnected after the restart.
+	require.NoError(t, s.workers.Register(newFakeWorker("live", []stats.Device{{ID: "gpu:0"}})))
+
+	envFor := func(rid string) queue.Envelope {
+		return queue.Envelope{
+			Priority: queue.PriorityMedium, RuntimeName: "llama-cpp", ModelID: "m",
+			RequestID: rid, Payload: []byte("p"),
+		}
+	}
+
+	orphanQ := s.queuePool.Open(orphanName)
+	require.NoError(t, s.results.Create("rid-queued"))
+	placeOnWorkerQueueForTest(t, s, orphanQ, envFor("rid-queued"))
+
+	// Second row was in flight when the previous process died: leased, with
+	// its result left at processing.
+	require.NoError(t, s.results.Create("rid-inflight"))
+	_, inflightMsgID := placeOnWorkerQueueForTest(t, s, orphanQ, envFor("rid-inflight"))
+	leased, err := orphanQ.LeaseByID(ctx, queue.MessageID(inflightMsgID), dispatchLeaseDuration)
+	require.NoError(t, err)
+	require.NotNil(t, leased)
+	s.processingResult("rid-inflight")
+
+	s.recoverPersistedQueues()
+
+	// Driven through dispatchPass, which is what owns the sweep in
+	// production. The grace gates: passes inside the window only track.
+	s.dispatchPass(ctx)
+	s.dispatchPass(ctx)
+	waitDispatchIdle(t, s)
+	s.queueMu.RLock()
+	_, stillAttached := s.devQueues[orphanName]
+	s.queueMu.RUnlock()
+	require.True(t, stillAttached, "orphan queue must survive within the grace period")
+
+	s.orphanMu.Lock()
+	s.orphanGrace = 0
+	s.orphanMu.Unlock()
+	s.dispatchPass(ctx)
+	waitDispatchIdle(t, s)
+
+	orphanRows, err := orphanQ.PeekAll(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, orphanRows, "orphan queue must be drained")
+
+	// Both are back on global and visible for re-placement: the queued row
+	// via a released anchor (no attempt charged), the in-flight one as a
+	// fresh envelope carrying the disconnect attempt.
+	globalRows, err := s.globalQ.Peek(ctx, 10)
+	require.NoError(t, err)
+	attempts := map[string]uint8{}
+	for _, m := range globalRows {
+		env, err := queue.UnmarshalEnvelope(m.Body)
+		require.NoError(t, err)
+		attempts[env.RequestID] = env.Attempts
+	}
+	require.Equal(t, map[string]uint8{"rid-queued": 0, "rid-inflight": 1}, attempts)
+
+	// The in-flight job is queued again, not stuck at processing.
+	for _, rid := range []string{"rid-queued", "rid-inflight"} {
+		res, err := s.results.Get(rid)
+		require.NoError(t, err)
+		require.Equal(t, queue.ResultStatusPending, res.Status, "%s must be pending again", rid)
+	}
+
+	// Queue identity is gone everywhere: memory, tail mirror, store.
+	s.queueMu.RLock()
+	_, orphanAttached := s.devQueues[orphanName]
+	_, liveAttached := s.devQueues[liveName]
+	s.queueMu.RUnlock()
+	require.False(t, orphanAttached)
+	require.True(t, liveAttached)
+
+	s.tailMu.RLock()
+	_, orphanTail := s.tails[orphanName]
+	_, liveTail := s.tails[liveName]
+	s.tailMu.RUnlock()
+	require.False(t, orphanTail, "orphan tail mirror entry must be dropped")
+	require.True(t, liveTail)
+
+	states, err := st.ListWorkerQueueStates()
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	require.Equal(t, liveName, states[0].QueueName)
+}
+
 // A MASS crash mid-flight leaves rows leased past their delivery budget
 // with no process left to write their results. reapAbandonedAtStartup
 // (run by Start before the dispatcher) must fail their result entries

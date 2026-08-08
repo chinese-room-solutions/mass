@@ -40,6 +40,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -147,6 +148,14 @@ const anchorLeaseDuration = jobBufferMaxAge
 // badly", and a mix of the two failure modes should still converge.
 const disconnectRequeueBudget = 3
 
+// orphanQueueGrace is how long a worker queue may sit with no fleet entry
+// before the dispatcher drains it back to global. Orphans come from
+// restart recovery — worker_queue_state rows whose worker never
+// reconnected — and nothing else reaps them: drainOneWorkerQueue bails
+// when the worker is absent, and steals only source from online peers.
+// Long enough that a worker merely restarting reconnects first.
+const orphanQueueGrace = 2 * time.Minute
+
 // stealThreshold is the device-queue depth gap that triggers a steal
 // attempt. A worker with an empty queue will look at peer queues only when
 // peer.Depth() > stealThreshold; below that the imbalance isn't worth the
@@ -253,6 +262,15 @@ type Scheduler struct {
 	// consumes it on exit to decide whether to kick a follow-up pass.
 	drainMu  sync.Mutex
 	draining map[string]bool
+
+	// orphanSince records, per worker-queue name, when the dispatcher first
+	// saw that queue with no fleet entry behind it. Entries are dropped the
+	// moment the worker is back (or the queue is gone); one that survives
+	// orphanGrace gets the queue drained (see [Scheduler.sweepOrphanQueues]).
+	// orphanGrace defaults to [orphanQueueGrace]; tests shorten it.
+	orphanMu    sync.Mutex
+	orphanSince map[string]time.Time
+	orphanGrace time.Duration
 
 	// gaugeMu guards the previously-reported gauge label sets below.
 	// refreshGauges runs on the single metrics-sweep goroutine, but tests
@@ -447,6 +465,8 @@ func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Sche
 		reestimateLocks:      make(map[string]*sync.Mutex),
 		benchCache:           make(map[string]map[string]store.BenchmarkRow),
 		draining:             make(map[string]bool),
+		orphanSince:          make(map[string]time.Time),
+		orphanGrace:          orphanQueueGrace,
 		throughputCorrection: make(map[string]correctionState),
 		wake:                 make(chan struct{}, 1),
 	}
@@ -1210,19 +1230,26 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	// always-safe regardless of whether the worker had a queue.
 	s.InvalidateWorkerBench(workerID)
 
+	s.removeWorkerQueue(context.Background(), workerID)
+}
+
+// removeWorkerQueue drains workerID's queue back to global — in-flight
+// rows included — and tears the queue down: the devQueues entry, the tail
+// mirror entry, and the persisted worker_queue_state row. Shared by
+// [Scheduler.OnWorkerDisconnected] and [Scheduler.sweepOrphanQueues].
+// No-op when the worker has no queue.
+func (s *Scheduler) removeWorkerQueue(ctx context.Context, workerID string) {
 	name := workerQueueName(workerID)
 
 	s.queueMu.Lock()
-	pool := s.queuePool
 	globalQ := s.globalQ
 	st := s.store
 	q, ok := s.devQueues[name]
 	s.queueMu.Unlock()
-	if pool == nil || globalQ == nil || !ok {
+	if globalQ == nil || !ok {
 		return
 	}
 
-	ctx := context.Background()
 	s.drainWorkerQueue(ctx, q, globalQ, true)
 
 	s.queueMu.Lock()
@@ -1354,8 +1381,10 @@ func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.Que
 // recoverPersistedQueues reattaches to worker_queue_state rows that
 // survived a restart and seeds the tail mirror from them, so queued-time
 // estimates survive a scheduler restart. Queues whose worker isn't
-// currently connected stay reattached — drain or steal them when
-// capacity arrives.
+// currently connected stay reattached so a reconnect resumes them in
+// place; if the worker never comes back,
+// [Scheduler.sweepOrphanQueues] drains the queue after
+// [orphanQueueGrace].
 func (s *Scheduler) recoverPersistedQueues() {
 	s.queueMu.Lock()
 	pool := s.queuePool
@@ -1677,15 +1706,79 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 // busy-spin.
 const pendingRetryInterval = 200 * time.Millisecond
 
-// dispatchPass does one round of: drain global → device queues, then drain
-// device queues → workers, then attempt work stealing for idle workers.
-// Returns true when global still holds rows that couldn't be placed this
-// pass, so the loop can retry sooner than the slow ticker.
+// dispatchPass does one round of: reap orphaned queues, drain global →
+// device queues, then drain device queues → workers, then attempt work
+// stealing for idle workers. Returns true when global still holds rows
+// that couldn't be placed this pass, so the loop can retry sooner than the
+// slow ticker.
 func (s *Scheduler) dispatchPass(ctx context.Context) (pending bool) {
+	s.sweepOrphanQueues(ctx)
 	pending = s.drainGlobal(ctx)
 	s.drainDeviceQueues(ctx)
 	s.attemptSteals(ctx)
 	return pending
+}
+
+// sweepOrphanQueues drains worker queues whose worker has been missing
+// from the fleet for longer than orphanGrace, handing their rows back to
+// global for re-placement on surviving workers.
+//
+// These are queues [Scheduler.recoverPersistedQueues] reattached for a
+// worker that was already gone at startup: OnWorkerDisconnected never
+// fires for them, so without this sweep their rows — and the pending
+// result rows behind them — sit untouched forever.
+//
+// The drain includes leased rows: an orphan's leased row is a pre-crash
+// in-flight row with no pump goroutine left in this process, so there is
+// nothing live to duplicate. A worker that drops while this process runs
+// is drained by OnWorkerDisconnected immediately and never reaches the
+// grace period.
+func (s *Scheduler) sweepOrphanQueues(ctx context.Context) {
+	s.queueMu.RLock()
+	names := make([]string, 0, len(s.devQueues))
+	for name := range s.devQueues {
+		names = append(names, name)
+	}
+	s.queueMu.RUnlock()
+
+	now := time.Now()
+	var expired []string
+
+	s.orphanMu.Lock()
+	grace := s.orphanGrace
+	present := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		workerID, ok := parseWorkerQueueName(name)
+		if !ok {
+			continue
+		}
+		if s.workers != nil && s.workers.Get(workerID) != nil {
+			delete(s.orphanSince, name)
+			continue
+		}
+		present[name] = struct{}{}
+		since, tracked := s.orphanSince[name]
+		if !tracked {
+			s.orphanSince[name] = now
+			continue
+		}
+		if now.Sub(since) >= grace {
+			delete(s.orphanSince, name)
+			expired = append(expired, workerID)
+		}
+	}
+	// Forget queues that disappeared between passes.
+	maps.DeleteFunc(s.orphanSince, func(name string, _ time.Time) bool {
+		_, still := present[name]
+		return !still
+	})
+	s.orphanMu.Unlock()
+
+	for _, workerID := range expired {
+		s.logger.Info().Str("worker_id", workerID).Dur("grace", grace).
+			Msg("worker never reconnected; draining its recovered queue back to global")
+		s.removeWorkerQueue(ctx, workerID)
+	}
 }
 
 // drainGlobal peeks the global queue and tries to place each row on a
@@ -2432,7 +2525,11 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	}
 	wIface := s.workers.Get(workerID)
 	if wIface == nil {
-		return // worker disconnected; OnWorkerDisconnected will drain us
+		// Nothing to dispatch to. A worker that dropped while this process
+		// ran was already drained by OnWorkerDisconnected; one that was
+		// gone before startup (recovered queue) is drained by
+		// sweepOrphanQueues once its grace lapses.
+		return
 	}
 	sw, ok := wIface.(*worker.StreamWorker)
 	if !ok || !sw.Status().Online {
