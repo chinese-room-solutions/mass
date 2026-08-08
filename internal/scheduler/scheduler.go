@@ -820,6 +820,20 @@ func (s *Scheduler) preflight(req SubmitRequest) error {
 	return nil
 }
 
+// ensureJobBuffer returns requestID's replay buffer, creating one when
+// it's absent. Used by the dispatcher to re-arm a job whose buffer a
+// restart took with it.
+func (s *Scheduler) ensureJobBuffer(requestID string) *jobBuffer {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	if buf, ok := s.jobBuffers[requestID]; ok {
+		return buf
+	}
+	buf := newJobBuffer()
+	s.jobBuffers[requestID] = buf
+	return buf
+}
+
 // dropJob removes the in-memory replay buffer for requestID. Used on
 // submission failure paths and by the post-terminal sweep.
 func (s *Scheduler) dropJob(requestID string) {
@@ -2515,12 +2529,29 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	buf, ok := s.jobBuffers[env.RequestID]
 	s.jobsMu.Unlock()
 	if !ok {
-		// The submitter buffer is gone (post-terminal sweep raced ahead).
-		// Mark the result failed and drop both queue rows so we don't keep
-		// trying to place it.
-		s.failResult(env.RequestID, "no replay buffer for request")
-		s.cleanupRows(q, msgID, env.GlobalMsgID)
-		return
+		// Replay buffers live in memory, the queue rows don't: every job
+		// recovered from a restart arrives here without one. The durable
+		// result says whether this job is still live — a pending or
+		// processing row means it is, and it gets a fresh buffer (async
+		// pollers still get their result; a reconnecting gateway finds the
+		// new buffer through StreamChunks). A store that can't answer is
+		// treated the same way: dispatching a job twice beats failing a
+		// live one on a transient read error.
+		res, err := s.GetResult(env.RequestID)
+		switch {
+		case errors.Is(err, ErrNoResult):
+			// No result row at all — TTL-pruned or never created. Nothing
+			// left to deliver to, so drop the rows.
+			s.failResult(env.RequestID, "no replay buffer for request")
+			s.cleanupRows(q, msgID, env.GlobalMsgID)
+			return
+		case err == nil && isTerminalStatus(res.Status):
+			// Already answered (cancelled by an operator, reaped by the
+			// buffer sweep). Drop the rows and leave the outcome alone.
+			s.cleanupRows(q, msgID, env.GlobalMsgID)
+			return
+		}
+		buf = s.ensureJobBuffer(env.RequestID)
 	}
 
 	// Keep the worker queue row leased while this dispatch owns it (the
@@ -3153,9 +3184,15 @@ func (s *Scheduler) pendingResult(requestID string) {
 	}
 }
 
+// isTerminalStatus reports whether a result status is final — the job has
+// an answer (or a failure) recorded and must not be overwritten.
+func isTerminalStatus(st queue.ResultStatus) bool {
+	return st == queue.ResultStatusDone || st == queue.ResultStatusError
+}
+
 // resultIsTerminal reports whether requestID's result already carries a
-// terminal status (done or error). Missing rows and store errors read as
-// non-terminal so the caller falls back to its normal (requeue) path.
+// terminal status. Missing rows and store errors read as non-terminal so
+// the caller falls back to its normal (requeue) path.
 func (s *Scheduler) resultIsTerminal(requestID string) bool {
 	s.queueMu.RLock()
 	results := s.results
@@ -3168,7 +3205,7 @@ func (s *Scheduler) resultIsTerminal(requestID string) bool {
 		s.logger.Warn().Err(err).Str("request_id", requestID).Msg("checking result status on drain")
 		return false
 	}
-	return r != nil && (r.Status == queue.ResultStatusDone || r.Status == queue.ResultStatusError)
+	return r != nil && isTerminalStatus(r.Status)
 }
 
 func (s *Scheduler) failResult(requestID, errText string) {

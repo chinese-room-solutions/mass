@@ -10,6 +10,7 @@ import (
 	"time"
 
 	workerpb "github.com/chinese-room-solutions/mass-proto/gen/go/worker"
+	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/queue"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/worker"
@@ -1842,6 +1843,177 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	case <-coldAssigns:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cold worker's job never reached AssignJob after the load ack")
+	}
+}
+
+// A job that was queued when MASS went down must run when MASS comes
+// back. The queue rows are durable but the replay buffers are not, so the
+// recovered dispatch has to rebuild the buffer from the durable result
+// instead of failing the job for not having one.
+func TestDispatch_QueuedJobSurvivesRestart(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+	ctx := context.Background()
+
+	first, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+	}))
+	devices := []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}
+
+	// Lifetime 1: submit + place. Nothing drives the dispatch loop here,
+	// so the row is still sitting pending on the worker queue when the
+	// process "dies".
+	w1 := worker.NewFakeStreamWorker("w1", runtimeName, devices, time.Now())
+	w1.SetFakeCapacity(4)
+	w1.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	require.NoError(t, first.workers.Register(w1))
+	first.OnWorkerConnected(w1)
+
+	rid, err := first.Submit(ctx, SubmitRequest{
+		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
+		Cost: 100, CostAxis: "q4k_matvec",
+	})
+	require.NoError(t, err)
+	first.queueMu.RLock()
+	wq := first.devQueues["worker|w1"]
+	first.queueMu.RUnlock()
+	require.Equal(t, 1, mustDepth(t, wq, ctx), "job must be queued, not dispatched")
+
+	// Lifetime 2: a fresh scheduler over the same database. No resubmit —
+	// everything it knows comes from the durable rows.
+	second := New(&config.Config{}, zerolog.Nop(), worker.NewFleet())
+	second.InitQueue(queue.NewPool(st.DB(), st.Dialect()), queue.NewResultStore(st.DB(), st.Dialect()), st)
+	assigns := make(chan string, 1)
+	w2 := worker.NewFakeStreamWorker("w1", runtimeName, devices, time.Now())
+	w2.SetFakeCapacity(4)
+	w2.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	w2.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assigns <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, second.workers.Register(w2))
+	second.OnWorkerConnected(w2)
+
+	second.reapAbandonedAtStartup(ctx)
+	second.recoverPersistedQueues()
+	second.dispatchPass(ctx)
+
+	var jobID string
+	select {
+	case jobID = <-assigns:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovered job never reached AssignJob")
+	}
+	w2.DeliverJobChunk(jobID, &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("recovered-ok"),
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := second.results.Get(rid)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		if res.Status == queue.ResultStatusDone {
+			require.Equal(t, []byte("recovered-ok"), res.Body)
+			require.Empty(t, res.Error)
+			break
+		}
+		require.NotEqual(t, queue.ResultStatusError, res.Status,
+			"recovered job must not be failed: %s", res.Error)
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered job never reached Done (status %s)", res.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// The other two halves of the missing-buffer branch: a job whose result
+// is already terminal keeps that outcome (a restart must not stomp
+// "cancelled by operator" with a dispatch failure), and a job with no
+// result row left is failed as before. Neither reaches the worker, and
+// both drop their queue rows.
+func TestDispatch_MissingReplayBuffer_TerminalAndUnknownResults(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+
+	tests := []struct {
+		name string
+		// existingError, when set, is the terminal error already recorded
+		// for the request. Empty means no result row exists at all.
+		existingError string
+	}{
+		{name: "terminal result is preserved", existingError: "cancelled by operator"},
+		{name: "no result row at all"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, st := newTestScheduler(t)
+			require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+				WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+				Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			}))
+			assigns := make(chan string, 1)
+			w := worker.NewFakeStreamWorker("w1", runtimeName,
+				[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+			w.SetFakeCapacity(4)
+			w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+			w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+				if aj := msg.GetAssignJob(); aj != nil {
+					select {
+					case assigns <- aj.GetJobId():
+					default:
+					}
+				}
+				return nil
+			})
+			require.NoError(t, s.workers.Register(w))
+			s.OnWorkerConnected(w)
+
+			const requestID = "rid-orphan"
+			if tt.existingError != "" {
+				require.NoError(t, s.results.Create(requestID))
+				require.NoError(t, s.results.Fail(requestID, tt.existingError))
+			}
+			s.queueMu.RLock()
+			wq := s.devQueues["worker|w1"]
+			s.queueMu.RUnlock()
+			placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+				Priority: queue.PriorityMedium, Cost: 100, CostAxis: "q4k_matvec",
+				RuntimeName: runtimeName, ModelID: modelID,
+				RequestID: requestID, Payload: []byte("p"),
+			})
+
+			s.dispatchPass(ctx)
+			waitDispatchIdle(t, s)
+
+			require.Empty(t, assigns, "the job must never reach the worker")
+			res, err := s.results.Get(requestID)
+			require.NoError(t, err)
+			if tt.existingError == "" {
+				require.Nil(t, res, "nothing to record a failure against")
+			} else {
+				require.NotNil(t, res)
+				require.Equal(t, queue.ResultStatusError, res.Status)
+				require.Equal(t, tt.existingError, res.Error,
+					"the recorded outcome must survive the dispatch attempt")
+			}
+
+			rows, err := wq.PeekAll(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, rows, "worker row must be dropped")
+			gRows, err := s.globalQ.PeekAll(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, gRows, "global anchor must be dropped")
+		})
 	}
 }
 
