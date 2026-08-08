@@ -1762,13 +1762,13 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		// conflicts, reports a pool that won't survive dispatch
 		// (it'll be evicted + reloaded with a fresh pool), so the
 		// capacity number is meaningless. Exclude only resident-fitting
-		// saturated workers. Capacity is net of MASS's own in-flight jobs
-		// (heartbeat AvailableCapacity lags real-time dispatch) so the
-		// picker doesn't route a burst onto a worker the dispatcher will
-		// then refuse — see drainOneWorkerQueue.
+		// saturated workers. Capacity is net of the dispatches the last
+		// heartbeat hasn't caught up with, so the picker doesn't route a
+		// burst onto a worker the dispatcher will then refuse — see
+		// [Scheduler.effectiveCapacity].
 		if env.ModelID != "" && workerHasModel(w, env.ModelID) &&
 			len(residentsBlockingLoad(w, env.ModelID, s.predictDeviceSet(w))) == 0 &&
-			w.AvailableCapacity()-s.inflightCountForWorker(w.ID()) <= 0 {
+			s.effectiveCapacity(w) <= 0 {
 			continue
 		}
 		name := workerQueueName(w.ID())
@@ -1982,12 +1982,26 @@ func (s *Scheduler) workerHasInflightForModel(workerID, modelID string) bool {
 	return false
 }
 
+// effectiveCapacity returns w's free-slot count net of the jobs MASS has
+// dispatched that w's last heartbeat doesn't reflect yet.
+//
+// The heartbeat's AvailableCapacity is already net of the worker's running
+// jobs (the worker reports Σ max(0, pool − active) across its loaded
+// models), so subtracting the whole inflight count would debit each job
+// twice once a heartbeat catches up — steady-state concurrency would
+// settle around pool/2. Only the lag is unaccounted for. ActiveJobs can
+// exceed MASS's inflight count when something dispatches to the worker
+// directly; the heartbeat already covers those, hence the floor at 0.
+func (s *Scheduler) effectiveCapacity(w *worker.StreamWorker) int {
+	return w.AvailableCapacity() - max(0, s.inflightCountForWorker(w.ID())-w.ActiveJobs())
+}
+
 // inflightCountForWorker counts the jobs MASS currently has in flight on
 // workerID. The worker's heartbeat AvailableCapacity lags real-time
 // dispatch by up to one interval, so a burst could otherwise place more
-// jobs than the pool holds before the count catches up; subtracting this
-// from advertised capacity (see drainOneWorkerQueue) keeps a burst within
-// pool_size immediately.
+// jobs than the pool holds before the count catches up; netting the lag
+// out of advertised capacity (see [Scheduler.effectiveCapacity]) keeps a
+// burst within pool_size immediately.
 func (s *Scheduler) inflightCountForWorker(workerID string) int {
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
@@ -2392,9 +2406,9 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	// AvailableCapacity comes from the worker's last heartbeat, which lags
 	// real-time dispatch: a burst routed here across kick()-triggered passes
 	// would otherwise reuse the same free-slot count and place more jobs than
-	// the pool holds before the next heartbeat lands. Subtract the jobs MASS
-	// already has in flight on this worker so the effective capacity reflects
-	// reality now, not one heartbeat ago.
+	// the pool holds before the next heartbeat lands. effectiveCapacity nets
+	// out the dispatches that heartbeat doesn't reflect yet, so the number
+	// describes reality now, not one heartbeat ago.
 	//
 	// The max(_, 1) floor only applies when nothing is in flight yet: a
 	// worker with no model loaded reports 0 capacity, but we must still drain
@@ -2402,7 +2416,7 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	// Once jobs are in flight that floor would itself over-dispatch, so it's
 	// gated on a zero inflight count.
 	inflight := s.inflightCountForWorker(workerID)
-	capacity := sw.AvailableCapacity() - inflight
+	capacity := s.effectiveCapacity(sw)
 	batch := capacity
 	if inflight == 0 {
 		batch = max(capacity, 1)
@@ -3009,7 +3023,7 @@ func (s *Scheduler) stealWithinRuntime(ctx context.Context, queues []workerQueue
 		if idle.depth > 0 {
 			continue
 		}
-		if idle.t.worker.AvailableCapacity() <= 0 {
+		if s.effectiveCapacity(idle.t.worker) <= 0 {
 			continue
 		}
 		// Find the deepest peer whose head row this idle worker can serve.

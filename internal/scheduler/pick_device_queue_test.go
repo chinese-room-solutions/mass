@@ -555,6 +555,54 @@ func TestSubmit_SaturatedGPUFallsThroughToCPUWorker(t *testing.T) {
 		"CPU worker must absorb the placement when the GPU is saturated")
 }
 
+// A warm worker with a free slot stays eligible once its heartbeat
+// reflects the job MASS has running on it. Debiting that job against a
+// capacity number that already excludes it made the picker call a warm
+// worker saturated and push the job to a cold peer, forcing a needless
+// model load.
+func TestPickWorkerQueue_SyncedHeartbeatKeepsWarmWorkerEligible(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+	s, st := newTestScheduler(t)
+
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "warm", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 500}, BenchedAt: time.Now(),
+	}))
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "cold", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 80}, BenchedAt: time.Now(),
+	}))
+
+	// Pool of 2, one job running and reported by the heartbeat: one slot
+	// really is free.
+	warm := worker.NewFakeStreamWorker("warm", runtimeName, gpu1(), time.Now())
+	warm.SetFakeCapacity(1)
+	warm.SetFakeActiveJobs(1)
+	warm.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 2, Active: 1}})
+	cold := worker.NewFakeStreamWorker("cold", runtimeName, gpu1(), time.Now())
+	cold.SetFakeCapacity(4)
+	require.NoError(t, s.workers.Register(warm))
+	require.NoError(t, s.workers.Register(cold))
+	s.OnWorkerConnected(warm)
+	s.OnWorkerConnected(cold)
+
+	// The same job, from MASS's side.
+	s.inflightMu.Lock()
+	s.inflightByRequest["req-running"] = inflightRecord{
+		queueName: "worker|warm", workerID: "warm", modelID: modelID,
+	}
+	s.inflightMu.Unlock()
+
+	target, _ := s.pickWorkerQueue(queue.Envelope{
+		RuntimeName: runtimeName, ModelID: modelID,
+		Cost: 100, CostAxis: "q4k_matvec",
+	})
+	require.NotNil(t, target)
+	require.Equal(t, "worker|warm", target.name,
+		"a warm worker with a heartbeat-confirmed free slot must keep the placement")
+}
+
 // startInflight and finishInflight must round-trip cleanly: adding a
 // seconds estimate and then removing it leaves the per-queue counter at
 // the previous value. Critical because every dispatched job goes through

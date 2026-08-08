@@ -149,6 +149,14 @@ func (w *StreamWorker) SetFakeCapacity(workerCap int) {
 	w.availableCap = workerCap
 }
 
+// SetFakeActiveJobs seeds the worker-wide ActiveJobs count without going
+// through a real heartbeat. Tests only.
+func (w *StreamWorker) SetFakeActiveJobs(active int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.activeJobsCount = active
+}
+
 // SetFakeLoadedModels seeds the worker's loaded-model set without going
 // through a heartbeat. Tests only — exercises the scheduler's affinity
 // path.

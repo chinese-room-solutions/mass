@@ -267,6 +267,88 @@ func TestDispatcher_BurstRespectsPoolSize(t *testing.T) {
 	require.Equal(t, poolSize, inflight, "inflight count must equal pool_size")
 }
 
+// Once a heartbeat reports the running jobs, MASS must not debit them a
+// second time. The worker's available_capacity is already net of its
+// active jobs, so subtracting the full in-flight count on top of it made a
+// pool of N dispatch at ~N/2 and stalled the queue until in-flight hit 0.
+func TestDispatcher_SyncedHeartbeatDoesNotDoubleCountInflight(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+	const poolSize = 2
+
+	s, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+	}))
+
+	assign := make(chan string, 8)
+	w := worker.NewFakeStreamWorker("w1", runtimeName,
+		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+	w.SetFakeCapacity(poolSize)
+	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: poolSize}})
+	w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assign <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	for range poolSize + 1 {
+		_, err := s.Submit(context.Background(), SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID,
+			Payload: []byte("p"), Cost: 100, CostAxis: "q4k_matvec",
+		})
+		require.NoError(t, err)
+	}
+
+	drive := func() []string {
+		var got []string
+		for range 5 {
+			s.dispatchPass(context.Background())
+			waitDispatchIdle(t, s)
+			for {
+				select {
+				case jobID := <-assign:
+					got = append(got, jobID)
+					continue
+				default:
+				}
+				break
+			}
+		}
+		return got
+	}
+
+	running := drive()
+	require.Len(t, running, poolSize, "the pool must fill and stop")
+
+	// The next heartbeat catches up: the worker reports both jobs active
+	// and no free slot. Still saturated — nothing more may dispatch.
+	w.SetFakeCapacity(0)
+	w.SetFakeActiveJobs(poolSize)
+	require.Empty(t, drive(), "a saturated worker must not receive more jobs")
+
+	// One job finishes and the heartbeat reports the freed slot alongside
+	// the one job still running. The queued job must go out now: the
+	// remaining job is already accounted for in available_capacity.
+	w.DeliverJobChunk(running[0], &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("ok"),
+	})
+	pollUntilEqual(t, poolSize-1, func() int {
+		return s.inflightCountForWorker("w1")
+	}, "the completed job must clear from the inflight map")
+	w.SetFakeCapacity(1)
+	w.SetFakeActiveJobs(poolSize - 1)
+
+	require.Len(t, drive(), 1, "the freed slot must dispatch the queued job")
+}
+
 // tailTracker wraps a StateStoreInterface and counts every tail
 // credit/debit, plus tracks the running sum so a negative observation
 // becomes visible to the test. Every other call — including
