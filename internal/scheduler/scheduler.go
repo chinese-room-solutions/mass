@@ -1148,7 +1148,10 @@ func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
 	}
 
 	if len(s.deviceSet(sw)) == 0 {
-		s.drainWorkerQueue(context.Background(), q, globalQ)
+		// Pending rows only: the worker is still online and its in-flight
+		// jobs finish on the pre-toggle device set (see
+		// [Scheduler.ReestimateWorkerQueue]).
+		s.drainWorkerQueue(context.Background(), q, globalQ, false)
 		s.broadcastQueueChange()
 		return
 	}
@@ -1189,7 +1192,7 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	}
 
 	ctx := context.Background()
-	s.drainWorkerQueue(ctx, q, globalQ)
+	s.drainWorkerQueue(ctx, q, globalQ, true)
 
 	s.queueMu.Lock()
 	delete(s.devQueues, name)
@@ -1208,35 +1211,43 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	}
 }
 
-// drainWorkerQueue reaps every visible row from src and releases the
-// global durability anchor for each so drainGlobal can re-place the
-// envelope on a surviving worker.
+// drainWorkerQueue reaps rows from src and releases the global
+// durability anchor for each so drainGlobal can re-place the envelope on
+// a surviving worker.
 //
-// In-flight rows are reaped here too: the worker's gRPC stream closed on
-// disconnect, so pumpWorkerChunks's workerCh will end with no terminal
-// frame. Under the new model, pump detects offline + leaves the global
-// anchor alone; this drain is what actually releases it. An in-flight
-// row's re-placement is charged against disconnectRequeueBudget —
-// without the cap, a job that crashes its worker cycles forever
-// (requeue → redispatch → crash) and wedges every caller waiting on it.
-// Past the budget the result fails terminally. Queued-but-never-
-// dispatched rows carry no blame and re-place without consuming an
-// attempt.
+// includeLeased picks the semantics. With it set (worker disconnected)
+// in-flight rows are reaped too: the worker's gRPC stream closed, so
+// pumpWorkerChunks's workerCh will end with no terminal frame. Under the
+// new model, pump detects offline + leaves the global anchor alone; this
+// drain is what actually releases it. An in-flight row's re-placement is
+// charged against disconnectRequeueBudget — without the cap, a job that
+// crashes its worker cycles forever (requeue → redispatch → crash) and
+// wedges every caller waiting on it. Past the budget the result fails
+// terminally. Queued-but-never-dispatched rows carry no blame and
+// re-place without consuming an attempt.
+//
+// Without it (the worker is still online, e.g. a toggle disabled its last
+// device) leased rows are left alone: their pump goroutine and lease
+// keep-alive are still running and the job is still streaming, so
+// requeueing would dispatch a duplicate of a running job.
 //
 // Uses PeekAll (not Peek) so leased rows — which is exactly what an
-// in-flight row looks like on disk — are included. Peek-only would
-// strand every job that was actually running on the worker, since
-// those rows are leased through the pump goroutine's lifetime.
+// in-flight row looks like on disk — are visible. Peek-only would strand
+// every job that was actually running on the worker, since those rows are
+// leased through the pump goroutine's lifetime.
 //
 // Best-effort: races (the global row already gone, a row already deleted
 // by pump) and per-row errors are logged and skipped.
-func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.QueueInterface) {
+func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.QueueInterface, includeLeased bool) {
 	msgs, err := src.PeekAll(ctx, peekAllLimit)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("peeking device queue for drain")
 		return
 	}
 	for _, msg := range msgs {
+		if msg.Leased && !includeLeased {
+			continue
+		}
 		env, err := queue.UnmarshalEnvelope(msg.Body)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("message_id", string(msg.ID)).Msg("unmarshal envelope on drain")

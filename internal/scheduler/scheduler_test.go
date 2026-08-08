@@ -279,7 +279,7 @@ func TestScheduler_DrainWorkerQueue_InflightChargesAttemptBudget(t *testing.T) {
 
 	// First worker death: budget allows one re-placement — the envelope
 	// lands back on global with the attempt recorded, result pending again.
-	s.drainWorkerQueue(ctx, wq, globalQ)
+	s.drainWorkerQueue(ctx, wq, globalQ, true)
 
 	wqDepth, err := wq.Depth(ctx)
 	require.NoError(t, err)
@@ -304,7 +304,7 @@ func TestScheduler_DrainWorkerQueue_InflightChargesAttemptBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.results.Processing("req-1"))
 
-	s.drainWorkerQueue(ctx, wq, globalQ)
+	s.drainWorkerQueue(ctx, wq, globalQ, true)
 
 	gDepth, err := globalQ.Depth(ctx)
 	require.NoError(t, err)
@@ -355,7 +355,7 @@ func TestScheduler_DrainWorkerQueue_TerminalResultNotRequeued(t *testing.T) {
 	require.NoError(t, s.results.Processing("req-lost"))
 	require.NoError(t, s.results.Fail("req-lost", "unhandled exception: vk::Device::waitForFences: ErrorDeviceLost"))
 
-	s.drainWorkerQueue(ctx, wq, globalQ)
+	s.drainWorkerQueue(ctx, wq, globalQ, true)
 
 	// Both rows gone, nothing re-placed, and the stored result untouched.
 	wqDepth, err := wq.Depth(ctx)
@@ -412,6 +412,72 @@ func TestScheduler_OnWorkerDevicesChanged_AllDisabledDrainsToGlobal(t *testing.T
 	_, present := s.devQueues["worker|w1"]
 	s.queueMu.RUnlock()
 	require.True(t, present, "worker queue stays registered through a toggle")
+}
+
+// The all-disable toggle drains PENDING rows only. The worker is still
+// online and its in-flight job is still streaming, so requeueing the
+// leased row would dispatch a duplicate onto a peer, burn the disconnect
+// budget, and eventually write a false "worker disconnected" result.
+func TestScheduler_OnWorkerDevicesChanged_AllDisabledKeepsRunningJob(t *testing.T) {
+	s, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+	}))
+	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	ctx := context.Background()
+	s.queueMu.RLock()
+	wq := s.devQueues["worker|w1"]
+	globalQ := s.globalQ
+	s.queueMu.RUnlock()
+	require.NotNil(t, wq)
+
+	// In-flight row: placed, leased, result processing.
+	placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
+		ModelID: "m1", RequestID: "req-running", Payload: []byte("p"),
+	})
+	rows, err := wq.PeekAll(ctx, 4)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	_, err = wq.LeaseByID(ctx, rows[0].ID, dispatchLeaseDuration)
+	require.NoError(t, err)
+	require.NoError(t, s.results.Create("req-running"))
+	require.NoError(t, s.results.Processing("req-running"))
+
+	// Queued-but-never-dispatched row behind it.
+	placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
+		ModelID: "m1", RequestID: "req-pending", Payload: []byte("p"),
+	})
+
+	s.SetDeviceEnabledFn(func(_, _ string) bool { return false })
+	s.OnWorkerDevicesChanged("w1")
+
+	// Only the pending row goes back to global.
+	gmsgs, err := globalQ.Peek(ctx, 4)
+	require.NoError(t, err)
+	require.Len(t, gmsgs, 1, "only the pending row may return to global")
+	back, err := queue.UnmarshalEnvelope(gmsgs[0].Body)
+	require.NoError(t, err)
+	require.Equal(t, "req-pending", back.RequestID)
+
+	// The running job is untouched: still leased on the worker queue,
+	// still processing, no attempt consumed.
+	rows, err = wq.PeekAll(ctx, 4)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the leased row stays on the worker queue")
+	require.True(t, rows[0].Leased, "the leased row keeps its lease")
+	stillRunning, err := queue.UnmarshalEnvelope(rows[0].Body)
+	require.NoError(t, err)
+	require.Equal(t, "req-running", stillRunning.RequestID)
+	require.Equal(t, uint8(0), stillRunning.Attempts, "a running job must not be charged an attempt")
+	r, err := s.GetResult("req-running")
+	require.NoError(t, err)
+	require.Equal(t, queue.ResultStatusProcessing, r.Status)
 }
 
 // eligibleWorker filters out workers with no usable devices (every
