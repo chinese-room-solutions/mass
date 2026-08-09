@@ -898,6 +898,9 @@ type WorkerView struct {
 	Enabled     bool // operator toggle: any device on this worker enabled
 	Devices     []ComputeView
 	ActiveJobs  int
+	// BenchingModel is the store key of the model being measured on this
+	// worker right now, "" when it isn't benching.
+	BenchingModel string
 }
 
 // ComputeView is a per-device row inside a worker card.
@@ -1006,6 +1009,12 @@ func RenderWorkersList(workers []WorkerView) string {
 				fmt.Fprintf(&b, `CPU %s`, formatGFlops(cpuGF))
 			}
 			b.WriteString(`</span>`)
+		}
+		// A worker measuring a model takes no jobs until it finishes —
+		// say so, or its idleness looks like a fault.
+		if w.BenchingModel != "" {
+			fmt.Fprintf(&b, `<span style="color:var(--mass-warning)" title="%s">benchmarking %s</span>`,
+				html.EscapeString(w.BenchingModel), html.EscapeString(ShortKey(w.BenchingModel)))
 		}
 		b.WriteString(`</div>`)
 		if len(w.Devices) > 0 {

@@ -29,6 +29,10 @@ type WorkerInfo struct {
 	Enabled     bool // operator toggle: any device on this worker enabled
 	ActiveJobs  int
 	Devices     []DeviceInfo
+	// BenchingModel is the store key of the model being measured on this
+	// worker right now, "" when it isn't benching. A benching worker takes
+	// no jobs until the measurement finishes.
+	BenchingModel string
 }
 
 // DeviceInfo is the transport-neutral view of one worker device.
@@ -117,16 +121,22 @@ func (h *Handler) workerInfos() []WorkerInfo {
 		// with no devices yet (race before first heartbeat) is treated enabled.
 		workerEnabled := anyEnabled || len(devices) == 0
 
+		benching := ""
+		if h.orch != nil {
+			benching = h.orch.BenchInFlight(wkr.ID())
+		}
+
 		out = append(out, WorkerInfo{
-			ID:          wkr.ID(),
-			Name:        wkr.Name(),
-			RuntimeName: wkr.RuntimeName(),
-			Version:     wkr.Version(),
-			Compatible:  wkr.Compatible(),
-			Online:      status.Online,
-			Enabled:     workerEnabled,
-			ActiveJobs:  wkr.ActiveJobs(),
-			Devices:     devices,
+			ID:            wkr.ID(),
+			Name:          wkr.Name(),
+			RuntimeName:   wkr.RuntimeName(),
+			Version:       wkr.Version(),
+			Compatible:    wkr.Compatible(),
+			Online:        status.Online,
+			Enabled:       workerEnabled,
+			ActiveJobs:    wkr.ActiveJobs(),
+			Devices:       devices,
+			BenchingModel: benching,
 		})
 	}
 	return out

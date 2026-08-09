@@ -27,6 +27,29 @@
   // within the same runtime only patch id, but our cached runtime stays
   // valid.
   var _lastRuntime = '';
+
+  // MASS's own benchmark card lives below the gateway's detail panel and
+  // is served by MASS. It moves on its own (a bench concludes, a re-bench
+  // starts), so it refreshes on a timer for as long as a model is selected.
+  var _benchTimer = null;
+  var _benchID = '';
+  function loadBenchCard() {
+    var pane = document.getElementById('model-bench-pane');
+    if (!pane) return;
+    if (!_benchID || !_lastRuntime) { pane.innerHTML = ''; return; }
+    fetch('/api/models/benchmarks?runtime=' + encodeURIComponent(_lastRuntime) +
+          '&id=' + encodeURIComponent(_benchID))
+      .then(function(r) { return r.text(); })
+      .then(function(html) { pane.innerHTML = html; })
+      .catch(function() {});
+  }
+  function watchBench(id) {
+    _benchID = id;
+    if (_benchTimer) { clearInterval(_benchTimer); _benchTimer = null; }
+    loadBenchCard();
+    if (id) _benchTimer = setInterval(loadBenchCard, 5000);
+  }
+
   document.addEventListener('datastar-signal-patch', function(e) {
     if (!e.detail) return;
     if ('selectedModelRuntime' in e.detail) {
@@ -36,8 +59,9 @@
     var pane = document.getElementById('model-detail-pane');
     if (!pane) return;
     var id = e.detail.selectedModelID || '';
-    if (!id) { pane.innerHTML = ''; return; }
-    if (!_lastRuntime) { pane.innerHTML = ''; return; }
+    if (!id) { pane.innerHTML = ''; watchBench(''); return; }
+    if (!_lastRuntime) { pane.innerHTML = ''; watchBench(''); return; }
+    watchBench(id);
     fetch('/mass.' + _lastRuntime + '.v1/Models/Detail?id=' + encodeURIComponent(id))
       .then(function(r) { return r.text(); })
       .then(function(html) { pane.innerHTML = html; })
@@ -104,6 +128,7 @@
     if (!ok) return;
     var pane = document.getElementById('model-detail-pane');
     if (pane) pane.innerHTML = '';
+    watchBench('');
     // Remove any group card whose last row just left. Same sweep
     // __massConfirmDeleteGroup uses; the per-row SSE stream is one-shot
     // so we own this teardown here.
@@ -131,6 +156,7 @@
     // no other detail to lose context on after a bulk delete.
     var pane = document.getElementById('model-detail-pane');
     if (pane) pane.innerHTML = '';
+    watchBench('');
     // Remove the now-empty group container. Its rows already left via
     // deleteOne(); the surrounding <details> just needs to go too.
     if (firstID) {

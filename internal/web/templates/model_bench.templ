@@ -1,0 +1,119 @@
+package templates
+
+import (
+	"fmt"
+	"net/url"
+
+	"github.com/chinese-room-solutions/mass-sdk/format"
+)
+
+// Per-model benchmark card on the Models tab, rendered under the runtime's
+// own detail panel. One row per (worker, device set) the fleet has an
+// answer for, plus a row for whatever worker is measuring the model right
+// now.
+
+// ModelBenchState is what one (worker, device set) pair has to say about
+// the selected model.
+type ModelBenchState string
+
+const (
+	// ModelBenchMeasured — usable measurements.
+	ModelBenchMeasured ModelBenchState = "measured"
+	// ModelBenchIncapable — that device set can't run the model.
+	ModelBenchIncapable ModelBenchState = "incapable"
+	// ModelBenchRunning — the measurement is in flight right now.
+	ModelBenchRunning ModelBenchState = "running"
+)
+
+// ModelBenchRowView is one (worker, device set) verdict.
+type ModelBenchRowView struct {
+	WorkerName   string
+	DeviceSet    string
+	State        ModelBenchState
+	UnitsPerSec  float64
+	GraphSecs    float64
+	BaseBytes    int64
+	PerSlotBytes int64
+	Error        string
+}
+
+// ModelBenchView is the card for one model: its rows plus the identity the
+// re-bench action posts back.
+type ModelBenchView struct {
+	RuntimeName string // runtime that owns the model
+	ModelKey    string // store-relative key of the model's primary file
+	Rows        []ModelBenchRowView
+}
+
+// ModelBenchPanel renders the benchmark card. The root id is what the
+// re-bench response patches, so it must stay stable.
+templ ModelBenchPanel(view ModelBenchView) {
+	<div id="model-bench-card" class="bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5">
+		<div class="flex items-center gap-2 mb-3">
+			<sl-icon name="speedometer2" style="font-size:0.9rem;color:var(--mass-accent)"></sl-icon>
+			<h3 class="text-sm font-semibold text-white">Benchmarks</h3>
+		</div>
+		if len(view.Rows) == 0 {
+			<p class="text-xs text-neutral-500">No benchmark yet. MASS measures the model on each worker as it connects.</p>
+		} else {
+			<div class="space-y-3">
+				for _, row := range view.Rows {
+					@modelBenchRow(row)
+				}
+			</div>
+		}
+		<div class="pt-4 border-t border-neutral-700/50 flex items-center justify-center" style="margin-top:0.75rem">
+			<sl-button
+				size="small"
+				variant="default"
+				outline
+				data-on:click={ fmt.Sprintf("@post('/api/models/rebench?runtime=%s&key=%s')", url.QueryEscape(view.RuntimeName), url.QueryEscape(view.ModelKey)) }
+			>
+				<sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>Re-bench
+			</sl-button>
+		</div>
+	</div>
+}
+
+templ modelBenchRow(row ModelBenchRowView) {
+	<div>
+		<div class="flex items-baseline gap-2">
+			<sl-icon name="pc-display" style="font-size:0.7rem;color:var(--mass-text-faint)"></sl-icon>
+			<span class="text-xs text-neutral-200 font-mono break-all min-w-0">{ row.WorkerName }</span>
+			<span class="text-xs text-neutral-500 font-mono ml-auto flex-shrink-0">{ row.DeviceSet }</span>
+		</div>
+		<div class="mt-1.5 space-y-2.5">
+			switch row.State {
+				case ModelBenchRunning:
+					<div class="flex items-center gap-2">
+						<sl-spinner style="font-size:0.7rem;--track-width:2px"></sl-spinner>
+						<span class="text-xs" style="color:var(--mass-warning)">benchmarking…</span>
+					</div>
+				case ModelBenchIncapable:
+					<div class="flex items-baseline gap-3">
+						<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:5.5rem">Verdict</span>
+						<span class="text-xs rounded px-1.5 py-0.5 bg-red-900/60 text-red-300">Incapable</span>
+					</div>
+					<p class="text-xs break-all" style="color:var(--mass-danger)">{ row.Error }</p>
+				default:
+					@benchPropRow("Throughput", fmt.Sprintf("%.1f units/s", row.UnitsPerSec))
+					@benchPropRow("Graph", fmt.Sprintf("%.3f s", row.GraphSecs))
+					@benchPropRow("Base", format.Bytes(row.BaseBytes))
+					@benchPropRow("Per slot", format.Bytes(row.PerSlotBytes))
+			}
+		</div>
+	</div>
+}
+
+templ benchPropRow(label, value string) {
+	<div class="flex items-baseline gap-3">
+		<span class="text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap" style="min-width:5.5rem">{ label }</span>
+		<span class="text-xs text-neutral-200 font-mono break-all min-w-0">{ value }</span>
+	</div>
+}
+
+// RenderModelBenchPanel renders the card as a string, for the fetch that
+// fills the pane and for the re-bench SSE patch.
+func RenderModelBenchPanel(view ModelBenchView) string {
+	return renderToString(ModelBenchPanel(view))
+}

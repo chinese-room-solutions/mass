@@ -235,6 +235,11 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	// MassScheduler.DownloadFiles RPC for the actual fetch. Browse
 	// Local stays MASS-side because filesystem access lives on the
 	// MASS host.
+	// Per-model benchmark card under the selected model's detail panel,
+	// plus the manual re-bench that clears the fleet's verdicts.
+	mux.HandleFunc("GET /api/models/benchmarks", h.handleModelBenchStatus)
+	mux.HandleFunc("POST /api/models/rebench", h.handleModelRebench)
+
 	mux.HandleFunc("POST /api/models/import", h.handleImportLocalModel)
 	mux.HandleFunc("POST /api/models/delete", h.handleDeleteModel)
 	mux.HandleFunc("GET /api/groups/names", h.handleListGroupNames)
@@ -520,14 +525,15 @@ func (h *Handler) buildWorkerViews() []templates.WorkerView {
 			})
 		}
 		views = append(views, templates.WorkerView{
-			ID:          wi.ID,
-			Name:        wi.Name,
-			RuntimeName: wi.RuntimeName,
-			Version:     wi.Version,
-			Online:      wi.Online,
-			Enabled:     wi.Enabled,
-			Devices:     devices,
-			ActiveJobs:  wi.ActiveJobs,
+			ID:            wi.ID,
+			Name:          wi.Name,
+			RuntimeName:   wi.RuntimeName,
+			Version:       wi.Version,
+			Online:        wi.Online,
+			Enabled:       wi.Enabled,
+			Devices:       devices,
+			ActiveJobs:    wi.ActiveJobs,
+			BenchingModel: wi.BenchingModel,
 		})
 	}
 	return views

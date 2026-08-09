@@ -182,6 +182,10 @@ templ Shell(data DashboardData) {
 				>
 					<div id="models-props-spacer"></div>
 					<div id="model-detail-pane" class="px-3 pb-3"></div>
+					<!-- MASS-owned benchmark card: the gateway describes the
+					     file above, this says what the fleet measured. Its own
+					     container so the gateway detail fetch can't wipe it. -->
+					<div id="model-bench-pane" class="px-3 pb-3"></div>
 				</div>
 			</div>
 			@templ.Raw(modelsTabStyles)
