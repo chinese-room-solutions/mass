@@ -180,6 +180,10 @@ func main() {
 	queuePool := queue.NewPool(st.DB(), st.Dialect())
 	results := queue.NewResultStore(st.DB(), st.Dialect())
 	orch.InitQueue(queuePool, results, st)
+	// The models root resolves the store-relative keys per-model
+	// benchmark rows are recorded under, so the scheduler can tell a
+	// measurement apart from one taken on a since-changed file.
+	orch.SetModelsDir(config.ModelsDir(dataDir))
 
 	// Worker hub: workers connect here and are gated on having a matching
 	// installed runtime kind.

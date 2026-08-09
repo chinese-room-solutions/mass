@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -113,16 +115,89 @@ func benchModelKey(files []*workerpb.ModelFile) string {
 // measurement for env's model on w's CURRENT predicted device set.
 // ok is false — w is not a candidate — when w has no usable device set,
 // when the bench hasn't concluded there (no row), when it concluded
-// INCAPABLE (error set), or when the measurement is unusable
-// (units_per_sec <= 0). An envelope carrying no load artifact has an
-// empty model key, which no row is ever written under, so it lands on
-// the same "no row" answer.
+// INCAPABLE (error set), when the measurement is unusable
+// (units_per_sec <= 0), or when the model's file no longer matches the
+// one the row was measured against. An envelope carrying no load
+// artifact has an empty model key, which no row is ever written under,
+// so it lands on the same "no row" answer.
 func (s *Scheduler) modelBenchmark(w *worker.StreamWorker, env queue.Envelope) (store.ModelBenchmarkRow, bool) {
 	set := s.predictDeviceSet(w)
 	if len(set) == 0 {
 		return store.ModelBenchmarkRow{}, false
 	}
-	return s.lookupModelBenchmark(w.ID(), deviceSetKey(set), benchModelKey(env.Files))
+	row, ok := s.lookupModelBenchmark(w.ID(), deviceSetKey(set), benchModelKey(env.Files))
+	if !ok || !s.modelFileUnchanged(row) {
+		return store.ModelBenchmarkRow{}, false
+	}
+	return row, true
+}
+
+// SetModelsDir wires MASS's models root — the directory the store-
+// relative model keys resolve under. Needed to check a row against the
+// file it was measured on. Left empty (tests, early init) the check is
+// skipped and rows are trusted.
+func (s *Scheduler) SetModelsDir(dir string) {
+	s.workerEnabledMu.Lock()
+	s.modelsDir = dir
+	s.workerEnabledMu.Unlock()
+}
+
+// modelFileUnchanged reports whether the model file behind row still has
+// the size and mtime the bench measured. A changed file means the
+// measurement describes different weights, so every row of that model is
+// treated as absent until a re-bench lands. A file MASS can no longer
+// stat counts as changed — nothing can be dispatched against it anyway.
+func (s *Scheduler) modelFileUnchanged(row store.ModelBenchmarkRow) bool {
+	s.workerEnabledMu.RLock()
+	dir := s.modelsDir
+	s.workerEnabledMu.RUnlock()
+	if dir == "" || row.ModelID == "" {
+		return true
+	}
+	info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(row.ModelID)))
+	if err != nil {
+		return false
+	}
+	return info.Size() == row.ModelSize && info.ModTime().Unix() == row.ModelMTime
+}
+
+// modelBenchConclusion reports how the benches for env's model stand
+// across every worker that could run it.
+//
+// pending is true while at least one eligible worker might still become
+// a candidate: its bench hasn't concluded, or it concluded usable (the
+// job is merely blocked on memory or files right now). errText carries
+// the last recorded incapable verdict, which the caller surfaces when
+// nothing is pending — every eligible worker has answered "no".
+//
+// An ineligible worker — offline, operator-disabled, or with every
+// device disabled — is not consulted: it cannot conclude, so waiting on
+// it would wedge the job forever.
+func (s *Scheduler) modelBenchConclusion(env queue.Envelope) (pending bool, errText string) {
+	modelKey := benchModelKey(env.Files)
+	if modelKey == "" {
+		return true, ""
+	}
+	eligible := 0
+	for _, w := range s.WorkersForRuntime(env.RuntimeName) {
+		set := s.predictDeviceSet(w)
+		if len(set) == 0 {
+			continue
+		}
+		eligible++
+		row, ok := s.lookupModelBenchmark(w.ID(), deviceSetKey(set), modelKey)
+		switch {
+		case ok && s.modelFileUnchanged(row):
+			return true, ""
+		case row.Error != "" && s.modelFileUnchanged(row):
+			errText = row.Error
+		default:
+			return true, "" // no row yet, or a stale one: a bench is owed
+		}
+	}
+	// No eligible worker at all: nothing has concluded, so the job waits
+	// for one to appear rather than failing on an empty fleet.
+	return eligible == 0, errText
 }
 
 // lookupModelBenchmark is modelBenchmark's cache-and-store half, split

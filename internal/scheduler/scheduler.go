@@ -173,6 +173,8 @@ type Scheduler struct {
 	workerEnabledMu sync.RWMutex
 	workerEnabled   WorkerEnabledFn
 	deviceEnabled   DeviceEnabledFn
+	// modelsDir is MASS's models root; see [Scheduler.SetModelsDir].
+	modelsDir string
 
 	jobsMu     sync.Mutex
 	jobBuffers map[string]*jobBuffer // RequestID → in-memory replay buffer
@@ -1671,7 +1673,16 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 		env.GlobalMsgID = string(msg.ID)
 		target, queuedSeconds := s.pickWorkerQueue(env)
 		if target == nil {
-			pending = true // no eligible target right now; row stays
+			// Nothing can take the row right now. Either a bench is
+			// still owed somewhere (wait), or every eligible worker has
+			// concluded this model can't run on it (fail — waiting
+			// longer changes nothing).
+			if benchPending, errText := s.modelBenchConclusion(env); benchPending {
+				pending = true
+				continue
+			} else {
+				s.failUnbenchable(ctx, globalQ, msg.ID, env, errText)
+			}
 			continue
 		}
 		env.QueuedSeconds = queuedSeconds
@@ -1686,6 +1697,27 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 		s.creditTail(target.name, queuedSeconds, env.ModelID)
 	}
 	return pending
+}
+
+// failUnbenchable finalises a job whose model concluded incapable on
+// every eligible worker: the failure is the bench's recorded verdict,
+// which is as good an answer as the fleet will ever give. The terminal
+// chunk lands after the durable result so an attached gateway that
+// unblocks on it reads a settled row.
+func (s *Scheduler) failUnbenchable(ctx context.Context, globalQ queue.QueueInterface, msgID queue.MessageID, env queue.Envelope, errText string) {
+	if errText == "" {
+		errText = "no worker can run this model"
+	}
+	errText = "model benchmark failed on every eligible worker: " + errText
+	s.logger.Warn().Str("request_id", env.RequestID).Str("model_id", env.ModelID).Str("reason", errText).
+		Msg("failing job: no eligible worker can run this model")
+	metrics.JobDispatched(env.RuntimeName, "error")
+	s.failResult(env.RequestID, errText)
+	s.ensureJobBuffer(env.RequestID).Append(&worker.JobChunk{Type: worker.JobChunkTypeError, ErrText: errText})
+	if err := globalQ.Delete(ctx, msgID); err != nil {
+		s.logger.Warn().Err(err).Str("request_id", env.RequestID).Msg("deleting global row for unbenchable job")
+	}
+	s.broadcastQueueChange()
 }
 
 // workerQueueTarget pairs a worker queue with its owning worker so the
@@ -3222,19 +3254,42 @@ func effectiveHeadroomPct(w *worker.StreamWorker, env queue.Envelope) int32 {
 	return defaultHeadroomPct
 }
 
+// plannedPoolSize returns how many concurrent slots MASS wants the
+// worker's context pool for this model to hold. Two rules, both from
+// measurement:
+//
+//   - Latency: a request arriving at a full pool waits for one slot to
+//     free, so the pool is sized to work through a full round within
+//     [config.Config.EffectiveBenchBudgetSeconds] of measured decodes,
+//     capped by [config.Config.EffectiveBenchSlotsCap].
+//   - Memory: the row's base_bytes is the load at pool size 1 and
+//     per_slot_bytes is the cost of one more, so the extra slots are
+//     bounded by what fits under the worker's headroom watermark.
+//
+// Always at least 1 — a pool of zero slots can't serve anything.
+func (s *Scheduler) plannedPoolSize(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) int {
+	slotsCap := s.cfg.EffectiveBenchSlotsCap()
+	slots := slotsCap
+	if row.GraphSecs > 0 {
+		slots = int(s.cfg.EffectiveBenchBudgetSeconds() / row.GraphSecs)
+	}
+	slots = min(max(slots, 1), slotsCap)
+	if row.PerSlotBytes <= 0 || row.BaseBytes <= 0 {
+		return slots
+	}
+	headroom := (s.freeMemoryBytes(w) - row.BaseBytes) * int64(effectiveHeadroomPct(w, env)) / 100
+	if headroom <= 0 {
+		return 1
+	}
+	return min(slots, 1+int(headroom/row.PerSlotBytes))
+}
+
 // projectedLoadBytes returns the total device memory the load will
-// consume on w: the row's measured base plus the slots MASS expects the
-// pool to hold.
+// consume on w: the measured base (which already covers the first slot)
+// plus every additional slot the planned pool holds.
 //
-//	pool       = floor((free - base) x headroom / 100 / per_slot)
-//	load_bytes = base + pool x per_slot
-//
-// Edge cases:
-//   - base == 0     -> 0 (nothing measured; latency math falls back to
-//     file bytes).
-//   - per_slot <= 0 -> base (no concurrency dimension).
-//   - free <= base  -> base (worker can't grow; the per-slot term would
-//     be negative).
+// Returns 0 when the row records no memory dimension — the caller then
+// falls back to the artifacts' byte count for load-latency math.
 func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) int64 {
 	if row.BaseBytes <= 0 {
 		return 0
@@ -3242,11 +3297,7 @@ func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelop
 	if row.PerSlotBytes <= 0 {
 		return row.BaseBytes
 	}
-	available := (s.freeMemoryBytes(w) - row.BaseBytes) * int64(effectiveHeadroomPct(w, env)) / 100
-	if available <= 0 {
-		return row.BaseBytes
-	}
-	return row.BaseBytes + (available/row.PerSlotBytes)*row.PerSlotBytes
+	return row.BaseBytes + int64(s.plannedPoolSize(w, env, row)-1)*row.PerSlotBytes
 }
 
 // freeMemoryBytes returns the worker's free memory (in bytes) across

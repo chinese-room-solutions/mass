@@ -44,6 +44,18 @@ const DefaultIdleEvictionTTL = 30 * time.Second
 // release memory quickly; long enough to absorb a gateway restart cycle.
 const DefaultStreamReplayTTL = 30 * time.Second
 
+// DefaultBenchBudgetSeconds is how much wall-clock a model's context
+// pool is allowed to spend working through one full round of its slots.
+// MASS divides it by the model's measured single-decode time to size the
+// pool: a fast model gets many slots, a slow one gets few, and either
+// way a request queued behind a full pool waits about this long.
+const DefaultBenchBudgetSeconds = 2.5
+
+// DefaultBenchSlotsCap is the hard ceiling on that pool size. Past a
+// couple of dozen slots the per-slot memory cost dominates any latency
+// win, so the budget rule is capped rather than trusted unbounded.
+const DefaultBenchSlotsCap = 16
+
 // DefaultRegistryURL is the raw index.yml of the public mass-registry, fetched
 // off its default branch when RegistryURL is unset.
 const DefaultRegistryURL = "https://raw.githubusercontent.com/chinese-room-solutions/mass-registry/main/index.yml"
@@ -118,6 +130,13 @@ type Config struct {
 	IdleEvictionTTL string `yaml:"idle_eviction_ttl,omitempty" json:"idle_eviction_ttl,omitempty"` // How long a loaded model can sit idle before eviction (e.g. "10s")
 	StreamReplayTTL string `yaml:"stream_replay_ttl,omitempty" json:"stream_replay_ttl,omitempty"` // How long per-job chunk buffers survive after terminal frame (e.g. "30s")
 	LoadAttempts    int    `yaml:"load_attempts,omitempty" json:"load_attempts,omitempty"`         // Total times to try placing a job before failing (1 = no retry)
+
+	// BenchBudgetSeconds and BenchSlotsCap size the per-model context
+	// pool MASS asks a worker for: slots = clamp(floor(budget /
+	// measured_decode_seconds), 1, cap), further bounded by the measured
+	// memory figures and the worker's free device memory.
+	BenchBudgetSeconds float64 `yaml:"bench_budget_seconds,omitempty" json:"bench_budget_seconds,omitempty"`
+	BenchSlotsCap      int     `yaml:"bench_slots_cap,omitempty" json:"bench_slots_cap,omitempty"`
 
 	// Database backend. Default = SQLite at "{dataDir}/mass.db".
 	// To use Postgres: set DBDialect to "postgres" and DBDSN to the libpq
@@ -230,6 +249,24 @@ func (c *Config) EffectiveLoadAttempts() int {
 		return DefaultLoadAttempts
 	}
 	return c.LoadAttempts
+}
+
+// EffectiveBenchBudgetSeconds returns the configured pool-sizing budget,
+// defaulting when unset or non-positive.
+func (c *Config) EffectiveBenchBudgetSeconds() float64 {
+	if c.BenchBudgetSeconds <= 0 {
+		return DefaultBenchBudgetSeconds
+	}
+	return c.BenchBudgetSeconds
+}
+
+// EffectiveBenchSlotsCap returns the configured pool-size ceiling,
+// defaulting when unset or non-positive.
+func (c *Config) EffectiveBenchSlotsCap() int {
+	if c.BenchSlotsCap <= 0 {
+		return DefaultBenchSlotsCap
+	}
+	return c.BenchSlotsCap
 }
 
 // EffectiveRegistryURL returns the configured RegistryURL or DefaultRegistryURL.
