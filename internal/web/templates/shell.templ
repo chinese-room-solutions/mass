@@ -128,20 +128,25 @@ templ Shell(data DashboardData) {
 
 		<!-- Models tab -->
 		<div data-show="$activeTab === 'models'" class="flex-1 min-h-0">
-			<div id="models-tab" style="display:flex;justify-content:center;height:100%">
+			<!-- Two grid rows: the panels and the list body share the first,
+			     the list's button bar owns the second. That makes the row
+			     boundary the bar's divider line, so both side panels — which
+			     live in row 1 — end exactly at it and scroll their own
+			     overflow instead of growing past it. -->
+			<div id="models-tab" style="display:grid;grid-template-columns:auto minmax(0,44rem) auto;grid-template-rows:minmax(0,1fr) auto;justify-content:center;height:100%">
 				<button id="models-deselect-trigger" style="display:none" data-on:click="$selectedModelID = ''"></button>
 				<!-- MASS-owned benchmark panel, mirroring the gateway's props
 				     panel on the other side: the right one describes the file,
 				     this one says what the fleet measured. -->
 				<div
 					id="models-bench-panel"
-					style="overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0;display:flex;flex-direction:column"
-					data-attr:style="$selectedModelID !== '' ? 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0;display:flex;flex-direction:column' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0;display:flex;flex-direction:column'"
+					style="grid-area:1/1;overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;display:flex;flex-direction:column"
+					data-attr:style="$selectedModelID !== '' ? 'grid-area:1/1;overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;display:flex;flex-direction:column' : 'grid-area:1/1;overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;display:flex;flex-direction:column'"
 				>
 					<div id="models-bench-spacer" class="flex-shrink-0"></div>
 					<div id="model-bench-pane" class="px-3 pb-3 flex-1 min-h-0 flex flex-col"></div>
 				</div>
-				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem">
+				<div style="grid-area:1/2;display:flex;flex-direction:column;min-width:0;min-height:0">
 					<div style="padding:0.75rem 1.5rem 0">
 						<div class="flex items-center justify-center gap-2 text-sm font-semibold" style="color:var(--mass-text)">
 							<sl-icon name="box-seam"></sl-icon>
@@ -172,24 +177,25 @@ templ Shell(data DashboardData) {
 						     survives the SSE container resets above. -->
 						<div id="models-downloads" class="space-y-1 mt-1"></div>
 					</div>
-					<!-- Bottom bar: Install + Browse Local. -->
-					<div style="padding:0.75rem 1.5rem;border-top:1px solid var(--mass-border);flex-shrink:0;display:flex;justify-content:center;gap:0.5rem">
-						<sl-button variant="default" size="small" style="min-width:12rem"
-							onclick="window.__massOpenInstall()">
-							<sl-icon slot="prefix" name="plus-lg"></sl-icon>
-							Install Model
-						</sl-button>
-						<sl-button variant="default" size="small" style="min-width:10rem"
-							onclick="window.__massImportLocal()">
-							<sl-icon slot="prefix" name="folder2-open"></sl-icon>
-							Browse Local
-						</sl-button>
-					</div>
+				</div>
+				<!-- Bottom bar: Install + Browse Local. Its top border is "the
+				     line" the side panels stop at. -->
+				<div id="models-list-footer" style="grid-area:2/2;padding:0.75rem 1.5rem;border-top:1px solid var(--mass-border);display:flex;justify-content:center;gap:0.5rem">
+					<sl-button variant="default" size="small" style="min-width:12rem"
+						onclick="window.__massOpenInstall()">
+						<sl-icon slot="prefix" name="plus-lg"></sl-icon>
+						Install Model
+					</sl-button>
+					<sl-button variant="default" size="small" style="min-width:10rem"
+						onclick="window.__massImportLocal()">
+						<sl-icon slot="prefix" name="folder2-open"></sl-icon>
+						Browse Local
+					</sl-button>
 				</div>
 				<div
 					id="models-props-panel"
-					style="overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0"
-					data-attr:style="$selectedModelID !== '' ? 'overflow-y:auto;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0'"
+					style="grid-area:1/3;overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0"
+					data-attr:style="$selectedModelID !== '' ? 'grid-area:1/3;overflow-y:auto;overflow-x:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1' : 'grid-area:1/3;overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0'"
 				>
 					<div id="models-props-spacer"></div>
 					<div id="model-detail-pane" class="px-3 pb-3"></div>
