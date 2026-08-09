@@ -82,6 +82,33 @@ CREATE TABLE device_benchmarks (
     PRIMARY KEY (worker_id, device_id)
 );
 
+-- Measured benchmark per (worker, device set, model). device_set is the
+-- canonical sorted comma-joined device-id list one load occupies (e.g.
+-- "gpu:0") — the worker owns placement, so MASS mirrors its rule rather
+-- than choosing. error IS NULL means the measurements are usable; error
+-- set means this device set is incapable of this model and the
+-- measurements are zero. No row means the bench hasn't concluded.
+-- model_size/model_mtime are the file the row was measured against: a
+-- mismatch against the current file invalidates the row.
+CREATE TABLE model_benchmarks (
+    worker_id      TEXT NOT NULL,
+    device_set     TEXT NOT NULL,
+    model_id       TEXT NOT NULL,
+    units_per_sec  DOUBLE PRECISION NOT NULL,
+    graph_secs     DOUBLE PRECISION NOT NULL,
+    base_bytes     BIGINT NOT NULL,
+    per_slot_bytes BIGINT NOT NULL,
+    model_size     BIGINT NOT NULL,
+    model_mtime    BIGINT NOT NULL,
+    error          TEXT,
+    created_at     BIGINT NOT NULL,
+    updated_at     BIGINT NOT NULL,
+    PRIMARY KEY (worker_id, device_set, model_id)
+);
+
+CREATE INDEX model_benchmarks_model_id_idx ON model_benchmarks (model_id);
+CREATE INDEX model_benchmarks_worker_id_idx ON model_benchmarks (worker_id);
+
 -- Learned throughput-correction EWMA per (worker, axis): the scheduler's
 -- live multiplier on benched throughput plus the number of completed jobs
 -- backing it. Persisted so calibration survives gateway restarts; rows are

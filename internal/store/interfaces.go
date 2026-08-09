@@ -92,6 +92,7 @@ type WorkerStoreInterface interface {
 type StoreInterface interface {
 	SettingsStoreInterface
 	BenchmarkStoreInterface
+	ModelBenchmarkStoreInterface
 	WorkerQueueStateStoreInterface
 	ThroughputCorrectionStoreInterface
 	RuntimeStoreInterface
@@ -112,6 +113,7 @@ type StoreInterface interface {
 var (
 	_ SettingsStoreInterface             = (*Store)(nil)
 	_ BenchmarkStoreInterface            = (*Store)(nil)
+	_ ModelBenchmarkStoreInterface       = (*Store)(nil)
 	_ WorkerQueueStateStoreInterface     = (*Store)(nil)
 	_ ThroughputCorrectionStoreInterface = (*Store)(nil)
 	_ RuntimeStoreInterface              = (*Store)(nil)
