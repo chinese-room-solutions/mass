@@ -221,6 +221,44 @@ func (s *Scheduler) BenchInFlight(workerID string) string {
 	return r.current.model.Key
 }
 
+// BenchInFlightInfo is one measurement running right now: the model being
+// measured and the worker it occupies.
+type BenchInFlightInfo struct {
+	WorkerID    string
+	RuntimeName string
+	ModelKey    string
+}
+
+// BenchesInFlight reports every measurement running across the fleet,
+// sorted by worker id. Queued-but-not-started tasks are deliberately
+// left out — only work actually occupying a worker is reported, because
+// that is what the Queue tab renders.
+func (s *Scheduler) BenchesInFlight() []BenchInFlightInfo {
+	s.bench.mu.Lock()
+	runners := make([]*benchRunner, 0, len(s.bench.runners))
+	for _, r := range s.bench.runners {
+		runners = append(runners, r)
+	}
+	s.bench.mu.Unlock()
+
+	out := make([]BenchInFlightInfo, 0, len(runners))
+	for _, r := range runners {
+		r.mu.Lock()
+		cur := r.current
+		r.mu.Unlock()
+		if cur == nil {
+			continue
+		}
+		out = append(out, BenchInFlightInfo{
+			WorkerID:    r.workerID,
+			RuntimeName: cur.runtimeName,
+			ModelKey:    cur.model.Key,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].WorkerID < out[j].WorkerID })
+	return out
+}
+
 // benchStore returns the store slice the orchestrator writes through, or
 // nil before [Scheduler.InitQueue].
 func (s *Scheduler) benchStore() ModelBenchStoreInterface {
@@ -526,8 +564,13 @@ func (b *benchOrchestrator) run(ctx context.Context, r *benchRunner) {
 		task, wait, any := r.next(time.Now())
 		switch {
 		case task != nil:
+			// A bench occupies the worker exclusively, so the Queue tab
+			// renders it as a unit of running work — tell it when one
+			// starts and when it concludes.
+			b.s.broadcastQueueChange()
 			b.runOne(ctx, r, task)
 			r.finish()
+			b.s.broadcastQueueChange()
 			continue
 		case !any:
 			wait = time.Hour // nothing queued; wait for a kick

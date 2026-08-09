@@ -76,11 +76,22 @@ type QueueRow struct {
 // drain assuming sequential execution at the predicted per-task rates.
 // Operators read it as backpressure signal at the worker-card level so
 // per-row chips can stay stable per-task estimates.
+// Bench is the measurement running on the section's worker, nil when it
+// isn't benching.
 type QueueSection struct {
 	Name         string
 	WorkerID     string
 	Rows         []QueueRow
 	DepthSeconds float64
+	Bench        *RunningBench
+}
+
+// RunningBench is the model measurement occupying a worker right now. It
+// is an exclusive unit of work: the worker takes no jobs until it
+// concludes, which is why the Queue tab shows it beside the running rows.
+type RunningBench struct {
+	ModelKey    string
+	RuntimeName string
 }
 
 // QueueSnapshot returns the rows on the global queue and every active
@@ -103,6 +114,10 @@ func (s *Scheduler) QueueSnapshot(ctx context.Context) ([]QueueSection, error) {
 	s.queueMu.RUnlock()
 
 	inflight := s.inflightRequestIDs()
+	benches := make(map[string]*RunningBench)
+	for _, b := range s.BenchesInFlight() {
+		benches[b.WorkerID] = &RunningBench{ModelKey: b.ModelKey, RuntimeName: b.RuntimeName}
+	}
 
 	var sections []QueueSection
 	if globalQ != nil {
@@ -136,6 +151,18 @@ func (s *Scheduler) QueueSnapshot(ctx context.Context) ([]QueueSection, error) {
 			WorkerID:     workerID,
 			Rows:         rows,
 			DepthSeconds: sumQueuedSeconds(rows),
+			Bench:        benches[workerID],
+		})
+		delete(benches, workerID)
+	}
+	// A worker can be benching before it has a queue of its own (an
+	// unbenched worker isn't schedulable yet). Its measurement is still
+	// running work, so give it a section rather than hiding it.
+	for _, workerID := range slices.Sorted(maps.Keys(benches)) {
+		sections = append(sections, QueueSection{
+			Name:     workerQueueName(workerID),
+			WorkerID: workerID,
+			Bench:    benches[workerID],
 		})
 	}
 	return sections, nil

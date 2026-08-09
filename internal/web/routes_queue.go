@@ -133,6 +133,13 @@ func buildQueueSectionViews(sections []scheduler.QueueSection) []templates.Queue
 			RunningCount: running,
 			DepthSeconds: sec.DepthSeconds,
 		}
+		if sec.Bench != nil {
+			view.Bench = &templates.QueueBenchView{
+				ModelID:     sec.Bench.ModelKey,
+				RuntimeName: sec.Bench.RuntimeName,
+				WorkerID:    sec.WorkerID,
+			}
+		}
 		if sec.Name == "global" {
 			view.Title = "Global queue"
 		} else if sec.WorkerID != "" {

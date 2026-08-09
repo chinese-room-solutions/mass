@@ -32,6 +32,8 @@ type QueueRowView struct {
 // every row's per-task QueuedSeconds); rendered in the header so per-row
 // chips can stay stable per-task estimates while the section still
 // surfaces a backpressure signal.
+// Bench is the measurement running on this section's worker, nil when it
+// isn't benching.
 type QueueSectionView struct {
 	QueueName    string // canonical queue name passed to the cancel RPC
 	WorkerID     string // empty for global
@@ -41,16 +43,27 @@ type QueueSectionView struct {
 	RunningCount int    // leased rows (in flight)
 	DepthSeconds float64
 	Rows         []QueueRowView
+	Bench        *QueueBenchView
+}
+
+// QueueBenchView is the in-flight model benchmark on a worker, rendered
+// alongside that worker's running rows. It is exclusive work: MASS holds
+// the worker's dispatch gate for the whole measurement, so no job runs
+// beside it.
+type QueueBenchView struct {
+	ModelID     string
+	RuntimeName string
+	WorkerID    string
 }
 
 // QueueSections renders the full Queue tab body. Same outer pattern as the
 // Workers tab — collapsible cards (sl-details), one per source.
 templ QueueSections(sections []QueueSectionView) {
-	if totalRows(sections) == 0 {
+	if totalUnits(sections) == 0 {
 		<div class="flex flex-col items-center justify-center py-16 text-center">
 			<sl-icon name="list-task" style="font-size:2rem;color:var(--sl-color-neutral-500)" class="mb-3"></sl-icon>
 			<p class="text-sm" style="color:var(--mass-text-muted)">No queued jobs.</p>
-			<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Pending jobs from gateways appear here. In-flight jobs aren't shown.</p>
+			<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Queued and running work from gateways appears here.</p>
 		</div>
 	} else {
 		<div class="space-y-3">
@@ -89,16 +102,56 @@ templ queueSectionCard(sec QueueSectionView) {
 				{ queueSummary(sec) }
 			</span>
 		</div>
-		if sec.RowCount == 0 {
+		if sec.RowCount == 0 && sec.Bench == nil {
 			<p class="text-xs text-neutral-500 py-2">Queue is empty.</p>
 		} else {
 			<div class="space-y-1.5">
+				if sec.Bench != nil {
+					@queueBenchItem(*sec.Bench)
+				}
 				for _, row := range sec.Rows {
 					@queueRowItem(sec.QueueName, row)
 				}
 			</div>
 		}
 	</sl-details>
+}
+
+// queueBenchItem renders the running benchmark as its own unit of work,
+// in the same shape as a queue row so it reads as part of the section:
+// top line the model being measured, bottom line runtime / worker / the
+// exclusivity note. No cancel controls — MASS owns the measurement's
+// lifecycle, and it concludes in seconds.
+templ queueBenchItem(bench QueueBenchView) {
+	<div class="rounded px-3 py-2" style="background:color-mix(in srgb, var(--mass-accent) 8%, transparent);border:1px solid color-mix(in srgb, var(--mass-accent) 45%, transparent)">
+		<div class="flex items-center gap-2">
+			<sl-icon name="speedometer2" style="font-size:0.8rem;color:var(--mass-accent)"></sl-icon>
+			<span
+				class="text-xs font-mono truncate text-blue-400 hover:text-blue-300 cursor-pointer"
+				title={ "Open in Models tab: " + bench.ModelID }
+				data-on:click={ fmt.Sprintf("window.__massGoToModel('%s')", format.JSEscape(bench.ModelID)) }
+			>{ bench.ModelID }</span>
+			<div class="flex-1"></div>
+			<sl-tooltip content="Measuring this model's throughput on the worker">
+				<span class="text-xs rounded px-1.5 py-0.5" style="background:color-mix(in srgb, var(--mass-accent) 25%, transparent);color:var(--mass-accent)">benchmark</span>
+			</sl-tooltip>
+		</div>
+		<div class="flex items-center gap-3 mt-1 text-xs text-neutral-400">
+			if bench.RuntimeName != "" {
+				<span class={ "rounded px-1.5 py-0.5 " + runtimeNameBadge(bench.RuntimeName) }>{ bench.RuntimeName }</span>
+			}
+			if bench.WorkerID != "" {
+				<span class="font-mono" title="Worker running the benchmark">
+					<sl-icon name="pc-display" style="font-size:0.7rem;vertical-align:-1px;margin-right:2px"></sl-icon>
+					{ bench.WorkerID }
+				</span>
+			}
+			<span class="ml-auto flex items-center gap-1" title="Exclusive: this worker takes no other work until the measurement finishes">
+				<sl-icon name="lock" style="font-size:0.7rem"></sl-icon>
+				exclusive
+			</span>
+		</div>
+	</div>
 }
 
 // queueRowItem renders a single row. Compact two-line layout — top: model
@@ -205,6 +258,10 @@ func formatQueuedSeconds(sec float64) string {
 func sectionFilterText(sec QueueSectionView) string {
 	var b strings.Builder
 	b.WriteString(sec.Title)
+	if sec.Bench != nil {
+		b.WriteByte(' ')
+		b.WriteString(sec.Bench.ModelID)
+	}
 	for _, row := range sec.Rows {
 		b.WriteByte(' ')
 		b.WriteString(row.RuntimeName)
@@ -218,12 +275,16 @@ func sectionFilterText(sec QueueSectionView) string {
 	return strings.ToLower(b.String())
 }
 
-// totalRows sums RowCount across sections. Used to pick the empty-state
-// placeholder without nesting templ conditionals.
-func totalRows(sections []QueueSectionView) int {
+// totalUnits counts every unit of work on the tab — queued/running rows
+// plus running benchmarks. Used to pick the empty-state placeholder
+// without nesting templ conditionals.
+func totalUnits(sections []QueueSectionView) int {
 	total := 0
 	for _, s := range sections {
 		total += s.RowCount
+		if s.Bench != nil {
+			total++
+		}
 	}
 	return total
 }
@@ -250,6 +311,11 @@ func queueSummary(sec QueueSectionView) string {
 		counts = fmt.Sprintf("%d running", sec.RunningCount)
 	default:
 		counts = fmt.Sprintf("%d pending · %d running", sec.PendingCount, sec.RunningCount)
+	}
+	// The card is collapsed by default, so the exclusive bench has to be
+	// visible from the header too.
+	if sec.Bench != nil {
+		counts += " · benchmarking"
 	}
 	if sec.DepthSeconds > 0 {
 		return counts + " · " + formatQueuedSeconds(sec.DepthSeconds) + " deep"

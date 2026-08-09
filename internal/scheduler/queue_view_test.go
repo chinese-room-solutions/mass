@@ -69,6 +69,57 @@ func TestQueueSnapshot_ListsGlobalAndWorkerQueues(t *testing.T) {
 	require.Equal(t, "m-b", sections[2].Rows[0].ModelID)
 }
 
+// A running benchmark is exclusive work on its worker, so QueueSnapshot
+// reports it beside that worker's rows — and gives a benching worker with
+// no queue of its own a section, rather than hiding the measurement.
+func TestQueueSnapshot_ReportsRunningBenches(t *testing.T) {
+	s, st := newTestScheduler(t)
+
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "a", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
+	}))
+	w := newFakeWorker("a", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	// Idle fleet: no bench anywhere.
+	sections, err := s.QueueSnapshot(context.Background())
+	require.NoError(t, err)
+	require.Len(t, sections, 2)
+	for _, sec := range sections {
+		require.Nil(t, sec.Bench, sec.Name)
+	}
+	require.Empty(t, s.BenchesInFlight())
+
+	// One bench on the queued worker, one on a worker with no queue.
+	s.bench.mu.Lock()
+	s.bench.runners["a"] = &benchRunner{workerID: "a", current: &benchTask{
+		model: BenchModel{Key: "gguf/qwen/qwen3.gguf"}, runtimeName: "llama-cpp",
+	}}
+	s.bench.runners["fresh"] = &benchRunner{workerID: "fresh", current: &benchTask{
+		model: BenchModel{Key: "gguf/gemma/gemma.gguf"}, runtimeName: "llama-cpp",
+	}}
+	s.bench.runners["idle"] = &benchRunner{workerID: "idle"} // queued only, nothing running
+	s.bench.mu.Unlock()
+
+	require.Len(t, s.BenchesInFlight(), 2, "queued-but-not-running tasks aren't reported")
+
+	sections, err = s.QueueSnapshot(context.Background())
+	require.NoError(t, err)
+	byWorker := map[string]*RunningBench{}
+	for _, sec := range sections {
+		byWorker[sec.WorkerID] = sec.Bench
+	}
+	require.Nil(t, byWorker[""], "global queue never benches")
+	require.NotNil(t, byWorker["a"])
+	require.Equal(t, "gguf/qwen/qwen3.gguf", byWorker["a"].ModelKey)
+	require.Equal(t, "llama-cpp", byWorker["a"].RuntimeName)
+	require.NotNil(t, byWorker["fresh"], "benching worker without a queue still gets a section")
+	require.Equal(t, "gguf/gemma/gemma.gguf", byWorker["fresh"].ModelKey)
+	require.NotContains(t, byWorker, "idle")
+}
+
 // QueuedModelFiles unions the ModelFile.Filename set across the global queue
 // and every worker queue — the residency guard's view of what a QUEUED job
 // still needs on disk.
