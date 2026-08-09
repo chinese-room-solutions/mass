@@ -88,8 +88,10 @@ CREATE TABLE device_benchmarks (
 -- than choosing. error IS NULL means the measurements are usable; error
 -- set means this device set is incapable of this model and the
 -- measurements are zero. No row means the bench hasn't concluded.
--- model_size/model_mtime are the file the row was measured against: a
--- mismatch against the current file invalidates the row.
+-- model_id is the store-relative cache key of the model's primary load
+-- artifact — the same namespace as ModelFile.filename and the worker's
+-- cache_files. model_size/model_mtime are the file the row was measured
+-- against: a mismatch against the current file invalidates the row.
 CREATE TABLE model_benchmarks (
     worker_id      TEXT NOT NULL,
     device_set     TEXT NOT NULL,

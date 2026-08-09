@@ -827,7 +827,7 @@ func RenderRuntimeLogView(kind string, history []string) string {
 </div>`, esc(kind), entries)
 }
 
-// formatGFlops renders a Q4_K matvec throughput number for an operator-
+// formatGFlops renders a device's matmul throughput for an operator-
 // facing chip. Big numbers fold into terraflops (one decimal place) so
 // "1240 GF" displays as "1.2 TF"; smaller numbers stay GFLOPS-rounded.
 func formatGFlops(gf float64) string {

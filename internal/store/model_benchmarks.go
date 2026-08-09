@@ -14,6 +14,14 @@ import (
 // occupies (e.g. "gpu:0"): throughput of a split load isn't decomposable per
 // device, so the set is the measurable unit.
 //
+// ModelID is the store-relative cache key of the model's PRIMARY load
+// artifact — the identity every party already shares (the gateway stamps
+// it on each Submit and on the bench payload, the worker mirrors it as
+// its cache path, MASS holds the file at that path under its models
+// root). It is deliberately NOT the gateway's own model id, which folds
+// load-time config into a hash and would need a separate bench per
+// config of the same weights.
+//
 // Error carries the row's verdict. Empty (stored NULL) means the measurements
 // are usable and the model is schedulable on that device set. Non-empty means
 // the set is incapable of this model — the measurements are zero and the
