@@ -49,7 +49,10 @@ type DeviceInfo struct {
 	HasBenchmark   bool
 	MemoryGBs      float64
 	LoadGBs        float64
-	ComputeGFlops  float64 // device matmul throughput, display only
+	// Flops is the device's generic matmul throughput in raw FLOPS —
+	// the unit the worker reports and the store keeps. Display layers
+	// scale it themselves (the Workers tab renders GFLOPS).
+	Flops float64
 }
 
 // workerInfos assembles per-worker neutral views from the live fleet plus any
@@ -102,7 +105,7 @@ func (h *Handler) workerInfos() []WorkerInfo {
 				if row, err := h.store.GetBenchmark(wkr.ID(), dev.ID); err == nil {
 					di.MemoryGBs = row.MemoryGBs
 					di.LoadGBs = row.LoadGBs
-					di.ComputeGFlops = row.Flops
+					di.Flops = row.Flops
 					di.HasBenchmark = true
 				}
 			}

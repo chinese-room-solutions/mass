@@ -520,8 +520,11 @@ func (h *Handler) buildWorkerViews() []templates.WorkerView {
 				HasStats:       di.HasStats,
 				MemoryGBs:      di.MemoryGBs,
 				LoadGBs:        di.LoadGBs,
-				ComputeGFlops:  di.ComputeGFlops,
-				HasBenchmark:   di.HasBenchmark,
+				// Workers, the store and the Connect API all speak raw
+				// FLOPS; the Workers tab's formatters take GFLOPS. This is
+				// the one place the unit changes.
+				ComputeGFlops: di.Flops / 1e9,
+				HasBenchmark:  di.HasBenchmark,
 			})
 		}
 		views = append(views, templates.WorkerView{
