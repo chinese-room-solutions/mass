@@ -344,6 +344,11 @@ func (h *Handler) revokeWorker(workerID, actor string) error {
 	if !deleted {
 		return fmt.Errorf("%w: worker %s", ErrOpNotFound, workerID)
 	}
+	// A revoked worker is never coming back under this id, so its
+	// measurements are dead weight.
+	if h.orch != nil {
+		h.orch.OnWorkerRemoved(workerID)
+	}
 	audit.Log(h.logger, "worker.revoked", workerID, audit.OutcomeOK).
 		Str("actor", actor).Msg("")
 	return nil

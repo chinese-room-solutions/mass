@@ -96,6 +96,31 @@ type Manager struct {
 	// Subscribers + their fan-out channel; protected by subMu.
 	subMu sync.Mutex
 	subs  map[chan Event]struct{}
+
+	// onComplete fires once per file that lands successfully, so a
+	// consumer can react to a model becoming available. Guarded by
+	// subMu; nil means nobody is listening.
+	onComplete func(runtimeName, relPath string)
+}
+
+// SetOnComplete registers a callback fired after each download or local
+// import finishes successfully. Called on the transfer goroutine, so the
+// callback must not block on it. Pass nil to clear.
+func (m *Manager) SetOnComplete(fn func(runtimeName, relPath string)) {
+	m.subMu.Lock()
+	m.onComplete = fn
+	m.subMu.Unlock()
+}
+
+// notifyComplete fans the completion out to the registered callback, if
+// any, off the transfer goroutine.
+func (m *Manager) notifyComplete(runtimeName, relPath string) {
+	m.subMu.Lock()
+	fn := m.onComplete
+	m.subMu.Unlock()
+	if fn != nil {
+		go fn(runtimeName, relPath)
+	}
 }
 
 // runtimeJob holds the in-process state for one download — cancellable
@@ -477,6 +502,7 @@ func (m *Manager) run(rj *runtimeJob) {
 	}
 	m.logger.Info().Str("rel_path", relPath).Msg("download complete")
 	m.broadcast(rj.snapshotEvent("done", rj.job.Total, rj.job.Total, ""))
+	m.notifyComplete(rj.job.RuntimeName, relPath)
 }
 
 // LocalImportLabels supplies the human-readable group/file labels for
@@ -656,6 +682,7 @@ func (m *Manager) copyLocal(rj *runtimeJob, srcPath, destPath string) {
 	}
 	m.logger.Info().Str("rel_path", relPath).Msg("import complete")
 	m.broadcast(rj.snapshotEvent("done", total, total, ""))
+	m.notifyComplete(rj.job.RuntimeName, relPath)
 }
 
 // failJob is the shared error-tail for run() and copyLocal().

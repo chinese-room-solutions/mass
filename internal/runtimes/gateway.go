@@ -105,6 +105,16 @@ func (g *LoadedGateway) PlanRemoteImport(ctx context.Context, repoID, filename, 
 	return resp.GetFiles(), nil
 }
 
+// AuthorBenchPayload asks the gateway for the request MASS benchmarks id
+// with. id is the gateway's own Model.id from [LoadedGateway.ListGroups]
+// — not the opaque handle a Submit carries, which folds load config into
+// a hash. The response's files are the complete artifact set: MASS ships
+// them verbatim, because only the gateway knows which companions its
+// load_hints names.
+func (g *LoadedGateway) AuthorBenchPayload(ctx context.Context, id string) (*gatewaypb.AuthorBenchPayloadResponse, error) {
+	return g.client.gateway.AuthorBenchPayload(ctx, &gatewaypb.AuthorBenchPayloadRequest{ModelId: id})
+}
+
 // PlanDelete asks the gateway which store-relative files make up the model
 // identified by id (primary + companions). MASS removes them.
 func (g *LoadedGateway) PlanDelete(ctx context.Context, id string) ([]string, error) {

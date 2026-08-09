@@ -185,6 +185,11 @@ func (h *Handler) deleteModel(ctx context.Context, runtimeName, id, actor string
 		}
 		return nil, fmt.Errorf("removing model files: %w", err)
 	}
+	// Forget the model's measurements and tell every worker mirroring
+	// its files to drop them.
+	if h.orch != nil {
+		h.orch.OnModelRemoved(relPaths)
+	}
 	h.runtimes.FireStateChange(runtimeName)
 	audit.Log(h.logger, "model.deleted", id, audit.OutcomeOK).
 		Str("actor", actor).Str("runtime", runtimeName).Int("files", len(relPaths)).Msg("")

@@ -292,6 +292,14 @@ func main() {
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
+	// Bench orchestration: what to measure comes from each gateway's
+	// catalogue, the request to measure it with from AuthorBenchPayload.
+	// A finished download re-benches that model across the fleet so the
+	// first job for it doesn't pay for the measurement.
+	orch.SetBenchProviders(rtMgr.BenchModels(config.ModelsDir(dataDir)), rtMgr.AuthorBenchPayload())
+	dlMgr.SetOnComplete(orch.OnModelDownloaded)
+	orch.StartBenchOrchestrator(cleanupCtx)
+
 	orch.Start(cleanupCtx)
 	orch.StartResultCleanup(cleanupCtx)
 	orch.StartIdleEviction(cleanupCtx)

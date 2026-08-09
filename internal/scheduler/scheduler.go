@@ -226,6 +226,15 @@ type Scheduler struct {
 	// that decide candidacy, estimates, pool size, and the memory gate.
 	modelBench *modelBenchCache
 
+	// bench owns the per-worker benchmark queues that fill that cache.
+	bench *benchOrchestrator
+
+	// benchGateMu guards benchGated: the workers a benchmark currently
+	// owns. Dispatch skips them until the bench answers, so the
+	// measurement isn't polluted by co-located work.
+	benchGateMu sync.Mutex
+	benchGated  map[string]struct{}
+
 	// draining marks worker queues that currently have a drain goroutine
 	// running (see drainDeviceQueues). The entry's bool records whether a
 	// later pass wanted to drain the queue while it was busy — the drainer
@@ -369,7 +378,7 @@ type StateStoreInterface interface {
 // New builds a Scheduler. Call [Scheduler.InitQueue] once a database is
 // available and [Scheduler.Start] to launch the dispatcher.
 func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Scheduler {
-	return &Scheduler{
+	s := &Scheduler{
 		cfg:                  cfg,
 		logger:               logger.With().Str("component", "scheduler").Logger(),
 		workers:              workers,
@@ -383,11 +392,14 @@ func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Sche
 		reestimateLocks:      make(map[string]*sync.Mutex),
 		benchCache:           make(map[string]map[string]store.BenchmarkRow),
 		modelBench:           newModelBenchCache(),
+		benchGated:           make(map[string]struct{}),
 		draining:             make(map[string]bool),
 		orphanSince:          make(map[string]time.Time),
 		orphanGrace:          orphanQueueGrace,
 		wake:                 make(chan struct{}, 1),
 	}
+	s.bench = newBenchOrchestrator(s)
+	return s
 }
 
 // InitQueue wires the durable queue subsystem and the device-queue state
@@ -827,6 +839,9 @@ func (s *Scheduler) OnWorkerConnected(w *worker.StreamWorker) {
 			s.logger.Warn().Err(err).Str("queue", name).Msg("persisting worker queue state")
 		}
 	}
+	// A worker that just appeared owes a measurement for every model it
+	// has no row for on its current device set.
+	s.bench.sweepWorker(w)
 	s.kick()
 }
 
@@ -1064,6 +1079,10 @@ func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
 		s.broadcastQueueChange()
 		return
 	}
+	// The predicted device set moved, so the rows keyed on the old one
+	// no longer apply; measure the new set. Old rows are kept — toggling
+	// back reuses them.
+	s.bench.sweepWorker(sw)
 	s.kick()
 	s.broadcastQueueChange()
 }
@@ -1088,6 +1107,9 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	// always-safe regardless of whether the worker had a queue.
 	s.InvalidateWorkerBench(workerID)
 	s.InvalidateModelBenchmarks(workerID)
+	// A bench in flight here unblocks with ErrWorkerOffline and leaves no
+	// row, so the reconnect sweep starts it over.
+	s.bench.stopWorker(workerID)
 
 	s.removeWorkerQueue(context.Background(), workerID)
 }
@@ -2230,6 +2252,12 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	}
 	sw, ok := wIface.(*worker.StreamWorker)
 	if !ok || !sw.Status().Online {
+		return
+	}
+	if s.benchGateHeld(workerID) {
+		// A benchmark owns this worker: nothing new goes out until it
+		// answers, so the measurement sees an otherwise-idle device set.
+		// Its release kicks the dispatcher, which comes straight back.
 		return
 	}
 	// Worker-wide capacity — the worker itself decides which of its

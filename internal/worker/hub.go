@@ -277,10 +277,40 @@ func (h *Hub) Connect(ctx context.Context, stream *connect.BidiStream[workerpb.W
 				}
 			}
 			worker.DeliverBenchResult(br.JobId, results, br.Error)
+		case *workerpb.WorkerMessage_ModelBenchmark:
+			res, benchErr := modelBenchOutcomeOf(m.ModelBenchmark)
+			worker.DeliverModelBenchResult(m.ModelBenchmark.GetModelId(), res, benchErr)
 		default:
 			h.logger.Warn().Str("type", fmt.Sprintf("%T", msg.Msg)).Msg("unknown worker message type")
 		}
 	}
+}
+
+// modelBenchOutcomeOf splits a WorkerModelBenchmarkResult into the
+// measurement half and the classified-failure half. An outcome the
+// worker left unset (or a kind MASS doesn't know) is treated as
+// transient — retrying a nonsense reply is safer than recording a
+// permanent verdict from it.
+func modelBenchOutcomeOf(r *workerpb.WorkerModelBenchmarkResult) (ModelBenchmarkResult, error) {
+	if m := r.GetMeasurements(); m != nil {
+		return ModelBenchmarkResult{
+			ElapsedSecs:  m.GetElapsedSecs(),
+			GraphSecs:    m.GetGraphSecs(),
+			BaseBytes:    m.GetBaseBytes(),
+			PerSlotBytes: m.GetPerSlotBytes(),
+		}, nil
+	}
+	f := r.GetFailure()
+	kind := ErrBenchTransient
+	if f.GetKind() == workerpb.ModelBenchmarkFailureKind_MODEL_BENCHMARK_FAILURE_KIND_INCAPABLE {
+		kind = ErrBenchIncapable
+	}
+	msg := f.GetMessage()
+	if msg == "" {
+		msg = "worker reported no outcome"
+	}
+	return ModelBenchmarkResult{}, ctxerr.With(fmt.Errorf("%w: %s", kind, msg),
+		map[string]any{"model_id": r.GetModelId()})
 }
 
 // authenticate resolves the worker's identity from its stream metadata and the

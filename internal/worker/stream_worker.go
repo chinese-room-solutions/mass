@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -20,6 +21,18 @@ var _ WorkerInterface = (*StreamWorker)(nil)
 // ErrWorkerOffline is returned when a job is sent to a worker whose stream
 // has closed.
 var ErrWorkerOffline = errors.New("worker offline")
+
+// Model-benchmark verdicts. The worker classifies its own failure: an
+// allocation failure is a permanent capability answer for that device
+// set, anything else is worth retrying.
+var (
+	// ErrBenchIncapable means this device set cannot run this model —
+	// never retried automatically.
+	ErrBenchIncapable = errors.New("model benchmark: device set cannot run this model")
+	// ErrBenchTransient means the bench failed for a reason that may not
+	// recur (crash, I/O, unclassifiable).
+	ErrBenchTransient = errors.New("model benchmark: transient failure")
+)
 
 // jobSenderInterface is the interface for sending messages to the worker via
 // the bidi stream.
@@ -87,6 +100,10 @@ type StreamWorker struct {
 	loads     map[string]chan loadOutcome
 	unloads   map[string]chan error
 	benches   map[string]chan benchOutcome
+	// modelBenches is keyed by model_id, not a job id: the wire contract
+	// allows at most one model benchmark in flight per worker, so the
+	// model is enough to correlate the reply.
+	modelBenches map[string]chan modelBenchOutcome
 
 	deviceStats     []stats.DeviceStats
 	cacheFiles      []string
@@ -108,6 +125,33 @@ type benchOutcome struct {
 	err     error
 }
 
+// ModelBenchmarkRequest is one gateway-authored benchmark of a model on
+// this worker. Files travel exactly as in a load; the worker KEEPS them
+// afterwards, which is what turns a benched model into a warm load.
+type ModelBenchmarkRequest struct {
+	ModelID   string
+	Files     []*workerpb.ModelFile
+	LoadHints []byte
+	Payload   []byte
+	Cost      float64
+}
+
+// ModelBenchmarkResult is the figures from one successful benchmark.
+// ElapsedSecs times the payload alone; GraphSecs is one full-ubatch
+// decode; BaseBytes is the load at pool size 1 and PerSlotBytes the cost
+// of one additional slot.
+type ModelBenchmarkResult struct {
+	ElapsedSecs  float64
+	GraphSecs    float64
+	BaseBytes    int64
+	PerSlotBytes int64
+}
+
+type modelBenchOutcome struct {
+	res ModelBenchmarkResult
+	err error
+}
+
 // NewFakeStreamWorker constructs a StreamWorker without a bidi stream. It
 // reports devices + identity + an online status so the scheduler's read-
 // side getters (used by selection logic) work in unit tests. Calls that
@@ -117,16 +161,17 @@ func NewFakeStreamWorker(id, runtimeName string, devices []stats.Device, lastSee
 	devCopy := make([]stats.Device, len(devices))
 	copy(devCopy, devices)
 	return &StreamWorker{
-		id:          id,
-		name:        id,
-		runtimeName: runtimeName,
-		devices:     devCopy,
-		online:      true,
-		lastSeen:    lastSeen,
-		jobs:        make(map[string]chan *JobChunk),
-		loads:       make(map[string]chan loadOutcome),
-		unloads:     make(map[string]chan error),
-		benches:     make(map[string]chan benchOutcome),
+		id:           id,
+		name:         id,
+		runtimeName:  runtimeName,
+		devices:      devCopy,
+		online:       true,
+		lastSeen:     lastSeen,
+		jobs:         make(map[string]chan *JobChunk),
+		loads:        make(map[string]chan loadOutcome),
+		unloads:      make(map[string]chan error),
+		benches:      make(map[string]chan benchOutcome),
+		modelBenches: make(map[string]chan modelBenchOutcome),
 	}
 }
 
@@ -234,6 +279,7 @@ func NewStreamWorker(id string, reg *workerpb.WorkerRegister, sender jobSenderIn
 		loads:           make(map[string]chan loadOutcome),
 		unloads:         make(map[string]chan error),
 		benches:         make(map[string]chan benchOutcome),
+		modelBenches:    make(map[string]chan modelBenchOutcome),
 		logger:          logger.With().Str("worker", id).Str("runtime_name", reg.RuntimeName).Bool("loopback", loopback).Logger(),
 	}
 }
@@ -362,6 +408,11 @@ func (w *StreamWorker) SetOffline() {
 		ch <- benchOutcome{err: ErrWorkerOffline}
 		close(ch)
 		delete(w.benches, id)
+	}
+	for id, ch := range w.modelBenches {
+		ch <- modelBenchOutcome{err: ErrWorkerOffline}
+		close(ch)
+		delete(w.modelBenches, id)
 	}
 	w.pendingMu.Unlock()
 }
@@ -727,6 +778,74 @@ func (w *StreamWorker) benchSend(deviceID string) ([]bench.Result, error) {
 		return nil, ctxerr.With(fmt.Errorf("%w: bench %s", ErrWorkerOffline, deviceID), map[string]any{"worker_id": w.id})
 	}
 	return out.results, out.err
+}
+
+// BenchModel runs one gateway-authored benchmark of req.ModelID on this
+// worker and blocks until the worker answers, ctx is cancelled, or the
+// worker goes offline.
+//
+// There is deliberately no deadline of its own: the worker runs the
+// bench on its control thread and the run can include a multi-gigabyte
+// fetch, so the only bounds are the caller's context and the stream's
+// lifetime. A worker that dies mid-bench returns [ErrWorkerOffline] and
+// leaves no row, so a reconnect re-benches.
+//
+// A classified failure comes back wrapped around [ErrBenchIncapable] or
+// [ErrBenchTransient].
+func (w *StreamWorker) BenchModel(ctx context.Context, req ModelBenchmarkRequest) (ModelBenchmarkResult, error) {
+	ch := make(chan modelBenchOutcome, 1)
+
+	w.pendingMu.Lock()
+	if _, busy := w.modelBenches[req.ModelID]; busy {
+		w.pendingMu.Unlock()
+		return ModelBenchmarkResult{}, ctxerr.With(fmt.Errorf("model benchmark already in flight"), map[string]any{"worker_id": w.id, "model_id": req.ModelID})
+	}
+	w.modelBenches[req.ModelID] = ch
+	w.pendingMu.Unlock()
+
+	if err := w.send(&workerpb.HubMessage{Msg: &workerpb.HubMessage_ModelBenchmark{
+		ModelBenchmark: &workerpb.HubModelBenchmark{
+			ModelId:   req.ModelID,
+			Files:     req.Files,
+			LoadHints: req.LoadHints,
+			Payload:   req.Payload,
+			Cost:      req.Cost,
+		},
+	}}); err != nil {
+		w.pendingMu.Lock()
+		delete(w.modelBenches, req.ModelID)
+		w.pendingMu.Unlock()
+		return ModelBenchmarkResult{}, err
+	}
+
+	select {
+	case <-ctx.Done():
+		w.pendingMu.Lock()
+		delete(w.modelBenches, req.ModelID)
+		w.pendingMu.Unlock()
+		return ModelBenchmarkResult{}, ctx.Err()
+	case out, ok := <-ch:
+		if !ok {
+			return ModelBenchmarkResult{}, ctxerr.With(fmt.Errorf("%w: model benchmark %s", ErrWorkerOffline, req.ModelID), map[string]any{"worker_id": w.id, "model_id": req.ModelID})
+		}
+		return out.res, out.err
+	}
+}
+
+// DeliverModelBenchResult routes a model-benchmark reply to the waiting
+// [StreamWorker.BenchModel] caller. The device is already free when this
+// arrives — the worker unloads before it answers.
+func (w *StreamWorker) DeliverModelBenchResult(modelID string, res ModelBenchmarkResult, err error) {
+	w.pendingMu.Lock()
+	ch, ok := w.modelBenches[modelID]
+	delete(w.modelBenches, modelID)
+	w.pendingMu.Unlock()
+	if !ok {
+		w.logger.Warn().Str("model_id", modelID).Msg("received model benchmark result for unknown model")
+		return
+	}
+	ch <- modelBenchOutcome{res: res, err: err}
+	close(ch)
 }
 
 // DeliverBenchResult routes a benchmark result to the waiting Bench caller.
