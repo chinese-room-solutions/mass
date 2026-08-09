@@ -51,6 +51,10 @@ type HandlerOptions struct {
 	ConfigDir string
 	LogsDir   string
 	DataDir   string
+	// OnDemand marks a daemon running with an idle timeout. The ping endpoint
+	// reports it so a launcher knows this instance may be replaced on version
+	// skew (an operator-managed one may not).
+	OnDemand bool
 }
 
 // Handler implements http.Handler for the MASS web UI and management API.
@@ -75,8 +79,11 @@ type Handler struct {
 	authHashMu sync.RWMutex
 	authHash   []byte
 
-	themeMu       sync.RWMutex
-	onThemeChange func(dark bool)
+	// Daemon control surface (see daemonctl.go).
+	onDemand   bool
+	gui        *guiChannel
+	shutdownMu sync.Mutex
+	shutdownFn func()
 
 	workersBroker   *Broker[WorkersEvent]
 	schedulerBroker *Broker[changeEvent]
@@ -107,6 +114,8 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 		logsDir:         opts.LogsDir,
 		dataDir:         opts.DataDir,
 		authHash:        opts.AuthHash,
+		onDemand:        opts.OnDemand,
+		gui:             newGUIChannel(),
 		workersBroker:   NewBroker[WorkersEvent](opts.Logger, "workers-broker"),
 		schedulerBroker: NewBroker[changeEvent](opts.Logger, "scheduler-broker"),
 		queueBroker:     NewBroker[changeEvent](opts.Logger, "queue-broker"),
@@ -144,14 +153,6 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 	}
 	h.mux = h.buildRoutes()
 	return h, nil
-}
-
-// SetOnThemeChange registers a callback fired whenever the theme changes
-// (used by the GUI to update the native window).
-func (h *Handler) SetOnThemeChange(fn func(dark bool)) {
-	h.themeMu.Lock()
-	h.onThemeChange = fn
-	h.themeMu.Unlock()
 }
 
 // SetAuthHash atomically swaps the active auth-token hash. Empty disables auth.
@@ -206,6 +207,13 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	// Internal browser-only HTML/SSE — not part of the public mass.v1 contract.
 	mux.HandleFunc("POST /internal/settings/theme", h.handleSetTheme)
 
+	// Daemon control surface for the local launcher (GUI thin client, CLI):
+	// loopback-only; ping and the GUI channel skip operator auth (see
+	// AuthMiddleware), shutdown does not.
+	mux.HandleFunc("GET /internal/daemon/ping", h.handleDaemonPing)
+	mux.HandleFunc("POST /internal/daemon/shutdown", h.handleDaemonShutdown)
+	mux.HandleFunc("GET /internal/gui/channel", h.handleGUIChannel)
+
 	// Runtime gateway management.
 	// Themes: browse/manage dialog (installed list is local, available list
 	// comes from the package registry).
@@ -235,6 +243,11 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	// MassScheduler.DownloadFiles RPC for the actual fetch. Browse
 	// Local stays MASS-side because filesystem access lives on the
 	// MASS host.
+	// Per-model benchmark card under the selected model's detail panel,
+	// plus the manual re-bench that clears the fleet's verdicts.
+	mux.HandleFunc("GET /api/models/benchmarks", h.handleModelBenchStatus)
+	mux.HandleFunc("POST /api/models/rebench", h.handleModelRebench)
+
 	mux.HandleFunc("POST /api/models/import", h.handleImportLocalModel)
 	mux.HandleFunc("POST /api/models/delete", h.handleDeleteModel)
 	mux.HandleFunc("GET /api/groups/names", h.handleListGroupNames)
@@ -467,10 +480,10 @@ func (h *Handler) handleSetTheme(w http.ResponseWriter, r *http.Request) {
 	h.applyTheme(datastar.NewSSE(w, r), info)
 }
 
-// applyTheme makes info the active theme: persists it, notifies the native
-// chrome callback, and patches $theme (name) + $themeBase so every
+// applyTheme makes info the active theme: persists it, notifies the GUI
+// control channel, and patches $theme (name) + $themeBase so every
 // data-attr-bound element (page background, logo image, dialog tints) flips
-// alongside the OS window. The native callback only affects host chrome — the
+// alongside the OS window. The channel event only affects host chrome — the
 // page itself listens for these signals. Shared by the theme picker and the
 // fallback taken when the active theme is uninstalled.
 func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.ThemeInfo) {
@@ -478,14 +491,10 @@ func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.
 	if h.saveFn != nil {
 		h.saveFn()
 	}
-	h.themeMu.RLock()
-	cb := h.onThemeChange
-	h.themeMu.RUnlock()
-	if cb != nil {
-		// Native chrome tracks the theme's base, so any pluggable theme maps
-		// its window frame onto dark/light correctly.
-		cb(info.Base == uikit.ThemeDark)
-	}
+	// The GUI window is a separate process; its native chrome learns the base
+	// (dark/light) over the control channel, so any pluggable theme maps its
+	// window frame correctly.
+	h.gui.broadcast(string(info.Base))
 	if b, err := json.Marshal(map[string]any{"theme": string(info.Name), "themeBase": string(info.Base)}); err == nil {
 		if err := sse.PatchSignals(b); err != nil {
 			h.logger.Debug().Err(err).Msg("patching theme signals")
@@ -515,37 +524,26 @@ func (h *Handler) buildWorkerViews() []templates.WorkerView {
 				HasStats:       di.HasStats,
 				MemoryGBs:      di.MemoryGBs,
 				LoadGBs:        di.LoadGBs,
-				ComputeGFlops:  di.ComputeGFlops,
-				HasBenchmark:   di.HasBenchmark,
+				// Workers, the store and the Connect API all speak raw
+				// FLOPS; the Workers tab's formatters take GFLOPS. This is
+				// the one place the unit changes.
+				ComputeGFlops: di.Flops / 1e9,
+				HasBenchmark:  di.HasBenchmark,
 			})
 		}
 		views = append(views, templates.WorkerView{
-			ID:          wi.ID,
-			Name:        wi.Name,
-			RuntimeName: wi.RuntimeName,
-			Version:     wi.Version,
-			Online:      wi.Online,
-			Enabled:     wi.Enabled,
-			Devices:     devices,
-			ActiveJobs:  wi.ActiveJobs,
+			ID:            wi.ID,
+			Name:          wi.Name,
+			RuntimeName:   wi.RuntimeName,
+			Version:       wi.Version,
+			Online:        wi.Online,
+			Enabled:       wi.Enabled,
+			Devices:       devices,
+			ActiveJobs:    wi.ActiveJobs,
+			BenchingModel: wi.BenchingModel,
 		})
 	}
 	return views
-}
-
-// primaryThroughput returns one representative throughput number from a
-// device's runtime-private axis map for the Workers tab card. Today the
-// UI shows one "Compute" line per device; we pick the highest value so a
-// worker that advertises multiple axes still shows its strongest number.
-// Returns 0 when the map is empty.
-func primaryThroughput(axes map[string]float64) float64 {
-	var best float64
-	for _, v := range axes {
-		if v > best {
-			best = v
-		}
-	}
-	return best
 }
 
 // safeDevices calls Devices() with panic recovery — a misbehaving worker

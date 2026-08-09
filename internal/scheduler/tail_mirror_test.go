@@ -21,7 +21,7 @@ func connectBenchedWorker(t *testing.T, s *Scheduler, st *store.Store, workerID 
 	t.Helper()
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: workerID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker(workerID, gpu1())
 	require.NoError(t, s.workers.Register(w))

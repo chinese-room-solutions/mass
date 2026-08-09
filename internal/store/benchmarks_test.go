@@ -17,7 +17,7 @@ func TestBenchmarks(t *testing.T) {
 		DeviceName: "12-core x86_64/linux",
 		MemoryGBs:  25.5,
 		LoadGBs:    8.4,
-		Throughput: map[string]float64{"q4k_matvec": 42.3},
+		Flops:      42.3,
 		BenchedAt:  now,
 	}
 
@@ -52,7 +52,7 @@ func TestBenchmarks(t *testing.T) {
 				require.Equal(t, row.DeviceName, got.DeviceName)
 				require.InDelta(t, row.MemoryGBs, got.MemoryGBs, 0.01)
 				require.InDelta(t, row.LoadGBs, got.LoadGBs, 0.01)
-				require.InDelta(t, row.Throughput["q4k_matvec"], got.Throughput["q4k_matvec"], 0.01)
+				require.InDelta(t, row.Flops, got.Flops, 0.01)
 			},
 		},
 		{
@@ -63,14 +63,14 @@ func TestBenchmarks(t *testing.T) {
 				updated := row
 				updated.MemoryGBs = 30.0
 				updated.LoadGBs = 10.0
-				updated.Throughput = map[string]float64{"q4k_matvec": 50.0}
+				updated.Flops = 50.0
 				require.NoError(t, s.SaveBenchmark(updated))
 
 				got, err := s.GetBenchmark("local", "cpu:0")
 				require.NoError(t, err)
 				require.InDelta(t, 30.0, got.MemoryGBs, 0.01)
 				require.InDelta(t, 10.0, got.LoadGBs, 0.01)
-				require.InDelta(t, 50.0, got.Throughput["q4k_matvec"], 0.01)
+				require.InDelta(t, 50.0, got.Flops, 0.01)
 			},
 		},
 		{
@@ -93,7 +93,7 @@ func TestBenchmarks(t *testing.T) {
 					DeviceID:   "cpu:0",
 					DeviceName: "8-core arm64/linux",
 					MemoryGBs:  15.0,
-					Throughput: map[string]float64{"q4k_matvec": 20.0},
+					Flops:      20.0,
 					BenchedAt:  now,
 				}
 				require.NoError(t, s.SaveBenchmark(remoteRow))
@@ -117,7 +117,7 @@ func TestBenchmarks(t *testing.T) {
 					DeviceID:   "gpu:0",
 					DeviceName: "NVIDIA RTX 4090",
 					MemoryGBs:  1008.0,
-					Throughput: map[string]float64{"q4k_matvec": 330.0},
+					Flops:      330.0,
 					BenchedAt:  now,
 				}
 				require.NoError(t, s.SaveBenchmark(row2))

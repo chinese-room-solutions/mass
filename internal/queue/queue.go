@@ -191,13 +191,12 @@ func (q *Queue) Name() string { return q.name }
 //
 //	[1B priority][1B retries]
 //	[8B cost float64][8B queued_seconds float64]
-//	[8B base_load_bytes int64][8B per_slot_bytes int64][4B headroom_pct int32]
+//	[4B headroom_pct int32]
 //	[1B runtime_name_len][runtime_name]
 //	[1B model_id_len][model_id]
 //	[1B source_len][source]
 //	[1B reqid_len][reqid]
 //	[1B gmid_len][gmid]
-//	[1B cost_axis_len][cost_axis]
 //	[4B load_artifacts_len][load_artifacts]
 //	[payload]
 //
@@ -212,11 +211,12 @@ type Envelope struct {
 	// load failure triggers a release-back-to-global retry. Compared
 	// against Config.LoadAttempts to cap retries.
 	Attempts uint8
-	// Cost is the gateway's prediction of how expensive this job is on
-	// the runtime's reference workload, in runtime-private cost units.
-	// Divided by the chosen worker's throughput on CostAxis to score
-	// candidates and produce QueuedSeconds. Units are runtime-private;
-	// MASS does not interpret.
+	// Cost is how expensive this job is in the MODEL'S OWN units, as
+	// the gateway prices it. Divided by the model's measured
+	// units_per_sec on the chosen worker (the model_benchmarks row) to
+	// score candidates and produce QueuedSeconds. Units are
+	// runtime-private; MASS does not interpret them, it only requires
+	// that submit costs and the bench cost share one unit.
 	Cost float64
 	// QueuedSeconds is the expected wall-clock cost this envelope adds to
 	// the worker queue it landed on, in seconds. Computed at enqueue from
@@ -225,33 +225,14 @@ type Envelope struct {
 	// the queue's tail_seconds sum on dispatch pop, so the running tail
 	// stays consistent with what's still ahead in real time.
 	QueuedSeconds float64
-	// CostAxis names the throughput dimension Cost divides by. Worker
-	// must advertise this axis, or the runtime's default-axis is used
-	// as fallback at scoring time. Runtime-private vocabulary; MASS does
-	// not interpret the string.
-	CostAxis    string
-	RuntimeName string                // routes to workers of this kind (e.g. "llama-cpp")
-	ModelID     string                // gateway-defined opaque ID; affinity key (which workers have it loaded)
-	Source      string                // who submitted: "direct", "gateway:<runtime_name>", etc.
-	RequestID   string                // original request ID for result tracking across queue hops
-	GlobalMsgID string                // original global queue message ID for durability tracking
-	Files       []*workerpb.ModelFile // load artifacts (passed to worker if model not resident)
-	LoadHints   []byte                // gateway-defined; forwarded as HubLoadModel.load_hints
-	Payload     []byte                // gateway-defined opaque job bytes (sent to worker as HubAssignJob.payload)
-	// BaseLoadBytes is the gateway's prediction of the fixed device
-	// memory cost the load pays regardless of concurrency — weights +
-	// activation scratch. MASS uses it both at Submit time (reject
-	// when no fleet member's total memory could host it) and at
-	// dispatch (skip workers whose free memory wouldn't fit even one
-	// slot). 0 = unknown — predicates pass through.
-	BaseLoadBytes int64
-	// PerSlotBytes is the gateway's prediction of the incremental
-	// cost per additional concurrent slot (KV at the configured ctx
-	// for llama-cpp; per-stream state for TTS; etc.). MASS combines
-	// it with the chosen worker's free memory and HeadroomPct to
-	// project the post-grow pool size for load wall-clock. 0 = no
-	// concurrency dimension (projection collapses to pool=1).
-	PerSlotBytes int64
+	RuntimeName   string                // routes to workers of this kind (e.g. "llama-cpp")
+	ModelID       string                // gateway-defined opaque ID; affinity key (which workers have it loaded)
+	Source        string                // who submitted: "direct", "gateway:<runtime_name>", etc.
+	RequestID     string                // original request ID for result tracking across queue hops
+	GlobalMsgID   string                // original global queue message ID for durability tracking
+	Files         []*workerpb.ModelFile // load artifacts (passed to worker if model not resident)
+	LoadHints     []byte                // gateway-defined; forwarded as HubLoadModel.load_hints
+	Payload       []byte                // gateway-defined opaque job bytes (sent to worker as HubAssignJob.payload)
 	// HeadroomPct is the device-memory watermark (1-100) the worker
 	// will respect when growing the pool. 0 = unknown; MASS falls
 	// back to a runtime-agnostic constant.
@@ -259,9 +240,9 @@ type Envelope struct {
 }
 
 // envelopeHeaderBytes is the fixed-size prefix in the wire format:
-// priority + retries + cost + queued_seconds + base_load_bytes +
-// per_slot_bytes + headroom_pct. Variable-length fields follow.
-const envelopeHeaderBytes = 1 + 1 + 8 + 8 + 8 + 8 + 4
+// priority + retries + cost + queued_seconds + headroom_pct.
+// Variable-length fields follow.
+const envelopeHeaderBytes = 1 + 1 + 8 + 8 + 4
 
 // Marshal serializes the envelope to bytes. Panics when an identity field
 // exceeds the wire format's 1-byte length prefix — gateway-supplied fields
@@ -275,17 +256,14 @@ func (e Envelope) Marshal() []byte {
 	src := fit255("source", e.Source)
 	rid := fit255("request_id", e.RequestID)
 	gmid := fit255("global_msg_id", e.GlobalMsgID)
-	axis := fit255("cost_axis", e.CostAxis)
 	loadBlob := marshalLoadArtifacts(e.Files, e.LoadHints)
 
-	buf := make([]byte, envelopeHeaderBytes+6+len(rk)+len(mid)+len(src)+len(rid)+len(gmid)+len(axis)+4+len(loadBlob)+len(e.Payload))
+	buf := make([]byte, envelopeHeaderBytes+5+len(rk)+len(mid)+len(src)+len(rid)+len(gmid)+4+len(loadBlob)+len(e.Payload))
 	buf[0] = byte(e.Priority)
 	buf[1] = e.Attempts
 	binary.LittleEndian.PutUint64(buf[2:10], math.Float64bits(e.Cost))
 	binary.LittleEndian.PutUint64(buf[10:18], math.Float64bits(e.QueuedSeconds))
-	binary.LittleEndian.PutUint64(buf[18:26], uint64(e.BaseLoadBytes))
-	binary.LittleEndian.PutUint64(buf[26:34], uint64(e.PerSlotBytes))
-	binary.LittleEndian.PutUint32(buf[34:38], uint32(e.HeadroomPct))
+	binary.LittleEndian.PutUint32(buf[18:22], uint32(e.HeadroomPct))
 	off := envelopeHeaderBytes
 
 	off = writeLenPrefixed(buf, off, rk)
@@ -293,7 +271,6 @@ func (e Envelope) Marshal() []byte {
 	off = writeLenPrefixed(buf, off, src)
 	off = writeLenPrefixed(buf, off, rid)
 	off = writeLenPrefixed(buf, off, gmid)
-	off = writeLenPrefixed(buf, off, axis)
 	off = writeLenPrefixedU32(buf, off, loadBlob)
 	copy(buf[off:], e.Payload)
 	return buf
@@ -309,9 +286,7 @@ func UnmarshalEnvelope(data []byte) (Envelope, error) {
 		Attempts:      data[1],
 		Cost:          math.Float64frombits(binary.LittleEndian.Uint64(data[2:10])),
 		QueuedSeconds: math.Float64frombits(binary.LittleEndian.Uint64(data[10:18])),
-		BaseLoadBytes: int64(binary.LittleEndian.Uint64(data[18:26])),
-		PerSlotBytes:  int64(binary.LittleEndian.Uint64(data[26:34])),
-		HeadroomPct:   int32(binary.LittleEndian.Uint32(data[34:38])),
+		HeadroomPct:   int32(binary.LittleEndian.Uint32(data[18:22])),
 	}
 	off := envelopeHeaderBytes
 
@@ -329,9 +304,6 @@ func UnmarshalEnvelope(data []byte) (Envelope, error) {
 		return Envelope{}, err
 	}
 	if env.GlobalMsgID, off, err = readLenPrefixed(data, off, "global_msg_id"); err != nil {
-		return Envelope{}, err
-	}
-	if env.CostAxis, off, err = readLenPrefixed(data, off, "cost_axis"); err != nil {
 		return Envelope{}, err
 	}
 	var loadBlob []byte

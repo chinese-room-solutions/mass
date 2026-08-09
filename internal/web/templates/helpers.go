@@ -827,7 +827,7 @@ func RenderRuntimeLogView(kind string, history []string) string {
 </div>`, esc(kind), entries)
 }
 
-// formatGFlops renders a Q4_K matvec throughput number for an operator-
+// formatGFlops renders a device's matmul throughput for an operator-
 // facing chip. Big numbers fold into terraflops (one decimal place) so
 // "1240 GF" displays as "1.2 TF"; smaller numbers stay GFLOPS-rounded.
 func formatGFlops(gf float64) string {
@@ -898,6 +898,9 @@ type WorkerView struct {
 	Enabled     bool // operator toggle: any device on this worker enabled
 	Devices     []ComputeView
 	ActiveJobs  int
+	// BenchingModel is the store key of the model being measured on this
+	// worker right now, "" when it isn't benching.
+	BenchingModel string
 }
 
 // ComputeView is a per-device row inside a worker card.
@@ -951,6 +954,14 @@ func RenderWorkersList(workers []WorkerView) string {
 		fmt.Fprintf(&b, `<sl-badge variant="primary" pill style="font-size:0.65rem">%s</sl-badge>`, html.EscapeString(w.RuntimeName))
 		if w.Version != "" {
 			fmt.Fprintf(&b, `<span class="text-xs" style="color:var(--mass-text-faint)">v%s</span>`, html.EscapeString(w.Version))
+		}
+		// A worker measuring a model takes no jobs until it finishes. This
+		// is a presence marker only — the Queue tab renders the measurement
+		// as an exclusive unit of running work and is SSE-live, while this
+		// list is re-fetched on tab entry, so the icon may lag by one fetch.
+		if w.BenchingModel != "" {
+			fmt.Fprintf(&b, `<sl-tooltip content="Benchmarking %s"><sl-icon name="speedometer2" style="font-size:0.85rem;color:var(--mass-accent)"></sl-icon></sl-tooltip>`,
+				html.EscapeString(w.BenchingModel))
 		}
 		// Aggregate GFLOPS for the operator-visible "what does this worker
 		// bring" summary. GPU devices sum (tensor split runs them as one

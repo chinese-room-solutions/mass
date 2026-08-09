@@ -2,15 +2,13 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 )
 
-// BenchmarkRow represents a stored device benchmark result. Throughput
-// is a runtime-private map from axis name to realised throughput on
-// that axis (e.g. {"q4k_matvec": 154.0}); the scheduler looks up values
-// by axis name at scoring time. MASS does not interpret axis names.
+// BenchmarkRow represents a stored device benchmark result. Flops is
+// the device's generic matmul throughput, kept for operator-facing
+// display only — job estimates come from model_benchmarks.
 //
 // MemoryGBs is in-device memory bandwidth (STREAM-style) — kept for
 // operator-facing display. LoadGBs is the host→device upload rate the
@@ -21,31 +19,27 @@ type BenchmarkRow struct {
 	DeviceName string
 	MemoryGBs  float64
 	LoadGBs    float64
-	Throughput map[string]float64
+	Flops      float64
 	BenchedAt  time.Time
 }
 
 // SaveBenchmark upserts a benchmark result for the given worker/device pair.
 func (s *Store) SaveBenchmark(row BenchmarkRow) error {
-	axesJSON, err := marshalThroughputAxes(row.Throughput)
-	if err != nil {
-		return fmt.Errorf("encoding throughput axes for %s/%s: %w", row.WorkerID, row.DeviceID, err)
-	}
-	_, err = s.db.Exec(s.rebind(`
-		INSERT INTO device_benchmarks (worker_id, device_id, device_name, memory_gbs, load_gbs, throughput_axes, benched_at)
+	_, err := s.db.Exec(s.rebind(`
+		INSERT INTO device_benchmarks (worker_id, device_id, device_name, memory_gbs, load_gbs, flops, benched_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(worker_id, device_id) DO UPDATE SET
-			device_name     = excluded.device_name,
-			memory_gbs      = excluded.memory_gbs,
-			load_gbs        = excluded.load_gbs,
-			throughput_axes = excluded.throughput_axes,
-			benched_at      = excluded.benched_at`),
+			device_name = excluded.device_name,
+			memory_gbs  = excluded.memory_gbs,
+			load_gbs    = excluded.load_gbs,
+			flops       = excluded.flops,
+			benched_at  = excluded.benched_at`),
 		row.WorkerID,
 		row.DeviceID,
 		row.DeviceName,
 		row.MemoryGBs,
 		row.LoadGBs,
-		axesJSON,
+		row.Flops,
 		row.BenchedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -58,17 +52,12 @@ func (s *Store) SaveBenchmark(row BenchmarkRow) error {
 func (s *Store) GetBenchmark(workerID, deviceID string) (BenchmarkRow, error) {
 	var row BenchmarkRow
 	var ts string
-	var axesJSON string
 	err := s.db.QueryRow(s.rebind(`
-		SELECT worker_id, device_id, device_name, memory_gbs, load_gbs, throughput_axes, benched_at
+		SELECT worker_id, device_id, device_name, memory_gbs, load_gbs, flops, benched_at
 		FROM device_benchmarks WHERE worker_id = ? AND device_id = ?`), workerID, deviceID).
-		Scan(&row.WorkerID, &row.DeviceID, &row.DeviceName, &row.MemoryGBs, &row.LoadGBs, &axesJSON, &ts)
+		Scan(&row.WorkerID, &row.DeviceID, &row.DeviceName, &row.MemoryGBs, &row.LoadGBs, &row.Flops, &ts)
 	if err != nil {
 		return BenchmarkRow{}, err
-	}
-	row.Throughput, err = unmarshalThroughputAxes(axesJSON)
-	if err != nil {
-		return BenchmarkRow{}, fmt.Errorf("decoding throughput axes for %s/%s: %w", workerID, deviceID, err)
 	}
 	row.BenchedAt, err = parseStamp(ts)
 	if err != nil {
@@ -80,7 +69,7 @@ func (s *Store) GetBenchmark(workerID, deviceID string) (BenchmarkRow, error) {
 // ListBenchmarks returns all stored benchmark results.
 func (s *Store) ListBenchmarks() ([]BenchmarkRow, error) {
 	rows, err := s.db.Query(`
-		SELECT worker_id, device_id, device_name, memory_gbs, load_gbs, throughput_axes, benched_at
+		SELECT worker_id, device_id, device_name, memory_gbs, load_gbs, flops, benched_at
 		FROM device_benchmarks ORDER BY worker_id, device_id`)
 	if err != nil {
 		return nil, fmt.Errorf("listing benchmarks: %w", err)
@@ -95,13 +84,8 @@ func (s *Store) ListBenchmarks() ([]BenchmarkRow, error) {
 	for rows.Next() {
 		var r BenchmarkRow
 		var ts string
-		var axesJSON string
-		if err := rows.Scan(&r.WorkerID, &r.DeviceID, &r.DeviceName, &r.MemoryGBs, &r.LoadGBs, &axesJSON, &ts); err != nil {
+		if err := rows.Scan(&r.WorkerID, &r.DeviceID, &r.DeviceName, &r.MemoryGBs, &r.LoadGBs, &r.Flops, &ts); err != nil {
 			return nil, fmt.Errorf("scanning benchmark row: %w", err)
-		}
-		r.Throughput, err = unmarshalThroughputAxes(axesJSON)
-		if err != nil {
-			return nil, fmt.Errorf("decoding throughput axes for %s/%s: %w", r.WorkerID, r.DeviceID, err)
 		}
 		r.BenchedAt, err = parseStamp(ts)
 		if err != nil {
@@ -129,28 +113,6 @@ func (s *Store) HasBenchmark(workerID, deviceID string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
-}
-
-func marshalThroughputAxes(m map[string]float64) (string, error) {
-	if len(m) == 0 {
-		return "{}", nil
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
-}
-
-func unmarshalThroughputAxes(s string) (map[string]float64, error) {
-	if s == "" || s == "{}" {
-		return map[string]float64{}, nil
-	}
-	m := map[string]float64{}
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		return nil, err
-	}
-	return m, nil
 }
 
 // Compile-time check that sql.ErrNoRows is importable (used by callers).

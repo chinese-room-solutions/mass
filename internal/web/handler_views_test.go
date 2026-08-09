@@ -70,7 +70,7 @@ func TestBuildWorkerViews_RendersDevicesAndBench(t *testing.T) {
 		DeviceName: "NVIDIA RTX 4090",
 		MemoryGBs:  900.0,
 		LoadGBs:    50.0,
-		Throughput: map[string]float64{"q4k_matvec": 1234.5},
+		Flops:      1234.5,
 		BenchedAt:  time.Unix(1_700_000_000, 0),
 	}))
 
@@ -92,6 +92,45 @@ func TestBuildWorkerViews_RendersDevicesAndBench(t *testing.T) {
 	}
 	require.True(t, byID["gpu:0"], "gpu:0 has a bench row")
 	require.False(t, byID["gpu:1"], "gpu:1 has none")
+}
+
+// Workers report FLOPS raw and the store keeps them raw; only the Workers
+// tab's formatters take GFLOPS. A local Iris Xe measures 54103867016.48
+// FLOPS — it must read as 54.1 GFLOPS, not 54103867.0 TFLOPS.
+func TestWorkerFlopsRawInStoreGFlopsInUI(t *testing.T) {
+	const rawFlops = 54103867016.48
+
+	h := newTestHandler(t)
+	seedStreamWorker(t, h, "iris-host", "iris-host",
+		[]*workerpb.WorkerDevice{gpuDevice("gpu:0", "Intel Iris Xe", 8192)}, nil)
+	require.NoError(t, h.store.SaveBenchmark(store.BenchmarkRow{
+		WorkerID:   "iris-host",
+		DeviceID:   "gpu:0",
+		DeviceName: "Intel Iris Xe",
+		MemoryGBs:  40.0,
+		LoadGBs:    12.0,
+		Flops:      rawFlops,
+		BenchedAt:  time.Unix(1_700_000_000, 0),
+	}))
+
+	// Transport-neutral view (and through it the Connect API) stays raw.
+	infos := h.workerInfos()
+	require.Len(t, infos, 1)
+	require.InDelta(t, rawFlops, infos[0].Devices[0].Flops, 0.01)
+
+	// The template view is scaled once, at the mapping boundary.
+	views := h.buildWorkerViews()
+	require.Len(t, views, 1)
+	require.InDelta(t, rawFlops/1e9, views[0].Devices[0].ComputeGFlops, 0.001)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/workers/list", nil)
+	w := httptest.NewRecorder()
+	h.handleWorkersList(w, r)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	require.Contains(t, body, "54.1 GFLOPS", "device block")
+	require.Contains(t, body, "GPU 54 GF", "summary chip")
+	require.NotContains(t, body, "TFLOPS")
 }
 
 func TestBuildWorkerViews_DisabledDeviceFlipsEnabled(t *testing.T) {

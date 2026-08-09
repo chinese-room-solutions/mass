@@ -6,8 +6,8 @@
 //   - One device queue per (worker, enabled-device) pair receives jobs the
 //     dispatcher has bound to a specific compute target.
 //   - A single dispatcher goroutine leases global rows: it picks a device
-//     queue (filtered by runtime_name, preferring model-loaded targets,
-//     breaking ties by available worker capacity) and atomically moves
+//     queue (filtered by runtime_name, scored by expected completion
+//     time — see [Scheduler.pickWorkerQueue]) and atomically moves
 //     each row to the chosen device queue. Device queues drain on their
 //     own per-queue goroutines — the handoff may block for minutes on a
 //     cold [worker.StreamWorker.LoadModel], and one worker's load must
@@ -24,7 +24,11 @@
 // Persistence: device queue identities are tracked in [store.WorkerQueueState]
 // so a restart can reattach to the right SQL rows. Job payloads survive
 // in goqite; on crash recovery the queue sweeper ([queue.ReapAbandoned])
-// fails any rows past their delivery budget so callers don't hang.
+// fails any rows past their delivery budget so callers don't hang. A
+// placed job keeps its global row as a durability anchor, leased for
+// [anchorLeaseDuration] — long enough to cover the whole worker-queue
+// wait, so a job queued behind its peers is never mistaken for one that
+// was never placed.
 //
 // Worker handoff is the seam: this package does not know what a llama.cpp
 // payload looks like, and the worker hub does not know what a device queue
@@ -36,6 +40,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -68,25 +73,12 @@ var ErrNoDeviceQueue = errors.New("no enabled device queue available for runtime
 // Surfaces as InvalidArgument to gateways.
 var ErrInvalidCost = errors.New("submit: cost must be > 0")
 
-// ErrInvalidCostAxis is returned by Submit when the gateway passed an
-// empty CostAxis. The axis must be non-empty so MASS can look up the
-// worker's throughput. Surfaces as InvalidArgument to gateways.
-var ErrInvalidCostAxis = errors.New("submit: cost_axis must be non-empty")
-
 // ErrFieldTooLong is returned by Submit when a gateway-supplied identity
 // field exceeds the envelope wire format's 255-byte cap. Truncating would
 // silently corrupt identity (a truncated ModelID breaks residency
 // matching and cancellation), so the submit is rejected instead.
 // Surfaces as InvalidArgument to gateways.
 var ErrFieldTooLong = errors.New("submit: field exceeds 255 bytes")
-
-// ErrNoMemoryFit is returned by Submit when no online worker has
-// enough total hardware memory across its default device set to host
-// the requested load. Distinguishes "fleet fundamentally too small"
-// from "fleet busy right now" — the former is operator-actionable
-// (add a bigger worker, shrink the model); the latter would resolve
-// by waiting. Surfaces as FailedPrecondition to gateways.
-var ErrNoMemoryFit = errors.New("submit: no worker has enough memory to host this model")
 
 // ErrWorkerReestimating is returned by toggle entry points when a
 // previous enable/disable change on the same worker is still recomputing
@@ -106,22 +98,24 @@ type WorkerEnabledFn func(workerID string) bool
 // entirely. Returns true when no callback is wired.
 type DeviceEnabledFn func(workerID, deviceID string) bool
 
-// RuntimeDefaultAxisFn returns the throughput axis a runtime's gateway
-// declared as required (via InitResponse.default_cost_axis). The
-// scheduler uses it as the fallback when an envelope's CostAxis names
-// an axis a worker hasn't benched. Returns "" when no gateway is
-// running for runtimeName — placement then disregards fallback and only
-// admits workers that bench the exact requested axis.
-type RuntimeDefaultAxisFn func(runtimeName string) string
-
-// dispatchLeaseDuration is how long a dispatcher-leased row stays invisible
-// to other consumers per extension. A dispatch routinely outlives one
-// window (a cold LoadModel takes minutes; prompt processing can gap
-// longer than this before the first chunk), so the invariant is NOT
-// "the dispatcher finishes within the window" — it's the keep-alive
-// started in dispatchEnvelope, which re-extends both queue rows every
+// dispatchLeaseDuration is how long a dispatcher-leased WORKER-queue row
+// stays invisible to other consumers per extension. A dispatch routinely
+// outlives one window (a cold LoadModel takes minutes; prompt processing
+// can gap longer than this before the first chunk), so the invariant is
+// NOT "the dispatcher finishes within the window" — it's the keep-alive
+// started in dispatchEnvelope, which re-extends the row every
 // dispatchLeaseDuration/3 until the dispatch reaches a terminal path.
 const dispatchLeaseDuration = 60 * time.Second
+
+// anchorLeaseDuration is how long the global durability anchor stays
+// hidden once its job has been placed on a worker queue. Nothing extends
+// it — the job may sit pending behind its peers for as long as that queue
+// takes to reach it, so the lease has to cover the whole wait, not one
+// dispatch window. A visible anchor is read as an unplaced job: the
+// startup reap fails it, drainGlobal re-scores it, and Depth counts it
+// twice. Bounded by [jobBufferMaxAge], which reaps any job still without
+// a terminal frame after that long anyway.
+const anchorLeaseDuration = jobBufferMaxAge
 
 // disconnectRequeueBudget caps how many times an in-flight job may be
 // re-placed after losing its worker before its result fails terminally.
@@ -132,6 +126,14 @@ const dispatchLeaseDuration = 60 * time.Second
 // with the load-failure retry counter: both count "dispatches that ended
 // badly", and a mix of the two failure modes should still converge.
 const disconnectRequeueBudget = 3
+
+// orphanQueueGrace is how long a worker queue may sit with no fleet entry
+// before the dispatcher drains it back to global. Orphans come from
+// restart recovery — worker_queue_state rows whose worker never
+// reconnected — and nothing else reaps them: drainOneWorkerQueue bails
+// when the worker is absent, and steals only source from online peers.
+// Long enough that a worker merely restarting reconnects first.
+const orphanQueueGrace = 2 * time.Minute
 
 // stealThreshold is the device-queue depth gap that triggers a steal
 // attempt. A worker with an empty queue will look at peer queues only when
@@ -171,7 +173,8 @@ type Scheduler struct {
 	workerEnabledMu sync.RWMutex
 	workerEnabled   WorkerEnabledFn
 	deviceEnabled   DeviceEnabledFn
-	runtimeAxis     RuntimeDefaultAxisFn
+	// modelsDir is MASS's models root; see [Scheduler.SetModelsDir].
+	modelsDir string
 
 	jobsMu     sync.Mutex
 	jobBuffers map[string]*jobBuffer // RequestID → in-memory replay buffer
@@ -219,19 +222,18 @@ type Scheduler struct {
 	// repeat misses stay cheap.
 	benchCache map[string]map[string]store.BenchmarkRow
 
-	// throughputCorrection holds a live EWMA multiplier on each worker's
-	// benched throughput, keyed "workerID|axis". It learns from completed
-	// jobs: ratio = predicted_seconds / actual_seconds (>1 → worker beat
-	// the bench, <1 → slower than benched). The benchmark is the prior;
-	// real jobs are the evidence. Closes the open loop between one-time
-	// benching and live reality (thermal throttle, contention, a
-	// systematically optimistic gateway Cost). The map is authoritative;
-	// each folded sample is also persisted and restored at startup (see
-	// [Scheduler.restoreCorrections]) so calibration survives restarts.
-	// Reset when the baseline the factor is relative to changes — fresh
-	// bench or device toggle (see [Scheduler.ResetCorrections]).
-	correctionMu         sync.Mutex
-	throughputCorrection map[string]correctionState
+	// modelBench caches the per-(worker, device set, model) measurements
+	// that decide candidacy, estimates, pool size, and the memory gate.
+	modelBench *modelBenchCache
+
+	// bench owns the per-worker benchmark queues that fill that cache.
+	bench *benchOrchestrator
+
+	// benchGateMu guards benchGated: the workers a benchmark currently
+	// owns. Dispatch skips them until the bench answers, so the
+	// measurement isn't polluted by co-located work.
+	benchGateMu sync.Mutex
+	benchGated  map[string]struct{}
 
 	// draining marks worker queues that currently have a drain goroutine
 	// running (see drainDeviceQueues). The entry's bool records whether a
@@ -239,6 +241,15 @@ type Scheduler struct {
 	// consumes it on exit to decide whether to kick a follow-up pass.
 	drainMu  sync.Mutex
 	draining map[string]bool
+
+	// orphanSince records, per worker-queue name, when the dispatcher first
+	// saw that queue with no fleet entry behind it. Entries are dropped the
+	// moment the worker is back (or the queue is gone); one that survives
+	// orphanGrace gets the queue drained (see [Scheduler.sweepOrphanQueues]).
+	// orphanGrace defaults to [orphanQueueGrace]; tests shorten it.
+	orphanMu    sync.Mutex
+	orphanSince map[string]time.Time
+	orphanGrace time.Duration
 
 	// gaugeMu guards the previously-reported gauge label sets below.
 	// refreshGauges runs on the single metrics-sweep goroutine, but tests
@@ -291,8 +302,8 @@ type inflightRecord struct {
 	// the worker's effective throughput), re-priced at dispatch time. It
 	// deliberately EXCLUDES the load-switch latency that the envelope's
 	// QueuedSeconds carries: any model load has already completed before
-	// this record is created, so the queue's remaining busy-time and the
-	// throughput-correction baseline are both compute-only.
+	// this record is created, so the queue's remaining busy-time stays
+	// compute-only.
 	seconds float64
 	// modelID is the envelope's ModelID, captured so the device-set gate
 	// can detect "MASS has already assigned a job for this model on this
@@ -323,24 +334,6 @@ type inflightRecord struct {
 	// dispatched) can be emitted on terminal frames without re-resolving
 	// the envelope.
 	runtimeName string
-	// axis + dispatchedAt feed the throughput correction loop: on an ok
-	// terminal we compare actual wall-clock (now - dispatchedAt) against
-	// the predicted seconds (this record's `seconds`) for workerID|axis.
-	// axis is the throughput axis the prediction actually divided by
-	// (the runtime default when the envelope's CostAxis wasn't benched),
-	// so correction samples land on the key scoring reads.
-	axis         string
-	dispatchedAt time.Time
-	// correction is the EWMA factor that was already baked into this
-	// record's predicted seconds at dispatch (effectiveThroughput
-	// multiplies benched throughput by it). observeThroughput multiplies
-	// the predicted/actual ratio back by this value so every sample is
-	// measured against the UNCORRECTED bench prior. Folding the
-	// corrected-prediction ratio directly would make the EWMA
-	// self-referential: its fixed point lands at sqrt(true ratio), so a
-	// worker running 4x its bench would stabilise at factor 2 and stay
-	// 2x mispredicted forever.
-	correction float64
 }
 
 // tailState is one entry of the in-memory tail mirror: the queued
@@ -350,37 +343,6 @@ type tailState struct {
 	seconds float64
 	modelID string
 }
-
-// correctionState is the per-(worker,axis) EWMA of predicted/actual
-// wall-clock ratio. factor multiplies benched throughput at scoring time;
-// samples gates application until enough evidence accrues.
-type correctionState struct {
-	factor  float64
-	samples int
-}
-
-const (
-	// correctionAlpha is the EWMA weight on each new sample. 0.2 ≈ a ~10-
-	// job memory: responsive to a real regime change (throttling kicking
-	// in) without chasing single-job noise.
-	correctionAlpha = 0.2
-	// correctionMinSamples is how many ok-terminals must accrue before the
-	// factor is applied — one or two jobs can't move placement.
-	correctionMinSamples = 5
-	// correctionClamp bounds the factor to [1/clamp, clamp] so a pathological
-	// job (cold cache, a 30s thinking burst predicted at 1s) can't swing
-	// placement wildly. The bench prior dominates outside this band.
-	correctionClamp = 4.0
-	// correctionMinActualSec drops sub-threshold jobs from the EWMA: their
-	// wall-clock is dominated by fixed dispatch/RPC overhead, not compute,
-	// so the ratio is meaningless as a throughput signal.
-	correctionMinActualSec = 0.1
-	// correctionMaxAge bounds how old a persisted correction may be and
-	// still seed the EWMA at startup: month-old evidence says little about
-	// today's thermals or drivers. Older rows are simply not loaded — the
-	// next sample or reset overwrites them.
-	correctionMaxAge = 30 * 24 * time.Hour
-)
 
 // StateStoreInterface is the slice of [store.Store] the scheduler needs for
 // device-queue lifecycle persistence. Tightening the dependency to this
@@ -403,23 +365,20 @@ type StateStoreInterface interface {
 	// one write, not incrementally.
 	SetTailSeconds(queueName string, value float64, tailModelID string) error
 	// GetBenchmark returns the most recent per-device benchmark row.
-	// Scoring requires it (no benchmark = device not schedulable).
+	// A worker needs one to get a queue at all; the numbers themselves
+	// are display + load-latency only.
 	GetBenchmark(workerID, deviceID string) (store.BenchmarkRow, error)
-	// UpsertThroughputCorrection persists one (worker, axis) entry of the
-	// correction EWMA after a completed job folds in.
-	UpsertThroughputCorrection(c store.ThroughputCorrection) error
-	// ListThroughputCorrections returns every persisted correction entry;
-	// [Scheduler.restoreCorrections] seeds the in-memory EWMA from it.
-	ListThroughputCorrections() ([]store.ThroughputCorrection, error)
-	// DeleteThroughputCorrections drops workerID's persisted corrections
-	// when the baseline they're relative to changes.
-	DeleteThroughputCorrections(workerID string) error
+	// GetModelBenchmark returns the measured row for one (worker, device
+	// set, model) triple, or [sql.ErrNoRows] when the bench hasn't
+	// concluded there. Placement, estimates, pool sizing, and the memory
+	// gate all read it.
+	GetModelBenchmark(workerID, deviceSet, modelID string) (store.ModelBenchmarkRow, error)
 }
 
 // New builds a Scheduler. Call [Scheduler.InitQueue] once a database is
 // available and [Scheduler.Start] to launch the dispatcher.
 func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Scheduler {
-	return &Scheduler{
+	s := &Scheduler{
 		cfg:                  cfg,
 		logger:               logger.With().Str("component", "scheduler").Logger(),
 		workers:              workers,
@@ -432,10 +391,15 @@ func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Sche
 		memoryReservations:   make(map[string]int64),
 		reestimateLocks:      make(map[string]*sync.Mutex),
 		benchCache:           make(map[string]map[string]store.BenchmarkRow),
+		modelBench:           newModelBenchCache(),
+		benchGated:           make(map[string]struct{}),
 		draining:             make(map[string]bool),
-		throughputCorrection: make(map[string]correctionState),
+		orphanSince:          make(map[string]time.Time),
+		orphanGrace:          orphanQueueGrace,
 		wake:                 make(chan struct{}, 1),
 	}
+	s.bench = newBenchOrchestrator(s)
+	return s
 }
 
 // InitQueue wires the durable queue subsystem and the device-queue state
@@ -447,7 +411,6 @@ func (s *Scheduler) InitQueue(pool *queue.Pool, results queue.ResultStoreInterfa
 	s.results = results
 	s.store = st
 	s.queueMu.Unlock()
-	s.restoreCorrections(st)
 }
 
 // SetWorkerEnabledFn registers the per-worker enable check.
@@ -463,27 +426,6 @@ func (s *Scheduler) SetDeviceEnabledFn(fn DeviceEnabledFn) {
 	s.workerEnabledMu.Lock()
 	s.deviceEnabled = fn
 	s.workerEnabledMu.Unlock()
-}
-
-// SetRuntimeDefaultAxisFn registers the per-runtime default-axis lookup
-// used by the scheduler's throughput-fallback path. When a Submit names
-// a cost_axis a candidate worker hasn't benched, the scheduler falls
-// back to this axis instead. Without the callback wired, only exact-
-// axis matches are eligible.
-func (s *Scheduler) SetRuntimeDefaultAxisFn(fn RuntimeDefaultAxisFn) {
-	s.workerEnabledMu.Lock()
-	s.runtimeAxis = fn
-	s.workerEnabledMu.Unlock()
-}
-
-func (s *Scheduler) runtimeDefaultAxis(runtimeName string) string {
-	s.workerEnabledMu.RLock()
-	fn := s.runtimeAxis
-	s.workerEnabledMu.RUnlock()
-	if fn == nil {
-		return ""
-	}
-	return fn(runtimeName)
 }
 
 func (s *Scheduler) isWorkerEnabled(id string) bool {
@@ -558,18 +500,14 @@ type SubmitRequest struct {
 	RuntimeName string
 	ModelID     string
 	Payload     []byte
-	// Cost is the gateway's prediction of how expensive this job is in
-	// the runtime's reference cost units. MASS never interprets the
-	// units — all prediction physics lives runtime-side — the only
-	// quantity MASS derives is time: Cost divided by the chosen worker's
-	// throughput on CostAxis is the predicted wall-clock seconds every
-	// scoring, tail, and calibration decision operates on. Required (> 0).
+	// Cost is how expensive this job is in the MODEL'S OWN units, as the
+	// gateway prices it — the same unit it puts on the bench payload it
+	// authors. MASS never interprets the unit; the only quantity it
+	// derives is time: Cost divided by the model's measured
+	// units_per_sec on the chosen worker is the predicted wall-clock
+	// seconds every scoring, tail, and ETA decision operates on.
+	// Required (> 0).
 	Cost float64
-	// CostAxis names the throughput dimension Cost divides by. The
-	// runtime's gateway declares a default axis on Init that MASS uses
-	// as fallback when CostAxis names something a worker hasn't
-	// benched. Required (non-empty).
-	CostAxis string
 	// Files are the load artifacts MASS may need to ship to a worker that
 	// doesn't already have ModelID loaded. Forwarded verbatim as
 	// HubLoadModel.files.
@@ -577,18 +515,6 @@ type SubmitRequest struct {
 	// LoadHints is the gateway-defined load configuration blob.
 	// Forwarded verbatim as HubLoadModel.load_hints.
 	LoadHints []byte
-	// BaseLoadBytes is the gateway's prediction of the fixed device
-	// memory cost the load pays regardless of concurrency. MASS uses
-	// it to reject submits when no fleet member's hardware could fit
-	// it (Submit-time) and to filter workers whose free memory is too
-	// small at dispatch time. 0 = unknown — both checks pass-through.
-	BaseLoadBytes int64
-	// PerSlotBytes is the gateway's prediction of the incremental
-	// memory cost per concurrent slot. MASS combines it with the
-	// chosen worker's free memory and HeadroomPct to project the
-	// post-grow pool size used for wall-clock load latency. 0 = no
-	// concurrency dimension (projection collapses to pool=1).
-	PerSlotBytes int64
 	// HeadroomPct is the operator's explicit per-load device-memory
 	// watermark override (1-100), set only when the load hints carry
 	// one. The worker gives a per-load hint precedence over its own
@@ -613,22 +539,20 @@ type SubmitRequest struct {
 // unleased on global and drainGlobal re-scores it every tick.
 //
 // The global row remains leased after a successful handoff — it is the
-// recovery anchor for the in-flight job. It's released + deleted on the
-// terminal frame (dispatchEnvelope), or released-only on a worker
-// disconnect (OnWorkerDisconnected) so drainGlobal can re-place it.
+// recovery anchor for the placed job, and the lease runs for
+// [anchorLeaseDuration] because the job may wait on the worker queue that
+// long. It's deleted on the terminal frame (dispatchEnvelope), or
+// released-only on a worker disconnect (OnWorkerDisconnected) so
+// drainGlobal can re-place it.
 //
-// Returns ErrNoWorker when no online worker matches the runtime.
-// Returns ErrInvalidCost / ErrInvalidCostAxis when the gateway omitted
-// the throughput contract fields.
+// Returns ErrNoWorker when no online worker matches the runtime, and
+// ErrInvalidCost when the gateway omitted the cost.
 func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, error) {
 	if req.RuntimeName == "" {
 		return "", fmt.Errorf("submit: runtime_name required")
 	}
 	if req.Cost <= 0 {
 		return "", ctxerr.With(ErrInvalidCost, map[string]any{"runtime_name": req.RuntimeName})
-	}
-	if req.CostAxis == "" {
-		return "", ctxerr.With(ErrInvalidCostAxis, map[string]any{"runtime_name": req.RuntimeName})
 	}
 	source := req.Source
 	if source == "" {
@@ -641,7 +565,6 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 	for _, f := range []struct{ name, value string }{
 		{"runtime_name", req.RuntimeName},
 		{"model_id", req.ModelID},
-		{"cost_axis", req.CostAxis},
 		{"source", source},
 	} {
 		if len(f.value) > 255 {
@@ -673,19 +596,16 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 	}
 
 	env := queue.Envelope{
-		Priority:      req.Priority,
-		Cost:          req.Cost,
-		CostAxis:      req.CostAxis,
-		RuntimeName:   req.RuntimeName,
-		ModelID:       req.ModelID,
-		Source:        source,
-		RequestID:     requestID,
-		Files:         req.Files,
-		LoadHints:     req.LoadHints,
-		BaseLoadBytes: req.BaseLoadBytes,
-		PerSlotBytes:  req.PerSlotBytes,
-		HeadroomPct:   req.HeadroomPct,
-		Payload:       req.Payload,
+		Priority:    req.Priority,
+		Cost:        req.Cost,
+		RuntimeName: req.RuntimeName,
+		ModelID:     req.ModelID,
+		Source:      source,
+		RequestID:   requestID,
+		Files:       req.Files,
+		LoadHints:   req.LoadHints,
+		HeadroomPct: req.HeadroomPct,
+		Payload:     req.Payload,
 	}
 	res, err := globalQ.Submit(ctx, env)
 	if err != nil {
@@ -704,9 +624,10 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 }
 
 // placeOnWorkerQueue scores env against online workers, picks the cheapest,
-// and hands env off via LeaseAndSubmit. The global row is left leased
-// (not deleted) — it remains the durability anchor until the terminal
-// frame.
+// and hands env off via LeaseAndSubmit. The global row is left leased for
+// [anchorLeaseDuration] (not deleted) — it remains the durability anchor
+// until the terminal frame, and stays hidden for the whole time the job
+// may sit on the worker queue.
 //
 // Returns silently when no candidate exists (caller relies on drainGlobal
 // to retry) or when LeaseAndSubmit races a concurrent placer (the other
@@ -727,7 +648,7 @@ func (s *Scheduler) placeOnWorkerQueue(ctx context.Context, env queue.Envelope) 
 	if globalQ == nil {
 		return
 	}
-	_, leased, err := globalQ.LeaseAndSubmit(ctx, queue.MessageID(env.GlobalMsgID), dispatchLeaseDuration, target.q, env)
+	_, leased, err := globalQ.LeaseAndSubmit(ctx, queue.MessageID(env.GlobalMsgID), anchorLeaseDuration, target.q, env)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("message_id", env.GlobalMsgID).Str("target", target.name).Msg("lease-and-submit to worker queue")
 		return
@@ -793,14 +714,21 @@ func (s *Scheduler) preflight(req SubmitRequest) error {
 	if len(candidates) == 0 {
 		return ctxerr.With(fmt.Errorf("%w: %s", ErrNoWorker, req.RuntimeName), map[string]any{"runtime_name": req.RuntimeName})
 	}
-	if !s.feasibleByAnyWorker(queue.Envelope{
-		RuntimeName:   req.RuntimeName,
-		ModelID:       req.ModelID,
-		BaseLoadBytes: req.BaseLoadBytes,
-	}) {
-		return ctxerr.With(fmt.Errorf("%w: %d bytes", ErrNoMemoryFit, req.BaseLoadBytes), map[string]any{"runtime_name": req.RuntimeName, "base_load_bytes": req.BaseLoadBytes})
-	}
 	return nil
+}
+
+// ensureJobBuffer returns requestID's replay buffer, creating one when
+// it's absent. Used by the dispatcher to re-arm a job whose buffer a
+// restart took with it.
+func (s *Scheduler) ensureJobBuffer(requestID string) *jobBuffer {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	if buf, ok := s.jobBuffers[requestID]; ok {
+		return buf
+	}
+	buf := newJobBuffer()
+	s.jobBuffers[requestID] = buf
+	return buf
 }
 
 // dropJob removes the in-memory replay buffer for requestID. Used on
@@ -911,6 +839,9 @@ func (s *Scheduler) OnWorkerConnected(w *worker.StreamWorker) {
 			s.logger.Warn().Err(err).Str("queue", name).Msg("persisting worker queue state")
 		}
 	}
+	// A worker that just appeared owes a measurement for every model it
+	// has no row for on its current device set.
+	s.bench.sweepWorkerAsync(w)
 	s.kick()
 }
 
@@ -995,10 +926,9 @@ func (s *Scheduler) TryReestimateLock(workerID string) (release func(), ok bool)
 // still contributes to the tail sum unchanged — the prediction is
 // still valid for that specific in-flight job.
 //
-// Envelopes whose ModelID is empty, or whose CostAxis is unbenched on
-// the worker's new device set, contribute 0 to the sum — the
-// dispatcher's eligibility gate will surface those rows as "no fit"
-// when they reach the head. Best-effort: per-row decode/encode errors
+// Envelopes with no usable model_benchmarks row for the worker's new
+// device set contribute 0 to the sum — the dispatcher's eligibility
+// gate will surface those rows as "no fit" when they reach the head. Best-effort: per-row decode/encode errors
 // are logged and the row is skipped — an undecodable row's on-disk
 // QueuedSeconds is unreadable, so it is excluded from the new tail sum;
 // an encode-back failure keeps the row's old on-disk value while the
@@ -1025,7 +955,6 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 		return
 	}
 
-	defaultAxis := s.runtimeDefaultAxis(sw.RuntimeName())
 	loadBytesSec := s.effectiveLoadThroughput(sw)
 
 	var (
@@ -1063,7 +992,7 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 			}
 			continue
 		}
-		newQueued := s.predictedQueuedSeconds(sw, env, defaultAxis, loadBytesSec, residentID)
+		newQueued := s.predictedQueuedSeconds(sw, env, loadBytesSec, residentID)
 		env.QueuedSeconds = newQueued
 		bodyBytes := env.Marshal()
 		if err := q.UpdateBody(ctx, row.ID, bodyBytes); err != nil {
@@ -1092,15 +1021,15 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 // the worker busy under the current device set: compute time +
 // load-switch cost (zero when env's model will already be resident by
 // the time we get there — same rule as [loadLatencyForCand]).
-func (s *Scheduler) predictedQueuedSeconds(w *worker.StreamWorker, env queue.Envelope, defaultAxis string, loadBytesSec float64, residentID string) float64 {
-	tput, _, ok := s.effectiveThroughput(w, env.CostAxis, defaultAxis)
-	if !ok || tput <= 0 {
+func (s *Scheduler) predictedQueuedSeconds(w *worker.StreamWorker, env queue.Envelope, loadBytesSec float64, residentID string) float64 {
+	row, ok := s.modelBenchmark(w, env)
+	if !ok {
 		return 0
 	}
-	taskSec := env.Cost / tput
+	taskSec := env.Cost / row.UnitsPerSec
 	switchSec := 0.0
 	if env.ModelID != "" && env.ModelID != residentID {
-		bytes := s.projectedLoadBytes(w, env)
+		bytes := s.projectedLoadBytes(w, env, row)
 		if bytes <= 0 {
 			bytes = totalLoadBytes(env.Files)
 		}
@@ -1128,11 +1057,6 @@ const peekAllLimit = 256
 // The worker_queue_state row stays in either case; re-enabling a
 // device lets the queue receive again without a reconnect cycle.
 func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
-	// The enabled-device set is part of the correction factor's identity —
-	// the bench prior sums across the set (see [Scheduler.throughputForAxis]),
-	// so evidence learned on the old set doesn't transfer to the new one.
-	s.ResetCorrections(workerID)
-
 	wIface := s.workers.Get(workerID)
 	sw, ok := wIface.(*worker.StreamWorker)
 	if !ok || sw == nil {
@@ -1148,10 +1072,17 @@ func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
 	}
 
 	if len(s.deviceSet(sw)) == 0 {
-		s.drainWorkerQueue(context.Background(), q, globalQ)
+		// Pending rows only: the worker is still online and its in-flight
+		// jobs finish on the pre-toggle device set (see
+		// [Scheduler.ReestimateWorkerQueue]).
+		s.drainWorkerQueue(context.Background(), q, globalQ, false)
 		s.broadcastQueueChange()
 		return
 	}
+	// The predicted device set moved, so the rows keyed on the old one
+	// no longer apply; measure the new set. Old rows are kept — toggling
+	// back reuses them.
+	s.bench.sweepWorkerAsync(sw)
 	s.kick()
 	s.broadcastQueueChange()
 }
@@ -1175,21 +1106,32 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	// devices) doesn't read against the previous topology. Cheap and
 	// always-safe regardless of whether the worker had a queue.
 	s.InvalidateWorkerBench(workerID)
+	s.InvalidateModelBenchmarks(workerID)
+	// A bench in flight here unblocks with ErrWorkerOffline and leaves no
+	// row, so the reconnect sweep starts it over.
+	s.bench.stopWorker(workerID)
 
+	s.removeWorkerQueue(context.Background(), workerID)
+}
+
+// removeWorkerQueue drains workerID's queue back to global — in-flight
+// rows included — and tears the queue down: the devQueues entry, the tail
+// mirror entry, and the persisted worker_queue_state row. Shared by
+// [Scheduler.OnWorkerDisconnected] and [Scheduler.sweepOrphanQueues].
+// No-op when the worker has no queue.
+func (s *Scheduler) removeWorkerQueue(ctx context.Context, workerID string) {
 	name := workerQueueName(workerID)
 
 	s.queueMu.Lock()
-	pool := s.queuePool
 	globalQ := s.globalQ
 	st := s.store
 	q, ok := s.devQueues[name]
 	s.queueMu.Unlock()
-	if pool == nil || globalQ == nil || !ok {
+	if globalQ == nil || !ok {
 		return
 	}
 
-	ctx := context.Background()
-	s.drainWorkerQueue(ctx, q, globalQ)
+	s.drainWorkerQueue(ctx, q, globalQ, true)
 
 	s.queueMu.Lock()
 	delete(s.devQueues, name)
@@ -1208,35 +1150,43 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	}
 }
 
-// drainWorkerQueue reaps every visible row from src and releases the
-// global durability anchor for each so drainGlobal can re-place the
-// envelope on a surviving worker.
+// drainWorkerQueue reaps rows from src and releases the global
+// durability anchor for each so drainGlobal can re-place the envelope on
+// a surviving worker.
 //
-// In-flight rows are reaped here too: the worker's gRPC stream closed on
-// disconnect, so pumpWorkerChunks's workerCh will end with no terminal
-// frame. Under the new model, pump detects offline + leaves the global
-// anchor alone; this drain is what actually releases it. An in-flight
-// row's re-placement is charged against disconnectRequeueBudget —
-// without the cap, a job that crashes its worker cycles forever
-// (requeue → redispatch → crash) and wedges every caller waiting on it.
-// Past the budget the result fails terminally. Queued-but-never-
-// dispatched rows carry no blame and re-place without consuming an
-// attempt.
+// includeLeased picks the semantics. With it set (worker disconnected)
+// in-flight rows are reaped too: the worker's gRPC stream closed, so
+// pumpWorkerChunks's workerCh will end with no terminal frame. Under the
+// new model, pump detects offline + leaves the global anchor alone; this
+// drain is what actually releases it. An in-flight row's re-placement is
+// charged against disconnectRequeueBudget — without the cap, a job that
+// crashes its worker cycles forever (requeue → redispatch → crash) and
+// wedges every caller waiting on it. Past the budget the result fails
+// terminally. Queued-but-never-dispatched rows carry no blame and
+// re-place without consuming an attempt.
+//
+// Without it (the worker is still online, e.g. a toggle disabled its last
+// device) leased rows are left alone: their pump goroutine and lease
+// keep-alive are still running and the job is still streaming, so
+// requeueing would dispatch a duplicate of a running job.
 //
 // Uses PeekAll (not Peek) so leased rows — which is exactly what an
-// in-flight row looks like on disk — are included. Peek-only would
-// strand every job that was actually running on the worker, since
-// those rows are leased through the pump goroutine's lifetime.
+// in-flight row looks like on disk — are visible. Peek-only would strand
+// every job that was actually running on the worker, since those rows are
+// leased through the pump goroutine's lifetime.
 //
 // Best-effort: races (the global row already gone, a row already deleted
 // by pump) and per-row errors are logged and skipped.
-func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.QueueInterface) {
+func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.QueueInterface, includeLeased bool) {
 	msgs, err := src.PeekAll(ctx, peekAllLimit)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("peeking device queue for drain")
 		return
 	}
 	for _, msg := range msgs {
+		if msg.Leased && !includeLeased {
+			continue
+		}
 		env, err := queue.UnmarshalEnvelope(msg.Body)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("message_id", string(msg.ID)).Msg("unmarshal envelope on drain")
@@ -1312,8 +1262,10 @@ func (s *Scheduler) drainWorkerQueue(ctx context.Context, src, globalQ queue.Que
 // recoverPersistedQueues reattaches to worker_queue_state rows that
 // survived a restart and seeds the tail mirror from them, so queued-time
 // estimates survive a scheduler restart. Queues whose worker isn't
-// currently connected stay reattached — drain or steal them when
-// capacity arrives.
+// currently connected stay reattached so a reconnect resumes them in
+// place; if the worker never comes back,
+// [Scheduler.sweepOrphanQueues] drains the queue after
+// [orphanQueueGrace].
 func (s *Scheduler) recoverPersistedQueues() {
 	s.queueMu.Lock()
 	pool := s.queuePool
@@ -1370,6 +1322,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 // budget by a MASS crash get a failure result instead of hanging their
 // callers forever. Best-effort: errors log and startup proceeds (the
 // rows stay dormant; goqite never redelivers past-budget rows).
+//
+// Jobs merely waiting on a worker queue are untouched: their rows are
+// pending (never delivered) and their anchors hold an
+// [anchorLeaseDuration] lease, so neither looks abandoned.
 func (s *Scheduler) reapAbandonedAtStartup(ctx context.Context) {
 	s.queueMu.RLock()
 	pool := s.queuePool
@@ -1381,17 +1337,17 @@ func (s *Scheduler) reapAbandonedAtStartup(ctx context.Context) {
 		return
 	}
 
-	queues := []queue.QueueInterface{globalQ}
+	var workerQueues []queue.QueueInterface
 	rows, err := st.ListWorkerQueueStates()
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reap: listing persisted worker queues")
 	} else {
 		for _, row := range rows {
-			queues = append(queues, pool.Open(row.QueueName))
+			workerQueues = append(workerQueues, pool.Open(row.QueueName))
 		}
 	}
 
-	reaped, err := queue.ReapAbandoned(ctx, queues, results, s.logger)
+	reaped, err := queue.ReapAbandoned(ctx, globalQ, workerQueues, results, s.logger)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("reaping abandoned queue rows at startup")
 	}
@@ -1435,8 +1391,10 @@ func (s *Scheduler) refreshGauges() {
 
 	// Queue depth — pending rows only. Global is unleased global rows;
 	// worker is the sum of pending (unleased) rows across every worker
-	// queue. Leased global rows mean "placed on a worker", which would
-	// double-count. Depth shares Peek's visibility predicate (timeout <=
+	// queue. Leased global rows are anchors for jobs already placed on a
+	// worker — counting them would double up with the worker row they
+	// anchor, which is why the anchor lease spans the whole queue wait
+	// ([anchorLeaseDuration]). Depth shares Peek's visibility predicate (timeout <=
 	// now) but is a bare COUNT(*) — Peek would drag every pending body
 	// (payloads can carry multi-MB blobs) through the driver just to be
 	// counted, every sweep.
@@ -1629,25 +1587,90 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 // busy-spin.
 const pendingRetryInterval = 200 * time.Millisecond
 
-// dispatchPass does one round of: drain global → device queues, then drain
-// device queues → workers, then attempt work stealing for idle workers.
-// Returns true when global still holds rows that couldn't be placed this
-// pass, so the loop can retry sooner than the slow ticker.
+// dispatchPass does one round of: reap orphaned queues, drain global →
+// device queues, then drain device queues → workers, then attempt work
+// stealing for idle workers. Returns true when global still holds rows
+// that couldn't be placed this pass, so the loop can retry sooner than the
+// slow ticker.
 func (s *Scheduler) dispatchPass(ctx context.Context) (pending bool) {
+	s.sweepOrphanQueues(ctx)
 	pending = s.drainGlobal(ctx)
 	s.drainDeviceQueues(ctx)
 	s.attemptSteals(ctx)
 	return pending
 }
 
+// sweepOrphanQueues drains worker queues whose worker has been missing
+// from the fleet for longer than orphanGrace, handing their rows back to
+// global for re-placement on surviving workers.
+//
+// These are queues [Scheduler.recoverPersistedQueues] reattached for a
+// worker that was already gone at startup: OnWorkerDisconnected never
+// fires for them, so without this sweep their rows — and the pending
+// result rows behind them — sit untouched forever.
+//
+// The drain includes leased rows: an orphan's leased row is a pre-crash
+// in-flight row with no pump goroutine left in this process, so there is
+// nothing live to duplicate. A worker that drops while this process runs
+// is drained by OnWorkerDisconnected immediately and never reaches the
+// grace period.
+func (s *Scheduler) sweepOrphanQueues(ctx context.Context) {
+	s.queueMu.RLock()
+	names := make([]string, 0, len(s.devQueues))
+	for name := range s.devQueues {
+		names = append(names, name)
+	}
+	s.queueMu.RUnlock()
+
+	now := time.Now()
+	var expired []string
+
+	s.orphanMu.Lock()
+	grace := s.orphanGrace
+	present := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		workerID, ok := parseWorkerQueueName(name)
+		if !ok {
+			continue
+		}
+		if s.workers != nil && s.workers.Get(workerID) != nil {
+			delete(s.orphanSince, name)
+			continue
+		}
+		present[name] = struct{}{}
+		since, tracked := s.orphanSince[name]
+		if !tracked {
+			s.orphanSince[name] = now
+			continue
+		}
+		if now.Sub(since) >= grace {
+			delete(s.orphanSince, name)
+			expired = append(expired, workerID)
+		}
+	}
+	// Forget queues that disappeared between passes.
+	maps.DeleteFunc(s.orphanSince, func(name string, _ time.Time) bool {
+		_, still := present[name]
+		return !still
+	})
+	s.orphanMu.Unlock()
+
+	for _, workerID := range expired {
+		s.logger.Info().Str("worker_id", workerID).Dur("grace", grace).
+			Msg("worker never reconnected; draining its recovered queue back to global")
+		s.removeWorkerQueue(ctx, workerID)
+	}
+}
+
 // drainGlobal peeks the global queue and tries to place each row on a
 // worker queue. Rows that can't be placed right now (no workers, none
 // benched, etc.) stay unleased on global and are retried next pass.
 //
-// Successful placements leave the global row LEASED — it remains the
-// recovery anchor for the in-flight envelope. The lease is renewed by
-// the pump and released on terminal frame (DeleteBoth) or worker
-// disconnect (DeleteAndReleaseLease).
+// Successful placements leave the global row LEASED for
+// [anchorLeaseDuration] — it remains the recovery anchor for the placed
+// envelope until the terminal frame (DeleteBoth) or a worker disconnect
+// (DeleteAndReleaseLease) resolves it. Nothing renews that lease: it is
+// sized to outlast the wait rather than be topped up.
 // Returns true when at least one peeked row had no eligible target this
 // pass (so it stays on global) — the dispatch loop uses that to retry on a
 // short interval instead of waiting for the slow ticker.
@@ -1672,11 +1695,20 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 		env.GlobalMsgID = string(msg.ID)
 		target, queuedSeconds := s.pickWorkerQueue(env)
 		if target == nil {
-			pending = true // no eligible target right now; row stays
+			// Nothing can take the row right now. Either a bench is
+			// still owed somewhere (wait), or every eligible worker has
+			// concluded this model can't run on it (fail — waiting
+			// longer changes nothing).
+			benchPending, errText := s.modelBenchConclusion(env)
+			if benchPending {
+				pending = true
+				continue
+			}
+			s.failUnbenchable(ctx, globalQ, msg.ID, env, errText)
 			continue
 		}
 		env.QueuedSeconds = queuedSeconds
-		_, leased, err := globalQ.LeaseAndSubmit(ctx, msg.ID, dispatchLeaseDuration, target.q, env)
+		_, leased, err := globalQ.LeaseAndSubmit(ctx, msg.ID, anchorLeaseDuration, target.q, env)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("message_id", string(msg.ID)).Str("target", target.name).Msg("lease-and-submit to worker queue")
 			continue
@@ -1687,6 +1719,27 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 		s.creditTail(target.name, queuedSeconds, env.ModelID)
 	}
 	return pending
+}
+
+// failUnbenchable finalises a job whose model concluded incapable on
+// every eligible worker: the failure is the bench's recorded verdict,
+// which is as good an answer as the fleet will ever give. The terminal
+// chunk lands after the durable result so an attached gateway that
+// unblocks on it reads a settled row.
+func (s *Scheduler) failUnbenchable(ctx context.Context, globalQ queue.QueueInterface, msgID queue.MessageID, env queue.Envelope, errText string) {
+	if errText == "" {
+		errText = "no worker can run this model"
+	}
+	errText = "model benchmark failed on every eligible worker: " + errText
+	s.logger.Warn().Str("request_id", env.RequestID).Str("model_id", env.ModelID).Str("reason", errText).
+		Msg("failing job: no eligible worker can run this model")
+	metrics.JobDispatched(env.RuntimeName, "error")
+	s.failResult(env.RequestID, errText)
+	s.ensureJobBuffer(env.RequestID).Append(&worker.JobChunk{Type: worker.JobChunkTypeError, ErrText: errText})
+	if err := globalQ.Delete(ctx, msgID); err != nil {
+		s.logger.Warn().Err(err).Str("request_id", env.RequestID).Msg("deleting global row for unbenchable job")
+	}
+	s.broadcastQueueChange()
 }
 
 // workerQueueTarget pairs a worker queue with its owning worker so the
@@ -1715,9 +1768,18 @@ type workerQueueTarget struct {
 // queue's tail_seconds: env.Cost / throughput_w + load_latency_w. The
 // dispatcher pop subtracts this exact value, so tail stays consistent.
 //
-// Returns (nil, 0) when no candidate is eligible (no online enabled-and-
-// benched worker with capacity > 0). drainGlobal leaves the row on
-// global in that case and retries next tick.
+// Placement is score-only: a saturated worker is priced, not excluded.
+// Its inflight + tail terms already carry the wait, and a cold peer's
+// model switch is priced by load_latency. Free slots are dispatch-side
+// backpressure ([Scheduler.effectiveCapacity] in drainOneWorkerQueue),
+// so rows queue on the best-scoring worker and pipeline out as slots
+// free, instead of sitting on global until a heartbeat happens to
+// sample an idle gap between jobs.
+//
+// Returns (nil, 0) when no candidate is eligible — no online, enabled
+// worker for the runtime holds a usable model_benchmarks row for env's
+// model on its current device set. drainGlobal leaves the row on global
+// in that case and retries next tick.
 func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, float64) {
 	candidates := s.WorkersForRuntime(env.RuntimeName)
 	if len(candidates) == 0 {
@@ -1729,35 +1791,17 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 	// connect/disconnect.
 	type cand struct {
 		t            workerQueueTarget
-		throughput   float64
+		row          store.ModelBenchmarkRow
 		loadBytesSec float64
 	}
-	defaultAxis := s.runtimeDefaultAxis(env.RuntimeName)
 	var cands []cand
 	s.queueMu.RLock()
 	for _, w := range candidates {
-		// Eligibility filter: TargetDeviceIDs (when set) must be a subset
-		// of the worker's enabled devices. Skips workers that physically
-		// can't host the operator's placement choice so MASS doesn't
-		// pick a worker whose load will fail.
-		if !s.eligibleWorker(w, env) {
-			continue
+		row, ok := s.modelBenchmark(w, env)
+		if !ok {
+			continue // bench hasn't concluded here, or concluded incapable
 		}
-		// Capacity gate is residency-aware. A worker with the model
-		// resident AND no blockers has a real concurrency cap
-		// (pool_size) that we must respect — full pool means future
-		// tasks queue, not displace. A worker WITHOUT the model
-		// resident, or one that's resident-stale / has other-model
-		// conflicts, reports a pool that won't survive dispatch
-		// (it'll be evicted + reloaded with a fresh pool), so the
-		// capacity number is meaningless. Exclude only resident-fitting
-		// saturated workers. Capacity is net of MASS's own in-flight jobs
-		// (heartbeat AvailableCapacity lags real-time dispatch) so the
-		// picker doesn't route a burst onto a worker the dispatcher will
-		// then refuse — see drainOneWorkerQueue.
-		if env.ModelID != "" && workerHasModel(w, env.ModelID) &&
-			len(residentsBlockingLoad(w, env.ModelID, s.predictDeviceSet(w))) == 0 &&
-			w.AvailableCapacity()-s.inflightCountForWorker(w.ID()) <= 0 {
+		if !s.eligibleWorker(w, env, row) {
 			continue
 		}
 		name := workerQueueName(w.ID())
@@ -1765,13 +1809,9 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		if !ok {
 			continue
 		}
-		tput, _, ok := s.effectiveThroughput(w, env.CostAxis, defaultAxis)
-		if !ok {
-			continue // worker hasn't benched the requested axis or the runtime fallback
-		}
 		cands = append(cands, cand{
 			t:            workerQueueTarget{name: name, q: q, worker: w},
-			throughput:   tput,
+			row:          row,
 			loadBytesSec: s.effectiveLoadThroughput(w),
 		})
 	}
@@ -1789,14 +1829,14 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		c := cands[i]
 		tail := s.tailSeconds(c.t.name)
 		inflight := s.getInflightSeconds(c.t.name)
-		loadBytes := s.projectedLoadBytes(c.t.worker, env)
+		loadBytes := s.projectedLoadBytes(c.t.worker, env, c.row)
 		if loadBytes <= 0 {
 			loadBytes = fallbackLoadBytes
 		}
 		loadLat := loadLatencyForCand(c.t.worker, c.t.name, env, tail, loadBytes, c.loadBytesSec, s)
 		// QueuedSeconds for this candidate = how long this task plus its
 		// load (if any) will keep the worker busy.
-		taskSec := env.Cost / c.throughput
+		taskSec := env.Cost / c.row.UnitsPerSec
 		queuedSec := taskSec + loadLat
 		score := inflight + tail + queuedSec
 		if best == nil || score < bestScore {
@@ -1913,9 +1953,9 @@ func (s *Scheduler) debitTail(queueName string, delta float64) {
 // startInflight atomically promotes requestID from "dispatching" to
 // "inflight": it records the running seconds/reservation so concurrent
 // scoring sees the worker's real load, transferring the dispatch marker
-// under a single lock. seconds is the compute-only prediction and axis
-// the throughput axis it divided by — see the dispatchEnvelope re-price
-// and [inflightRecord]. modelID is stashed for the device-set gate so a
+// under a single lock. seconds is the compute-only prediction — see the
+// dispatchEnvelope re-price and [inflightRecord]. modelID is stashed
+// for the device-set gate so a
 // subsequent dispatch can detect "MASS already assigned a job against this
 // model" without waiting on a heartbeat. The worker-side jobID is filled
 // in later by [Scheduler.attachWorkerJobID] once AssignJob returns.
@@ -1925,12 +1965,8 @@ func (s *Scheduler) debitTail(queueName string, delta float64) {
 // inflight record is created and the caller must abort before AssignJob.
 // Checking the flag in the same critical section that writes the record
 // closes the race between the cancel and the promotion.
-func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, axis string, seconds float64, reservedBytes int64) bool {
+func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName string, seconds float64, reservedBytes int64) bool {
 	workerID, _ := parseWorkerQueueName(queueName)
-	// The factor effectiveThroughput applied to this prediction moments
-	// ago in dispatchEnvelope — captured so observeThroughput can undo it
-	// and record a bench-relative sample (see inflightRecord.correction).
-	correction := s.correctionFactor(workerID, axis)
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
 	if s.dispatchingByRequest[requestID] {
@@ -1948,9 +1984,6 @@ func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, ax
 		workerID:      workerID,
 		reservedBytes: reservedBytes,
 		runtimeName:   runtimeName,
-		axis:          axis,
-		dispatchedAt:  time.Now(),
-		correction:    correction,
 	}
 	return true
 }
@@ -1971,12 +2004,26 @@ func (s *Scheduler) workerHasInflightForModel(workerID, modelID string) bool {
 	return false
 }
 
+// effectiveCapacity returns w's free-slot count net of the jobs MASS has
+// dispatched that w's last heartbeat doesn't reflect yet.
+//
+// The heartbeat's AvailableCapacity is already net of the worker's running
+// jobs (the worker reports Σ max(0, pool − active) across its loaded
+// models), so subtracting the whole inflight count would debit each job
+// twice once a heartbeat catches up — steady-state concurrency would
+// settle around pool/2. Only the lag is unaccounted for. ActiveJobs can
+// exceed MASS's inflight count when something dispatches to the worker
+// directly; the heartbeat already covers those, hence the floor at 0.
+func (s *Scheduler) effectiveCapacity(w *worker.StreamWorker) int {
+	return w.AvailableCapacity() - max(0, s.inflightCountForWorker(w.ID())-w.ActiveJobs())
+}
+
 // inflightCountForWorker counts the jobs MASS currently has in flight on
 // workerID. The worker's heartbeat AvailableCapacity lags real-time
 // dispatch by up to one interval, so a burst could otherwise place more
-// jobs than the pool holds before the count catches up; subtracting this
-// from advertised capacity (see drainOneWorkerQueue) keeps a burst within
-// pool_size immediately.
+// jobs than the pool holds before the count catches up; netting the lag
+// out of advertised capacity (see [Scheduler.effectiveCapacity]) keeps a
+// burst within pool_size immediately.
 func (s *Scheduler) inflightCountForWorker(workerID string) int {
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
@@ -2045,178 +2092,6 @@ func (s *Scheduler) inflightRuntime(requestID string) string {
 		return ""
 	}
 	return rec.runtimeName
-}
-
-// observeThroughput feeds one completed job into the (worker|axis) EWMA so
-// future scoring reflects how this worker actually performs versus its
-// one-time bench. Reads the inflight record (worker, axis, predicted
-// seconds, dispatch time) and folds predicted/actual into the running
-// factor. Both sides of the ratio are compute-only: the record's
-// seconds exclude load-switch latency and dispatchedAt is stamped
-// after any LoadModel completed, so a cold load can't masquerade as
-// compute speed. Call BEFORE finishInflight removes the record, and
-// only on an ok terminal — error/cancel wall-clock isn't a throughput
-// signal.
-func (s *Scheduler) observeThroughput(requestID string) {
-	s.inflightMu.Lock()
-	rec, ok := s.inflightByRequest[requestID]
-	s.inflightMu.Unlock()
-	if !ok || rec.axis == "" || rec.workerID == "" || rec.seconds <= 0 {
-		return
-	}
-	actual := time.Since(rec.dispatchedAt).Seconds()
-	if actual < correctionMinActualSec {
-		return // dominated by fixed overhead, not compute
-	}
-	rawRatio := rec.seconds / actual // >1: faster than predicted, <1: slower
-	// The prediction already divided by the correction factor in force at
-	// dispatch, so rawRatio measures the residual error of the CORRECTED
-	// prediction. Multiply the factor back in to get a bench-relative
-	// sample — the EWMA state is an absolute multiplier on benched
-	// throughput, and feeding it corrected-prediction ratios would make
-	// the fixed point sqrt(true ratio) instead of the true ratio.
-	appliedCorrection := rec.correction
-	if appliedCorrection <= 0 {
-		appliedCorrection = 1
-	}
-	ratio := rawRatio * appliedCorrection
-	clamped := false
-	if ratio < 1/correctionClamp {
-		ratio = 1 / correctionClamp
-		clamped = true
-	} else if ratio > correctionClamp {
-		ratio = correctionClamp
-		clamped = true
-	}
-
-	key := rec.workerID + "|" + rec.axis
-	s.correctionMu.Lock()
-	cur, seen := s.throughputCorrection[key]
-	if !seen {
-		cur = correctionState{factor: ratio, samples: 1}
-	} else {
-		cur.factor = (1-correctionAlpha)*cur.factor + correctionAlpha*ratio
-		cur.samples++
-	}
-	s.throughputCorrection[key] = cur
-	s.correctionMu.Unlock()
-
-	// Persist the folded state so calibration survives a restart. Best-
-	// effort: a failed write costs re-warming after the next restart, not
-	// correctness now — the in-memory map already holds the sample.
-	s.queueMu.RLock()
-	st := s.store
-	s.queueMu.RUnlock()
-	if st != nil {
-		if err := st.UpsertThroughputCorrection(store.ThroughputCorrection{
-			WorkerID: rec.workerID,
-			Axis:     rec.axis,
-			Factor:   cur.factor,
-			Samples:  cur.samples,
-		}); err != nil {
-			s.logger.Warn().Err(err).Str("worker_id", rec.workerID).Str("axis", rec.axis).Msg("persisting throughput correction")
-		}
-	}
-
-	// Calibration diagnostic: predicted vs actual wall-clock per job.
-	// raw_ratio is relative to the corrected prediction (1.0 = the live
-	// factor is dialled in); bench_ratio is the pre-clamp bench-relative
-	// sample the EWMA folds — a bench_ratio pinned at correctionClamp
-	// exposes a systematic bias the band is hiding. samples shows when
-	// the factor starts applying (>= correctionMinSamples). model_id
-	// isolates per-model error (e.g. vision jobs over-counted by the
-	// projector estimate). Debug level: on when calibrating, quiet in
-	// normal Info operation.
-	s.logger.Debug().
-		Str("worker_id", rec.workerID).
-		Str("axis", rec.axis).
-		Str("model_id", rec.modelID).
-		Float64("predicted_sec", rec.seconds).
-		Float64("actual_sec", actual).
-		Float64("raw_ratio", rawRatio).
-		Float64("bench_ratio", rawRatio*appliedCorrection).
-		Bool("clamped", clamped).
-		Float64("ewma_factor", cur.factor).
-		Int("samples", cur.samples).
-		Msg("throughput calibration sample")
-}
-
-// correctionFactor returns the live throughput multiplier for (workerID,
-// axis), or 1.0 when fewer than correctionMinSamples jobs have completed
-// (the bench prior stands alone until there's real evidence).
-func (s *Scheduler) correctionFactor(workerID, axis string) float64 {
-	if workerID == "" || axis == "" {
-		return 1
-	}
-	s.correctionMu.Lock()
-	defer s.correctionMu.Unlock()
-	cur, ok := s.throughputCorrection[workerID+"|"+axis]
-	if !ok || cur.samples < correctionMinSamples {
-		return 1
-	}
-	return cur.factor
-}
-
-// restoreCorrections seeds the in-memory correction EWMA from rows
-// persisted by earlier runs, so calibration survives a gateway restart
-// instead of re-warming from the bench prior (correctionMinSamples jobs
-// per key each run — a short queue never reopens the gate). Rows older
-// than correctionMaxAge are ignored. Called once from [Scheduler.InitQueue],
-// before the dispatcher starts.
-func (s *Scheduler) restoreCorrections(st StateStoreInterface) {
-	if st == nil {
-		return
-	}
-	rows, err := st.ListThroughputCorrections()
-	if err != nil {
-		s.logger.Warn().Err(err).Msg("restoring throughput corrections")
-		return
-	}
-	cutoff := time.Now().Add(-correctionMaxAge)
-	restored := 0
-	s.correctionMu.Lock()
-	for _, row := range rows {
-		if row.UpdatedAt.Before(cutoff) {
-			continue
-		}
-		s.throughputCorrection[row.WorkerID+"|"+row.Axis] = correctionState{factor: row.Factor, samples: row.Samples}
-		restored++
-	}
-	s.correctionMu.Unlock()
-	if restored > 0 {
-		s.logger.Info().Int("entries", restored).Msg("restored throughput corrections")
-	}
-}
-
-// ResetCorrections drops every learned correction for workerID — in
-// memory and persisted. Called when the baseline the factors are
-// relative to changes: a fresh bench replaces the throughput prior, a
-// device toggle changes the device set the prior sums across (see
-// [Scheduler.throughputForAxis]). Stale evidence would mis-scale the
-// new baseline until the EWMA re-converged, which is worse than
-// re-warming from a correct prior.
-func (s *Scheduler) ResetCorrections(workerID string) {
-	if workerID == "" {
-		return
-	}
-	prefix := workerID + "|"
-	s.correctionMu.Lock()
-	for key := range s.throughputCorrection {
-		if strings.HasPrefix(key, prefix) {
-			delete(s.throughputCorrection, key)
-		}
-	}
-	s.correctionMu.Unlock()
-
-	s.queueMu.RLock()
-	st := s.store
-	s.queueMu.RUnlock()
-	if st == nil {
-		return
-	}
-	if err := st.DeleteThroughputCorrections(workerID); err != nil {
-		s.logger.Warn().Err(err).Str("worker_id", workerID).Msg("deleting persisted throughput corrections")
-	}
 }
 
 // finishInflight removes requestID from the in-flight set. Safe to call
@@ -2369,10 +2244,20 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	}
 	wIface := s.workers.Get(workerID)
 	if wIface == nil {
-		return // worker disconnected; OnWorkerDisconnected will drain us
+		// Nothing to dispatch to. A worker that dropped while this process
+		// ran was already drained by OnWorkerDisconnected; one that was
+		// gone before startup (recovered queue) is drained by
+		// sweepOrphanQueues once its grace lapses.
+		return
 	}
 	sw, ok := wIface.(*worker.StreamWorker)
 	if !ok || !sw.Status().Online {
+		return
+	}
+	if s.benchGateHeld(workerID) {
+		// A benchmark owns this worker: nothing new goes out until it
+		// answers, so the measurement sees an otherwise-idle device set.
+		// Its release kicks the dispatcher, which comes straight back.
 		return
 	}
 	// Worker-wide capacity — the worker itself decides which of its
@@ -2381,9 +2266,9 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	// AvailableCapacity comes from the worker's last heartbeat, which lags
 	// real-time dispatch: a burst routed here across kick()-triggered passes
 	// would otherwise reuse the same free-slot count and place more jobs than
-	// the pool holds before the next heartbeat lands. Subtract the jobs MASS
-	// already has in flight on this worker so the effective capacity reflects
-	// reality now, not one heartbeat ago.
+	// the pool holds before the next heartbeat lands. effectiveCapacity nets
+	// out the dispatches that heartbeat doesn't reflect yet, so the number
+	// describes reality now, not one heartbeat ago.
 	//
 	// The max(_, 1) floor only applies when nothing is in flight yet: a
 	// worker with no model loaded reports 0 capacity, but we must still drain
@@ -2391,7 +2276,7 @@ func (s *Scheduler) drainOneWorkerQueue(ctx context.Context, name string, q queu
 	// Once jobs are in flight that floor would itself over-dispatch, so it's
 	// gated on a zero inflight count.
 	inflight := s.inflightCountForWorker(workerID)
-	capacity := sw.AvailableCapacity() - inflight
+	capacity := s.effectiveCapacity(sw)
 	batch := capacity
 	if inflight == 0 {
 		batch = max(capacity, 1)
@@ -2466,20 +2351,38 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	buf, ok := s.jobBuffers[env.RequestID]
 	s.jobsMu.Unlock()
 	if !ok {
-		// The submitter buffer is gone (post-terminal sweep raced ahead).
-		// Mark the result failed and drop both queue rows so we don't keep
-		// trying to place it.
-		s.failResult(env.RequestID, "no replay buffer for request")
-		s.cleanupRows(q, msgID, env.GlobalMsgID)
-		return
+		// Replay buffers live in memory, the queue rows don't: every job
+		// recovered from a restart arrives here without one. The durable
+		// result says whether this job is still live — a pending or
+		// processing row means it is, and it gets a fresh buffer (async
+		// pollers still get their result; a reconnecting gateway finds the
+		// new buffer through StreamChunks). A store that can't answer is
+		// treated the same way: dispatching a job twice beats failing a
+		// live one on a transient read error.
+		res, err := s.GetResult(env.RequestID)
+		switch {
+		case errors.Is(err, ErrNoResult):
+			// No result row at all — TTL-pruned or never created. Nothing
+			// left to deliver to, so drop the rows.
+			s.failResult(env.RequestID, "no replay buffer for request")
+			s.cleanupRows(q, msgID, env.GlobalMsgID)
+			return
+		case err == nil && isTerminalStatus(res.Status):
+			// Already answered (cancelled by an operator, reaped by the
+			// buffer sweep). Drop the rows and leave the outcome alone.
+			s.cleanupRows(q, msgID, env.GlobalMsgID)
+			return
+		}
+		buf = s.ensureJobBuffer(env.RequestID)
 	}
 
-	// Keep both queue rows leased while this dispatch owns them (the
+	// Keep the worker queue row leased while this dispatch owns it (the
 	// gate's evict round-trips, LoadModel, and streaming can each outlive
 	// dispatchLeaseDuration). Stopped — synchronously — on every exit
-	// path before the rows are released or deleted; the success path
-	// hands the stop to pumpWorkerChunks.
-	stopKeepAlive := s.startLeaseKeepAlive(q, msgID, env.GlobalMsgID, dispatchLeaseDuration)
+	// path before the row is released or deleted; the success path hands
+	// the stop to pumpWorkerChunks. The global anchor needs no keep-alive:
+	// it holds an [anchorLeaseDuration] lease from placement time.
+	stopKeepAlive := s.startLeaseKeepAlive(q, msgID, dispatchLeaseDuration)
 
 	// Single device-set gate: walk every resident that blocks a fresh
 	// load (target's own stale placement + other-model overlaps), bounce
@@ -2492,6 +2395,18 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	blockers := residentsBlockingLoad(sw, env.ModelID, predicted)
 	needsLoad := env.ModelID != "" && (!workerHasModel(sw, env.ModelID) || containsModelID(blockers, env.ModelID))
 
+	// The measured row is what makes this worker a candidate at all, and
+	// it carries the memory figures the reservation is sized from. A row
+	// that vanished between placement and dispatch (model removed, files
+	// changed) bounces the row back for re-placement.
+	row, hasRow := s.modelBenchmark(sw, env)
+	if !hasRow {
+		s.logger.Debug().Str("worker", sw.ID()).Str("model_id", env.ModelID).Msg("no usable model benchmark at dispatch; re-placing")
+		stopKeepAlive()
+		s.releaseLeaseForRetry(q, msgID, env.RequestID)
+		return
+	}
+
 	var reservedBytes int64
 	if needsLoad {
 		// Reserve the projected post-grow memory until terminal frame so
@@ -2500,10 +2415,7 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 		// pool-size, not just base: a concurrent cold-load to the same
 		// worker would otherwise admit against slack that's about to be
 		// consumed by pool growth.
-		reservedBytes = s.projectedLoadBytes(sw, env)
-		if reservedBytes <= 0 {
-			reservedBytes = env.BaseLoadBytes
-		}
+		reservedBytes = s.projectedLoadBytes(sw, env, row)
 	}
 
 	if len(blockers) > 0 {
@@ -2549,7 +2461,13 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 			ModelID:   env.ModelID,
 			Files:     env.Files,
 			LoadHints: env.LoadHints,
-			Source:    env.Source,
+			// The pool is pinned to what the measurement says fits and
+			// keeps latency inside the budget. Pinning also turns the
+			// worker's own headroom gate off, so the same row's memory
+			// figures (via the reservation above) are the only thing
+			// standing between this load and an OOM.
+			MaxConcurrent: int32(s.plannedPoolSize(sw, env, row)),
+			Source:        env.Source,
 		})
 		if err != nil {
 			s.logger.Warn().Err(err).Str("worker", sw.ID()).Str("model_id", env.ModelID).Uint8("attempt", env.Attempts+1).Msg("load-on-demand at dispatch")
@@ -2577,25 +2495,15 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	// latency priced at placement, but any load has already completed by
 	// this point (the inflight clock starts after LoadModel), so keeping
 	// it would (a) overstate the worker's remaining busy-time in scoring
-	// and (b) teach the correction EWMA that cold-loading workers beat
-	// their bench — predicted included load seconds the measured
-	// wall-clock never sees. The axis recorded is the one the throughput
-	// lookup actually used (post-fallback) so the correction sample lands
-	// on the key scoring reads. taskSec 0 (unbenched axis mid-toggle)
-	// disables calibration for this job — observeThroughput skips
-	// non-positive predictions.
+	// and (b) misprice every later scoring pass against a busy-time the
+	// worker never spends computing.
 	//
 	// startInflight returns false when a cancel landed during the load
 	// window: honour it here, before the job ever reaches the worker —
 	// finalize as cancelled and drop both rows, mirroring the terminal-
 	// cancel path, rather than dispatching work the operator abandoned.
-	taskSec := 0.0
-	usedAxis := env.CostAxis
-	if tput, axis, ok := s.effectiveThroughput(sw, env.CostAxis, s.runtimeDefaultAxis(env.RuntimeName)); ok && tput > 0 {
-		taskSec = env.Cost / tput
-		usedAxis = axis
-	}
-	if !s.startInflight(queueName, env.RequestID, env.ModelID, env.RuntimeName, usedAxis, taskSec, reservedBytes) {
+	taskSec := env.Cost / row.UnitsPerSec
+	if !s.startInflight(queueName, env.RequestID, env.ModelID, env.RuntimeName, taskSec, reservedBytes) {
 		s.logger.Info().Str("worker", sw.ID()).Str("request_id", env.RequestID).Msg("cancel landed during dispatch; aborting before assign")
 		metrics.JobDispatched(env.RuntimeName, "cancelled")
 		s.failResult(env.RequestID, "cancelled by operator")
@@ -2629,12 +2537,14 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 }
 
 // startLeaseKeepAlive launches a goroutine that re-extends the
-// worker-queue row's lease — and, when globalMsgID is set, the global
-// durability anchor's — every leaseDur/3 for as long as the dispatch
-// owns the rows. Nothing else extends these leases: without the
-// keep-alive a cold LoadModel or a long prompt-processing gap would
-// outlive the initial window and expose a running job's rows to
-// re-dispatch and stealing.
+// worker-queue row's lease every leaseDur/3 for as long as the dispatch
+// owns the row. Nothing else extends it: without the keep-alive a cold
+// LoadModel or a long prompt-processing gap would outlive the initial
+// window and expose a running job's row to re-dispatch and stealing.
+//
+// The global anchor is deliberately left alone — it was leased for
+// [anchorLeaseDuration] at placement, which already outlasts any
+// dispatch; extending it to now+leaseDur would shorten it.
 //
 // The tick is jittered ±10% per job: every in-flight job runs its own
 // keep-alive, and unjittered they pile their Extends into the same instant
@@ -2643,15 +2553,11 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 //
 // The returned stop function is SYNCHRONOUS and idempotent: it cancels
 // the goroutine and waits for it to exit, so a caller about to release
-// or delete the rows knows no further Extend can fire afterwards — an
+// or delete the row knows no further Extend can fire afterwards — an
 // Extend racing a ReleaseLease would re-hide the released row for up to
 // a full lease window. Extend failures are logged at debug and retried
 // next tick: the row may legitimately be gone already (terminal race).
-func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.MessageID, globalMsgID string, leaseDur time.Duration) (stop func()) {
-	s.queueMu.RLock()
-	globalQ := s.globalQ
-	s.queueMu.RUnlock()
-
+func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.MessageID, leaseDur time.Duration) (stop func()) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
@@ -2664,14 +2570,8 @@ func (s *Scheduler) startLeaseKeepAlive(q queue.QueueInterface, msgID queue.Mess
 				return
 			case <-ticker.C:
 			}
-			ctx := context.Background()
-			if err := q.Extend(ctx, msgID, leaseDur); err != nil {
+			if err := q.Extend(context.Background(), msgID, leaseDur); err != nil {
 				s.logger.Debug().Err(err).Str("message_id", string(msgID)).Msg("extending worker row lease")
-			}
-			if globalQ != nil && globalMsgID != "" {
-				if err := globalQ.Extend(ctx, queue.MessageID(globalMsgID), leaseDur); err != nil {
-					s.logger.Debug().Err(err).Str("global_msg_id", globalMsgID).Msg("extending global anchor lease")
-				}
 			}
 		}
 	}()
@@ -2783,6 +2683,10 @@ func (s *Scheduler) retryAfterLoadFailure(q queue.QueueInterface, msgID queue.Me
 // path: orphan request, load failure, AssignJob failure. Best-effort —
 // errors are logged but don't block the failure being recorded.
 func (s *Scheduler) cleanupRows(q queue.QueueInterface, workerMsgID queue.MessageID, globalMsgID string) {
+	// A job that dies before its stream starts still frees what it took
+	// (a batch slot, and an inflight record on the assign-failure path).
+	// Row deletion doesn't signal the queue pool, so say so explicitly.
+	defer s.kick()
 	s.queueMu.RLock()
 	globalQ := s.globalQ
 	s.queueMu.RUnlock()
@@ -2854,12 +2758,12 @@ func (s *Scheduler) pumpWorkerChunks(sw *worker.StreamWorker, q queue.QueueInter
 	// emitted terminal); runtime label is for metrics.
 	wasCancelled := s.isInflightCancelled(requestID)
 	runtimeName := s.inflightRuntime(requestID)
-	// Feed the throughput correction loop on clean completions only —
-	// before finishInflight removes the record we read from.
-	if terminal && errText == "" && !wasCancelled {
-		s.observeThroughput(requestID)
-	}
 	s.finishInflight(requestID)
+	// The slot this job held is free now, and nothing else says so: row
+	// deletion doesn't signal the queue pool. One kick here covers every
+	// exit below, so the next job goes out immediately instead of waiting
+	// for the dispatcher's slow ticker.
+	s.kick()
 
 	if terminal {
 		if errText != "" {
@@ -2998,7 +2902,7 @@ func (s *Scheduler) stealWithinRuntime(ctx context.Context, queues []workerQueue
 		if idle.depth > 0 {
 			continue
 		}
-		if idle.t.worker.AvailableCapacity() <= 0 {
+		if s.effectiveCapacity(idle.t.worker) <= 0 {
 			continue
 		}
 		// Find the deepest peer whose head row this idle worker can serve.
@@ -3037,15 +2941,16 @@ func (s *Scheduler) stealWithinRuntime(ctx context.Context, queues []workerQueue
 		}
 		// The stealing worker must actually be able to serve the row:
 		// fetchable files (URL-less artifacts need a loopback worker),
-		// memory fit, and a benched throughput axis. Depth + capacity
+		// memory fit, and a concluded, usable bench. Depth + capacity
 		// alone would steal onto a worker whose dispatch is guaranteed
 		// to fail, burning the envelope's load-attempt budget. Same
 		// generic predicates the picker scores with — nothing
 		// runtime-specific.
-		if !s.eligibleWorker(idle.t.worker, env) {
+		row, ok := s.modelBenchmark(idle.t.worker, env)
+		if !ok {
 			continue
 		}
-		if _, _, ok := s.effectiveThroughput(idle.t.worker, env.CostAxis, s.runtimeDefaultAxis(env.RuntimeName)); !ok {
+		if !s.eligibleWorker(idle.t.worker, env, row) {
 			continue
 		}
 		// Residency is no longer a hard gate — if the idle worker doesn't
@@ -3111,9 +3016,15 @@ func (s *Scheduler) pendingResult(requestID string) {
 	}
 }
 
+// isTerminalStatus reports whether a result status is final — the job has
+// an answer (or a failure) recorded and must not be overwritten.
+func isTerminalStatus(st queue.ResultStatus) bool {
+	return st == queue.ResultStatusDone || st == queue.ResultStatusError
+}
+
 // resultIsTerminal reports whether requestID's result already carries a
-// terminal status (done or error). Missing rows and store errors read as
-// non-terminal so the caller falls back to its normal (requeue) path.
+// terminal status. Missing rows and store errors read as non-terminal so
+// the caller falls back to its normal (requeue) path.
 func (s *Scheduler) resultIsTerminal(requestID string) bool {
 	s.queueMu.RLock()
 	results := s.results
@@ -3126,7 +3037,7 @@ func (s *Scheduler) resultIsTerminal(requestID string) bool {
 		s.logger.Warn().Err(err).Str("request_id", requestID).Msg("checking result status on drain")
 		return false
 	}
-	return r != nil && (r.Status == queue.ResultStatusDone || r.Status == queue.ResultStatusError)
+	return r != nil && isTerminalStatus(r.Status)
 }
 
 func (s *Scheduler) failResult(requestID, errText string) {
@@ -3226,81 +3137,7 @@ func residentsBlockingLoad(w *worker.StreamWorker, targetModelID string, predict
 	return out
 }
 
-// --- Scoring throughput ---
-
-// effectiveThroughput returns the worker's realised throughput on the
-// requested axis and the axis name actually used (== axis on exact
-// match, == defaultAxis on fallback). Returns (0, "", false) when
-// neither the requested axis nor the fallback is benched on any of the
-// worker's enabled devices.
-//
-// Lookup order: try axis exact; if no device advertises it, try
-// defaultAxis (the runtime's gateway-declared required axis). The
-// fallback lets MASS still place jobs on workers that haven't been
-// upgraded to bench every axis a gateway might request. Callers that
-// record predictions must key them by usedAxis — the correction EWMA
-// is folded in here per used axis, so a sample filed under the
-// requested-but-unbenched axis would never be read back.
-//
-// Within an axis, throughput sums across the device set the worker will
-// use for incoming work — see [Scheduler.deviceSet].
-func (s *Scheduler) effectiveThroughput(w *worker.StreamWorker, axis, defaultAxis string) (val float64, usedAxis string, ok bool) {
-	if axis != "" {
-		if v := s.throughputForAxis(w, axis); v > 0 {
-			return v * s.correctionFactor(w.ID(), axis), axis, true
-		}
-	}
-	if defaultAxis != "" && defaultAxis != axis {
-		if v := s.throughputForAxis(w, defaultAxis); v > 0 {
-			return v * s.correctionFactor(w.ID(), defaultAxis), defaultAxis, true
-		}
-	}
-	return 0, "", false
-}
-
-// throughputForAxis predicts the worker's compute throughput on axis
-// across the device set it would use for incoming work.
-//
-// Model: llama.cpp's tensor-split assigns each layer's matmul slice to
-// every participating device, then synchronises before the next layer.
-// Wall-clock per layer is gated by the slowest device, so N devices
-// deliver N × min(rates), not Σ rates. Homogeneous pairs collapse to
-// "sum" cleanly (N × min == Σ); heterogeneous pairs honestly reflect
-// the slowest-link gating that an operator observes when they enable
-// a weak GPU and see throughput drop.
-//
-// An enabled-but-unbenched device is treated as "not yet measurable"
-// and skipped — including it as 0 would zero the entire worker until
-// the next bench cycle. The count (N) only includes benched devices,
-// so the result is N_benched × min(benched_rates).
-//
-// Returns 0 when no device in the predicted set has a positive number
-// on axis (unschedulable; eligibility gate surfaces it).
-func (s *Scheduler) throughputForAxis(w *worker.StreamWorker, axis string) float64 {
-	wID := w.ID()
-	var (
-		minRate  float64
-		nBenched int
-	)
-	for _, devID := range s.deviceSet(w) {
-		row, ok := s.getBenchmark(wID, devID)
-		if !ok {
-			continue
-		}
-		t := row.Throughput[axis]
-		if t <= 0 {
-			continue
-		}
-		if nBenched == 0 || t < minRate {
-			minRate = t
-		}
-		nBenched++
-	}
-	if nBenched == 0 {
-		return 0
-	}
-	return float64(nBenched) * minRate
-}
+// --- Load-latency throughput ---
 
 // effectiveLoadThroughput returns the host→device upload bandwidth in
 // bytes/sec we expect w to deliver when loading a model. This is the
@@ -3369,22 +3206,19 @@ func (s *Scheduler) deviceSet(w *worker.StreamWorker) []string {
 	return nil
 }
 
-// eligibleWorker reports whether w can host env. Three predicates today:
-// at least one usable device, file reachability (URL-less load artifacts
-// require a loopback worker), and (when env.BaseLoadBytes > 0) enough
-// free memory across the predicted device set to fit the load.
-// Composable shape so future filters (capability checks, etc.) slot
-// in here.
-func (s *Scheduler) eligibleWorker(w *worker.StreamWorker, env queue.Envelope) bool {
-	if len(s.deviceSet(w)) == 0 {
-		return false
-	}
+// eligibleWorker reports whether w can host env, given the measured row
+// that already made it a candidate. Two predicates on top of the row:
+// file reachability (URL-less load artifacts require a loopback worker)
+// and enough free memory across the predicted device set to fit the
+// load's base allocation. Composable shape so future filters
+// (capability checks, etc.) slot in here.
+func (s *Scheduler) eligibleWorker(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) bool {
 	if filesRequireLoopback(env.Files) && !w.IsLoopback() {
 		s.logger.Debug().Str("worker_id", w.ID()).Str("model_id", env.ModelID).
 			Msg("excluding non-loopback worker: envelope carries URL-less load files it cannot fetch")
 		return false
 	}
-	return s.memoryEligible(w, env)
+	return s.memoryEligible(w, env, row)
 }
 
 // filesRequireLoopback reports whether files contains a load artifact only
@@ -3403,52 +3237,28 @@ func filesRequireLoopback(files []*workerpb.ModelFile) bool {
 }
 
 // memoryEligible reports whether w has enough free memory across its
-// predicted device set to fit env's load. Returns true when:
+// predicted device set to fit the load's measured base allocation.
+// Returns true when:
 //
-//   - env.BaseLoadBytes is 0 (gateway couldn't estimate — fall back
-//     to pay-on-failure for that submit).
-//   - The model is already resident on w (no new load → no new
-//     memory pressure).
-//   - Sum of free bytes across the device set ≥ BaseLoadBytes. We
-//     gate on the minimum (base, i.e. pool=1) rather than the
-//     projected total so a tight-fitting model still gets a chance
-//     to load: the projection caps the pool at whatever fits.
+//   - The model is already resident on w (no new load → no new memory
+//     pressure).
+//   - Sum of free bytes across the device set >= row.BaseBytes. We gate
+//     on the minimum (pool = 1) rather than the projected total so a
+//     tight-fitting model still gets a chance to load: the pool sizing
+//     caps concurrency at whatever fits.
 //
 // "Free" subtracts both heartbeat-reported used memory and MASS's
 // in-flight reservation ledger so two concurrent cold loads to the
 // same worker don't both pass the gate before the first one's
 // memory shows up in stats.
-func (s *Scheduler) memoryEligible(w *worker.StreamWorker, env queue.Envelope) bool {
-	if env.BaseLoadBytes <= 0 {
-		return true
+func (s *Scheduler) memoryEligible(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) bool {
+	if row.BaseBytes <= 0 {
+		return true // measured without a memory dimension
 	}
 	if env.ModelID != "" && workerHasModel(w, env.ModelID) {
 		return true
 	}
-	return s.freeMemoryBytes(w) >= env.BaseLoadBytes
-}
-
-// feasibleByAnyWorker reports whether any online worker for env's
-// runtime has total hardware memory ≥ env.BaseLoadBytes across its
-// default device set. Submit calls this once before persisting so the
-// operator gets fast feedback when the fleet is fundamentally too
-// small for the requested model — no silent accumulation of stuck
-// rows on global.
-//
-// Returns true when env.BaseLoadBytes is 0 (unknown — pass) or when
-// at least one worker has the hardware to ever host the load,
-// regardless of current memory pressure. The dispatch-time check
-// (memoryEligible) handles "fits eventually but not right now."
-func (s *Scheduler) feasibleByAnyWorker(env queue.Envelope) bool {
-	if env.BaseLoadBytes <= 0 {
-		return true
-	}
-	for _, w := range s.WorkersForRuntime(env.RuntimeName) {
-		if s.totalMemoryBytes(w) >= env.BaseLoadBytes {
-			return true
-		}
-	}
-	return false
+	return s.freeMemoryBytes(w) >= row.BaseBytes
 }
 
 // defaultHeadroomPct mirrors the worker's compiled-in
@@ -3457,12 +3267,10 @@ func (s *Scheduler) feasibleByAnyWorker(env queue.Envelope) bool {
 // the gateway supplied a headroom value.
 const defaultHeadroomPct int32 = 75
 
-// effectiveHeadroomPct resolves the headroom watermark used to project
-// w's pool growth, mirroring the worker's own precedence at load time
-// (`hints.has_vram_headroom_pct() ? hint : flag`):
+// effectiveHeadroomPct resolves the device-memory watermark MASS keeps
+// free when it sizes a load's context pool:
 //
-//  1. env.HeadroomPct — the operator's explicit per-load override; the
-//     worker applies it over its own flag, so the projection must too.
+//  1. env.HeadroomPct — the operator's explicit per-load override.
 //  2. The worker's registration-reported --vram-headroom-pct — the
 //     per-worker truth when no override rides the load; the flag is
 //     operator-configurable, so any assumed constant is wrong for a
@@ -3480,67 +3288,50 @@ func effectiveHeadroomPct(w *worker.StreamWorker, env queue.Envelope) int32 {
 	return defaultHeadroomPct
 }
 
-// projectedLoadBytes returns the gateway-aware prediction of total
-// device memory the load will consume on w. Combines the gateway's
-// (base, per_slot) estimate and the effective headroom (see
-// effectiveHeadroomPct) with the worker's current free memory to
-// estimate the post-grow pool size:
+// plannedPoolSize returns how many concurrent slots MASS wants the
+// worker's context pool for this model to hold. Two rules, both from
+// measurement:
 //
-//	pool       = floor((free − base) × headroom / 100 / per_slot)
-//	load_bytes = base + pool × per_slot
+//   - Latency: a request arriving at a full pool waits for one slot to
+//     free, so the pool is sized to work through a full round within
+//     [config.Config.EffectiveBenchBudgetSeconds] of measured decodes,
+//     capped by [config.Config.EffectiveBenchSlotsCap].
+//   - Memory: the row's base_bytes is the load at pool size 1 and
+//     per_slot_bytes is the cost of one more, so the extra slots are
+//     bounded by what fits under the worker's headroom watermark.
 //
-// Edge cases:
-//   - base == 0           → 0 (gateway unknown — caller treats as no
-//     prediction; latency math falls back to file bytes).
-//   - per_slot <= 0       → load_bytes = base (no concurrency
-//     dimension; pool collapses to a single implicit slot folded
-//     into base by the gateway).
-//   - free <= base        → load_bytes = base (worker can't grow;
-//     the per-slot term would be negative).
-//
-// Returns base when per_slot > 0 but no additional slot fits — the
-// load still happens with exactly the base allocation. Returns 0
-// only when base itself is 0 (the gateway has no estimate).
-func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelope) int64 {
-	if env.BaseLoadBytes <= 0 {
-		return 0
+// Always at least 1 — a pool of zero slots can't serve anything.
+func (s *Scheduler) plannedPoolSize(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) int {
+	slotsCap := s.cfg.EffectiveBenchSlotsCap()
+	slots := slotsCap
+	if row.GraphSecs > 0 {
+		slots = int(s.cfg.EffectiveBenchBudgetSeconds() / row.GraphSecs)
 	}
-	if env.PerSlotBytes <= 0 {
-		return env.BaseLoadBytes
+	slots = min(max(slots, 1), slotsCap)
+	if row.PerSlotBytes <= 0 || row.BaseBytes <= 0 {
+		return slots
 	}
-	headroom := effectiveHeadroomPct(w, env)
-	free := s.freeMemoryBytes(w)
-	available := (free - env.BaseLoadBytes) * int64(headroom) / 100
-	if available <= 0 {
-		return env.BaseLoadBytes
+	headroom := (s.freeMemoryBytes(w) - row.BaseBytes) * int64(effectiveHeadroomPct(w, env)) / 100
+	if headroom <= 0 {
+		return 1
 	}
-	pool := available / env.PerSlotBytes
-	return env.BaseLoadBytes + pool*env.PerSlotBytes
+	return min(slots, 1+int(headroom/row.PerSlotBytes))
 }
 
-// totalMemoryBytes returns the worker's total memory (in bytes) across
-// its current enabled device set. Uses the static TotalMemoryMB
-// reported at registration time — the hardware ceiling that never
-// changes.
-func (s *Scheduler) totalMemoryBytes(w *worker.StreamWorker) int64 {
-	set := s.deviceSet(w)
-	if len(set) == 0 {
+// projectedLoadBytes returns the total device memory the load will
+// consume on w: the measured base (which already covers the first slot)
+// plus every additional slot the planned pool holds.
+//
+// Returns 0 when the row records no memory dimension — the caller then
+// falls back to the artifacts' byte count for load-latency math.
+func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) int64 {
+	if row.BaseBytes <= 0 {
 		return 0
 	}
-	byID := make(map[string]int, len(set))
-	for _, id := range set {
-		byID[id] = 0
+	if row.PerSlotBytes <= 0 {
+		return row.BaseBytes
 	}
-	for _, d := range w.Devices() {
-		if _, ok := byID[d.ID]; ok {
-			byID[d.ID] = d.TotalMemoryMB
-		}
-	}
-	var total int64
-	for _, mb := range byID {
-		total += int64(mb) * 1024 * 1024
-	}
-	return total
+	return row.BaseBytes + int64(s.plannedPoolSize(w, env, row)-1)*row.PerSlotBytes
 }
 
 // freeMemoryBytes returns the worker's free memory (in bytes) across
@@ -3596,13 +3387,11 @@ func (s *Scheduler) getMemoryReservation(workerID string) int64 {
 
 // --- Bench data (read by pickWorkerQueue + workerIsSchedulable) ---
 
-// getBenchmark returns the bench row for (workerID, deviceID), caching
-// hits in-process so the hot scoring path doesn't issue one SQLite
-// read per (candidate × device × envelope). A miss in the store is
-// recorded as a zero-value row so repeat misses stay cheap; ok is
-// false in that case so callers can branch on "no bench yet." A row
-// counts as present when its Throughput map has at least one positive
-// entry — the runtime-private axes the worker actually measured.
+// getBenchmark returns the device bench row for (workerID, deviceID),
+// caching hits in-process so the hot path doesn't issue one SQLite read
+// per (candidate × device). A miss in the store is recorded as a
+// zero-value row so repeat misses stay cheap; ok is false in that case
+// so callers can branch on "no bench yet."
 func (s *Scheduler) getBenchmark(workerID, deviceID string) (store.BenchmarkRow, bool) {
 	s.benchMu.RLock()
 	if dev, has := s.benchCache[workerID]; has {
@@ -3642,15 +3431,11 @@ func (s *Scheduler) getBenchmark(workerID, deviceID string) (store.BenchmarkRow,
 	return row, benchPresent(row)
 }
 
-// benchPresent reports whether a bench row carries any usable throughput
-// measurement — at least one axis with a positive number.
+// benchPresent reports whether a device bench row was ever recorded.
+// The row's numbers are display + load-latency only; its existence is
+// what tells the scheduler the worker has been surveyed at all.
 func benchPresent(row store.BenchmarkRow) bool {
-	for _, v := range row.Throughput {
-		if v > 0 {
-			return true
-		}
-	}
-	return false
+	return row.DeviceID != ""
 }
 
 // InvalidateBench drops the cached row for (workerID, deviceID). Call
@@ -3665,9 +3450,6 @@ func (s *Scheduler) InvalidateBench(workerID, deviceID string) {
 		}
 	}
 	s.benchMu.Unlock()
-	// The fresh bench replaces the prior the correction EWMA measured
-	// against — learned factors don't transfer onto the new baseline.
-	s.ResetCorrections(workerID)
 }
 
 // InvalidateWorkerBench drops every cached row for workerID. Useful

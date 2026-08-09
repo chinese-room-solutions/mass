@@ -133,9 +133,6 @@ func TestEffectiveLoadThroughput_Branches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s, st := newTestScheduler(t)
 			for _, b := range tt.bench {
-				if b.Throughput == nil {
-					b.Throughput = map[string]float64{"q4k_matvec": 100}
-				}
 				b.BenchedAt = time.Now()
 				require.NoError(t, st.SaveBenchmark(b))
 			}
@@ -260,55 +257,6 @@ func TestLoadLatencyForCand_Branches(t *testing.T) {
 			}
 			got := loadLatencyForCand(w, queueName, tt.env, tt.tailSec, tt.loadBytes, tt.loadBytesSec, s)
 			require.InDelta(t, tt.want, got, 1e-9)
-		})
-	}
-}
-
-// runtimeDefaultAxis is the bridge between MASS's scheduler and each
-// gateway's declared cost axis. Three states matter: unset (no
-// gateway plumbed), set with empty result (unknown runtime), and set
-// with a real axis name.
-func TestRuntimeDefaultAxis(t *testing.T) {
-	tests := []struct {
-		name string
-		fn   RuntimeDefaultAxisFn
-		want string
-	}{
-		{
-			// Default state — no runtimes registered yet. tailModel
-			// callers must accept an empty string; effectiveThroughput
-			// treats it as "no fallback axis."
-			name: "unset returns empty",
-			fn:   nil,
-			want: "",
-		},
-		{
-			// Function plumbed but the named runtime isn't installed.
-			// Same scheduling consequence as "unset" for this runtime.
-			name: "unknown runtime → empty",
-			fn: func(rn string) string {
-				if rn == "llama-cpp" {
-					return "q4k_matvec"
-				}
-				return ""
-			},
-			want: "",
-		},
-		{
-			// Function returns a real axis — the happy path.
-			name: "known runtime → axis name",
-			fn: func(rn string) string {
-				return "q4k_matvec"
-			},
-			want: "q4k_matvec",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s, _ := newTestScheduler(t)
-			s.SetRuntimeDefaultAxisFn(tt.fn)
-			require.Equal(t, tt.want, s.runtimeDefaultAxis("other-runtime"))
 		})
 	}
 }

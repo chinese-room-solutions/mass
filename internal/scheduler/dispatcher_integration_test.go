@@ -10,6 +10,7 @@ import (
 	"time"
 
 	workerpb "github.com/chinese-room-solutions/mass-proto/gen/go/worker"
+	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/queue"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/worker"
@@ -47,7 +48,7 @@ func TestDispatcher_TailAndInflightConservation_AcrossManyTicks(t *testing.T) {
 
 	// Wrap the store so we can count tail mutations and watch for
 	// negative values. The wrapper forwards every other call to st.
-	tracker := &tailTracker{StateStoreInterface: st}
+	tracker := &tailTracker{StateStoreInterface: defaultBenchStore{Store: st, unitsPerSec: defaultTestUnitsPerSec}}
 	s.store = tracker
 
 	// Two workers with different power so the dispatcher does
@@ -63,7 +64,7 @@ func TestDispatcher_TailAndInflightConservation_AcrossManyTicks(t *testing.T) {
 	for _, wID := range workerIDs {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": gflopsByID[wID]}, BenchedAt: time.Now(),
+			Flops: gflopsByID[wID], BenchedAt: time.Now(),
 		}))
 		info := &wInfo{assign: make(chan string, total)}
 		w := worker.NewFakeStreamWorker(wID, runtimeName,
@@ -96,7 +97,6 @@ func TestDispatcher_TailAndInflightConservation_AcrossManyTicks(t *testing.T) {
 			ModelID:     modelID,
 			Payload:     []byte("p"),
 			Cost:        cost,
-			CostAxis:    "q4k_matvec",
 		})
 		require.NoError(t, err, "submit %d", i)
 		requestIDs = append(requestIDs, rid)
@@ -212,7 +212,7 @@ func TestDispatcher_BurstRespectsPoolSize(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	assign := make(chan string, burst)
@@ -235,7 +235,7 @@ func TestDispatcher_BurstRespectsPoolSize(t *testing.T) {
 	for range burst {
 		_, err := s.Submit(context.Background(), SubmitRequest{
 			RuntimeName: runtimeName, ModelID: modelID,
-			Payload: []byte("p"), Cost: 100, CostAxis: "q4k_matvec",
+			Payload: []byte("p"), Cost: 100,
 		})
 		require.NoError(t, err)
 	}
@@ -265,6 +265,159 @@ func TestDispatcher_BurstRespectsPoolSize(t *testing.T) {
 	inflight := len(s.inflightByRequest)
 	s.inflightMu.Unlock()
 	require.Equal(t, poolSize, inflight, "inflight count must equal pool_size")
+}
+
+// Once a heartbeat reports the running jobs, MASS must not debit them a
+// second time. The worker's available_capacity is already net of its
+// active jobs, so subtracting the full in-flight count on top of it made a
+// pool of N dispatch at ~N/2 and stalled the queue until in-flight hit 0.
+func TestDispatcher_SyncedHeartbeatDoesNotDoubleCountInflight(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+	const poolSize = 2
+
+	s, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Flops: 100, BenchedAt: time.Now(),
+	}))
+
+	assign := make(chan string, 8)
+	w := worker.NewFakeStreamWorker("w1", runtimeName,
+		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+	w.SetFakeCapacity(poolSize)
+	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: poolSize}})
+	w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assign <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	for range poolSize + 1 {
+		_, err := s.Submit(context.Background(), SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID,
+			Payload: []byte("p"), Cost: 100,
+		})
+		require.NoError(t, err)
+	}
+
+	drive := func() []string {
+		var got []string
+		for range 5 {
+			s.dispatchPass(context.Background())
+			waitDispatchIdle(t, s)
+			for {
+				select {
+				case jobID := <-assign:
+					got = append(got, jobID)
+					continue
+				default:
+				}
+				break
+			}
+		}
+		return got
+	}
+
+	running := drive()
+	require.Len(t, running, poolSize, "the pool must fill and stop")
+
+	// The next heartbeat catches up: the worker reports both jobs active
+	// and no free slot. Still saturated — nothing more may dispatch.
+	w.SetFakeCapacity(0)
+	w.SetFakeActiveJobs(poolSize)
+	require.Empty(t, drive(), "a saturated worker must not receive more jobs")
+
+	// One job finishes and the heartbeat reports the freed slot alongside
+	// the one job still running. The queued job must go out now: the
+	// remaining job is already accounted for in available_capacity.
+	w.DeliverJobChunk(running[0], &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("ok"),
+	})
+	pollUntilEqual(t, poolSize-1, func() int {
+		return s.inflightCountForWorker("w1")
+	}, "the completed job must clear from the inflight map")
+	w.SetFakeCapacity(1)
+	w.SetFakeActiveJobs(poolSize - 1)
+
+	require.Len(t, drive(), 1, "the freed slot must dispatch the queued job")
+}
+
+// A terminal frame must wake the dispatcher. Deleting the job's rows
+// doesn't signal the queue pool, so the job queued behind it used to wait
+// out the loop's 2s ticker — dead time between every pair of jobs on a
+// pool_size=1 worker. Driven through the real loop (Start), since the
+// gap is in the loop's wake-up sources.
+func TestDispatcher_JobTerminalWakesDispatcher(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+
+	s, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Flops: 100, BenchedAt: time.Now(),
+	}))
+
+	assign := make(chan string, 2)
+	w := worker.NewFakeStreamWorker("w1", runtimeName,
+		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+	w.SetFakeCapacity(1)
+	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assign <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s.Start(ctx)
+
+	for range 2 {
+		_, err := s.Submit(ctx, SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID,
+			Payload: []byte("p"), Cost: 100,
+		})
+		require.NoError(t, err)
+	}
+
+	var first string
+	select {
+	case first = <-assign:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first job never reached the worker")
+	}
+
+	// The single slot is taken: the second job waits on the worker queue.
+	select {
+	case <-assign:
+		t.Fatal("a pool of 1 must not run two jobs at once")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Finish the first job and touch nothing else — no kick, no
+	// dispatchPass. The second assign has to land well inside the
+	// ticker interval.
+	w.DeliverJobChunk(first, &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("ok"),
+	})
+	select {
+	case <-assign:
+	case <-time.After(time.Second):
+		t.Fatal("the freed slot waited for the dispatcher ticker instead of the completion")
+	}
 }
 
 // tailTracker wraps a StateStoreInterface and counts every tail
@@ -343,7 +496,7 @@ func TestDispatcher_WorkerDisconnectMidBurst_RedistributesAndCompletes(t *testin
 	for _, wID := range []string{"w-lost", "w-survivor"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 		info := &wInfo{assign: make(chan string, total)}
 		w := worker.NewFakeStreamWorker(wID, runtimeName,
@@ -371,7 +524,7 @@ func TestDispatcher_WorkerDisconnectMidBurst_RedistributesAndCompletes(t *testin
 			RuntimeName: runtimeName,
 			ModelID:     modelID,
 			Payload:     []byte("p"),
-			Cost:        100, CostAxis: "q4k_matvec",
+			Cost:        100,
 		})
 		require.NoError(t, err)
 		requestIDs = append(requestIDs, rid)
@@ -501,7 +654,7 @@ func TestEvictIdleOnce_RacesSubmitForSameModel_NoBookkeepingLeak(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var (
@@ -570,9 +723,9 @@ func TestEvictIdleOnce_RacesSubmitForSameModel_NoBookkeepingLeak(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
 	})
 	require.NoError(t, err)
 
@@ -660,7 +813,7 @@ func TestDispatcher_AssignJobFailureReleasesInflight(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	w := worker.NewFakeStreamWorker("w1", "llama-cpp",
@@ -679,7 +832,7 @@ func TestDispatcher_AssignJobFailureReleasesInflight(t *testing.T) {
 		RuntimeName: "llama-cpp",
 		ModelID:     "m-1",
 		Payload:     []byte("p"),
-		Cost:        750, CostAxis: "q4k_matvec",
+		Cost:        750,
 	})
 	require.NoError(t, err)
 
@@ -711,7 +864,6 @@ func TestAttemptSteals_Rebalances(t *testing.T) {
 				ModelID:     modelID,
 				Payload:     []byte("p"),
 				Cost:        100,
-				CostAxis:    "q4k_matvec",
 			})
 			require.NoError(t, err)
 		}
@@ -754,7 +906,7 @@ func TestAttemptSteals_Rebalances(t *testing.T) {
 			for _, wID := range []string{"busy", "idle"} {
 				require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 					WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-					Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+					Flops: 100, BenchedAt: time.Now(),
 				}))
 			}
 
@@ -816,7 +968,7 @@ func TestAttemptSteals_MultipleIdlesContendForSamePeer(t *testing.T) {
 	for _, wID := range []string{"busy", "idle1", "idle2", "idle3"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 
@@ -852,7 +1004,6 @@ func TestAttemptSteals_MultipleIdlesContendForSamePeer(t *testing.T) {
 			ModelID:     modelID,
 			Payload:     []byte("p"),
 			Cost:        100,
-			CostAxis:    "q4k_matvec",
 		})
 		require.NoError(t, err)
 	}
@@ -883,7 +1034,7 @@ func TestAttemptSteals_IdleSkippedWhenCapacityZero(t *testing.T) {
 	for _, wID := range []string{"busy", "saturated"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 
@@ -915,7 +1066,6 @@ func TestAttemptSteals_IdleSkippedWhenCapacityZero(t *testing.T) {
 			ModelID:     modelID,
 			Payload:     []byte("p"),
 			Cost:        100,
-			CostAxis:    "q4k_matvec",
 		})
 		require.NoError(t, err)
 	}
@@ -941,7 +1091,7 @@ func TestAttemptSteals_TransfersTailBookkeeping(t *testing.T) {
 	for _, wID := range []string{"busy", "idle"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 
@@ -972,7 +1122,6 @@ func TestAttemptSteals_TransfersTailBookkeeping(t *testing.T) {
 			ModelID:       modelID,
 			Payload:       []byte("p"),
 			Cost:          100,
-			CostAxis:      "q4k_matvec",
 			QueuedSeconds: stolenQSec,
 		})
 		require.NoError(t, err)
@@ -1003,7 +1152,7 @@ func TestAttemptSteals_TransfersTailBookkeeping(t *testing.T) {
 // Work stealing must respect the same eligibility predicates the picker
 // scores with: an idle worker that cannot fetch the envelope's files
 // (URL-less local-path artifact on a non-loopback worker) or has no
-// benched throughput axis for it must not steal — the dispatch would be
+// usable measurement for it must not steal — the dispatch would be
 // guaranteed to fail and burn the envelope's load-attempt budget.
 func TestAttemptSteals_GatedOnWorkerEligibility(t *testing.T) {
 	const runtimeName = "llama-cpp"
@@ -1013,29 +1162,20 @@ func TestAttemptSteals_GatedOnWorkerEligibility(t *testing.T) {
 	tests := []struct {
 		name         string
 		idleLoopback bool
-		costAxis     string
 		files        []*workerpb.ModelFile
 		wantSteal    bool
 	}{
 		{
 			name:         "non-loopback idle cannot steal a local-path artifact",
 			idleLoopback: false,
-			costAxis:     "q4k_matvec",
 			files:        localFiles,
 			wantSteal:    false,
 		},
 		{
 			name:         "loopback idle steals the same envelope",
 			idleLoopback: true,
-			costAxis:     "q4k_matvec",
 			files:        localFiles,
 			wantSteal:    true,
-		},
-		{
-			name:         "unbenched cost axis blocks the steal",
-			idleLoopback: true,
-			costAxis:     "exotic_axis",
-			wantSteal:    false,
 		},
 	}
 	for _, tt := range tests {
@@ -1044,7 +1184,7 @@ func TestAttemptSteals_GatedOnWorkerEligibility(t *testing.T) {
 			for _, wID := range []string{"busy", "idle"} {
 				require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 					WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-					Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+					Flops: 100, BenchedAt: time.Now(),
 				}))
 			}
 
@@ -1077,7 +1217,6 @@ func TestAttemptSteals_GatedOnWorkerEligibility(t *testing.T) {
 					ModelID:     modelID,
 					Payload:     []byte("p"),
 					Cost:        100,
-					CostAxis:    tt.costAxis,
 					Files:       tt.files,
 				})
 				require.NoError(t, err)
@@ -1106,7 +1245,7 @@ func TestAttemptSteals_DoesNotCrossRuntimes(t *testing.T) {
 	for _, wID := range []string{"busy", "idle"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 
@@ -1137,7 +1276,6 @@ func TestAttemptSteals_DoesNotCrossRuntimes(t *testing.T) {
 			ModelID:     "m-1",
 			Payload:     []byte("p"),
 			Cost:        100,
-			CostAxis:    "q4k_matvec",
 		})
 		require.NoError(t, err)
 	}
@@ -1169,7 +1307,7 @@ func TestSubmit_DistributesAcrossEqualWorkers(t *testing.T) {
 	for _, wID := range workerIDs {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 		w := worker.NewFakeStreamWorker(wID, runtimeName,
 			[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -1200,7 +1338,7 @@ func TestSubmit_DistributesAcrossEqualWorkers(t *testing.T) {
 			RuntimeName: runtimeName,
 			ModelID:     modelID,
 			Payload:     []byte("p"),
-			Cost:        100, CostAxis: "q4k_matvec",
+			Cost:        100,
 		})
 		require.NoError(t, err, "submit %d", i)
 
@@ -1253,20 +1391,19 @@ func TestSubmit_DistributesAcrossEqualWorkers(t *testing.T) {
 func TestSubmit_RecoversAfterWorkerLateConnects(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
-	s, _ := newTestScheduler(t)
+	s, st := newTestScheduler(t)
 
 	_, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.ErrorIs(t, err, ErrNoWorker)
 
-	st := s.store.(*store.Store) // backing store for the live scheduler
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker("w1", runtimeName,
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -1279,7 +1416,7 @@ func TestSubmit_RecoversAfterWorkerLateConnects(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, rid)
@@ -1306,7 +1443,6 @@ func TestDrainGlobal_PlacesOrphanRowAfterWorkerConnects(t *testing.T) {
 	res, err := globalQ.Submit(context.Background(), queue.Envelope{
 		Priority:    queue.PriorityMedium,
 		Cost:        100,
-		CostAxis:    "q4k_matvec",
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
@@ -1322,7 +1458,7 @@ func TestDrainGlobal_PlacesOrphanRowAfterWorkerConnects(t *testing.T) {
 	// Add a worker; drainGlobal must place the row onto its queue.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker("w1", runtimeName,
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -1366,7 +1502,6 @@ func TestDrainGlobal_WaitsForBenchmark(t *testing.T) {
 	_, err := globalQ.Submit(context.Background(), queue.Envelope{
 		Priority:    queue.PriorityMedium,
 		Cost:        100,
-		CostAxis:    "q4k_matvec",
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
@@ -1380,7 +1515,7 @@ func TestDrainGlobal_WaitsForBenchmark(t *testing.T) {
 	// queue.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	s.InvalidateBench("w1", "gpu:0")
 	s.OnWorkerConnected(w)
@@ -1405,7 +1540,7 @@ func TestLeaseAndDispatch_RaceLoserSkipsCleanly(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker("w1", runtimeName,
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -1456,7 +1591,7 @@ func TestLeaseAndDispatch_UnparseableEnvelopeIsDropped(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker("w1", runtimeName,
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -1508,7 +1643,7 @@ func TestDispatchEnvelope_OverlapEvictFailureReleasesLease(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var loadCalls, unloadCalls atomic.Int32
@@ -1541,9 +1676,9 @@ func TestDispatchEnvelope_OverlapEvictFailureReleasesLease(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     newModelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
 	})
 	require.NoError(t, err)
 
@@ -1611,7 +1746,7 @@ func TestDispatchEnvelope_ActiveBlockerBounceIsPaced(t *testing.T) {
 		Level(zerolog.DebugLevel)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	// Resident model holds gpu:0 and keeps serving (Active=1) for the whole
@@ -1641,9 +1776,9 @@ func TestDispatchEnvelope_ActiveBlockerBounceIsPaced(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     newModelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
 	})
 	require.NoError(t, err)
 
@@ -1676,7 +1811,7 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	// inside LoadModel until the test delivers the ack.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w-cold", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	loadID := make(chan string, 1)
 	coldAssigns := make(chan string, 1)
@@ -1704,7 +1839,7 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	// w-warm (runtime rt-warm): model resident, assigns immediately.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w-warm", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	warmAssigns := make(chan string, 1)
 	wWarm := worker.NewFakeStreamWorker("w-warm", "rt-warm",
@@ -1729,7 +1864,7 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	// from here the cold worker's drain goroutine is parked awaiting the ack.
 	_, err := s.Submit(ctx, SubmitRequest{
 		RuntimeName: "rt-cold", ModelID: "m-cold", Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost:  100,
 		Files: []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
 	})
 	require.NoError(t, err)
@@ -1745,7 +1880,7 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	// LoadModel here and never assign it.
 	_, err = s.Submit(ctx, SubmitRequest{
 		RuntimeName: "rt-warm", ModelID: "m-warm", Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 	select {
@@ -1760,6 +1895,178 @@ func TestDispatch_ColdLoadDoesNotStallOtherWorkers(t *testing.T) {
 	case <-coldAssigns:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cold worker's job never reached AssignJob after the load ack")
+	}
+}
+
+// A job that was queued when MASS went down must run when MASS comes
+// back. The queue rows are durable but the replay buffers are not, so the
+// recovered dispatch has to rebuild the buffer from the durable result
+// instead of failing the job for not having one.
+func TestDispatch_QueuedJobSurvivesRestart(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+	ctx := context.Background()
+
+	first, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Flops: 100, BenchedAt: time.Now(),
+	}))
+	devices := []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}
+
+	// Lifetime 1: submit + place. Nothing drives the dispatch loop here,
+	// so the row is still sitting pending on the worker queue when the
+	// process "dies".
+	w1 := worker.NewFakeStreamWorker("w1", runtimeName, devices, time.Now())
+	w1.SetFakeCapacity(4)
+	w1.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	require.NoError(t, first.workers.Register(w1))
+	first.OnWorkerConnected(w1)
+
+	rid, err := first.Submit(ctx, SubmitRequest{
+		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
+		Cost: 100,
+	})
+	require.NoError(t, err)
+	first.queueMu.RLock()
+	wq := first.devQueues["worker|w1"]
+	first.queueMu.RUnlock()
+	require.Equal(t, 1, mustDepth(t, wq, ctx), "job must be queued, not dispatched")
+
+	// Lifetime 2: a fresh scheduler over the same database. No resubmit —
+	// everything it knows comes from the durable rows.
+	second := New(&config.Config{}, zerolog.Nop(), worker.NewFleet())
+	second.InitQueue(queue.NewPool(st.DB(), st.Dialect()), queue.NewResultStore(st.DB(), st.Dialect()),
+		defaultBenchStore{Store: st, unitsPerSec: defaultTestUnitsPerSec})
+	assigns := make(chan string, 1)
+	w2 := worker.NewFakeStreamWorker("w1", runtimeName, devices, time.Now())
+	w2.SetFakeCapacity(4)
+	w2.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	w2.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assigns <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, second.workers.Register(w2))
+	second.OnWorkerConnected(w2)
+
+	second.reapAbandonedAtStartup(ctx)
+	second.recoverPersistedQueues()
+	second.dispatchPass(ctx)
+
+	var jobID string
+	select {
+	case jobID = <-assigns:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovered job never reached AssignJob")
+	}
+	w2.DeliverJobChunk(jobID, &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("recovered-ok"),
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := second.results.Get(rid)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		if res.Status == queue.ResultStatusDone {
+			require.Equal(t, []byte("recovered-ok"), res.Body)
+			require.Empty(t, res.Error)
+			break
+		}
+		require.NotEqual(t, queue.ResultStatusError, res.Status,
+			"recovered job must not be failed: %s", res.Error)
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered job never reached Done (status %s)", res.Status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// The other two halves of the missing-buffer branch: a job whose result
+// is already terminal keeps that outcome (a restart must not stomp
+// "cancelled by operator" with a dispatch failure), and a job with no
+// result row left is failed as before. Neither reaches the worker, and
+// both drop their queue rows.
+func TestDispatch_MissingReplayBuffer_TerminalAndUnknownResults(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+
+	tests := []struct {
+		name string
+		// existingError, when set, is the terminal error already recorded
+		// for the request. Empty means no result row exists at all.
+		existingError string
+	}{
+		{name: "terminal result is preserved", existingError: "cancelled by operator"},
+		{name: "no result row at all"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, st := newTestScheduler(t)
+			require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+				WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+				Flops: 100, BenchedAt: time.Now(),
+			}))
+			assigns := make(chan string, 1)
+			w := worker.NewFakeStreamWorker("w1", runtimeName,
+				[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+			w.SetFakeCapacity(4)
+			w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+			w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+				if aj := msg.GetAssignJob(); aj != nil {
+					select {
+					case assigns <- aj.GetJobId():
+					default:
+					}
+				}
+				return nil
+			})
+			require.NoError(t, s.workers.Register(w))
+			s.OnWorkerConnected(w)
+
+			const requestID = "rid-orphan"
+			if tt.existingError != "" {
+				require.NoError(t, s.results.Create(requestID))
+				require.NoError(t, s.results.Fail(requestID, tt.existingError))
+			}
+			s.queueMu.RLock()
+			wq := s.devQueues["worker|w1"]
+			s.queueMu.RUnlock()
+			placeOnWorkerQueueForTest(t, s, wq, queue.Envelope{
+				Priority: queue.PriorityMedium, Cost: 100,
+				RuntimeName: runtimeName, ModelID: modelID,
+				RequestID: requestID, Payload: []byte("p"),
+			})
+
+			s.dispatchPass(ctx)
+			waitDispatchIdle(t, s)
+
+			require.Empty(t, assigns, "the job must never reach the worker")
+			res, err := s.results.Get(requestID)
+			require.NoError(t, err)
+			if tt.existingError == "" {
+				require.Nil(t, res, "nothing to record a failure against")
+			} else {
+				require.NotNil(t, res)
+				require.Equal(t, queue.ResultStatusError, res.Status)
+				require.Equal(t, tt.existingError, res.Error,
+					"the recorded outcome must survive the dispatch attempt")
+			}
+
+			rows, err := wq.PeekAll(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, rows, "worker row must be dropped")
+			gRows, err := s.globalQ.PeekAll(ctx, 10)
+			require.NoError(t, err)
+			require.Empty(t, gRows, "global anchor must be dropped")
+		})
 	}
 }
 

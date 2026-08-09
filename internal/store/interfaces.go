@@ -92,8 +92,8 @@ type WorkerStoreInterface interface {
 type StoreInterface interface {
 	SettingsStoreInterface
 	BenchmarkStoreInterface
+	ModelBenchmarkStoreInterface
 	WorkerQueueStateStoreInterface
-	ThroughputCorrectionStoreInterface
 	RuntimeStoreInterface
 	WorkerDeviceEnabledStoreInterface
 	JoinTokenStoreInterface
@@ -110,14 +110,14 @@ type StoreInterface interface {
 
 // Compile-time checks that Store satisfies all interfaces.
 var (
-	_ SettingsStoreInterface             = (*Store)(nil)
-	_ BenchmarkStoreInterface            = (*Store)(nil)
-	_ WorkerQueueStateStoreInterface     = (*Store)(nil)
-	_ ThroughputCorrectionStoreInterface = (*Store)(nil)
-	_ RuntimeStoreInterface              = (*Store)(nil)
-	_ WorkerDeviceEnabledStoreInterface  = (*Store)(nil)
-	_ JoinTokenStoreInterface            = (*Store)(nil)
-	_ WorkerStoreInterface               = (*Store)(nil)
-	_ DownloadStoreInterface             = (*Store)(nil)
-	_ StoreInterface                     = (*Store)(nil)
+	_ SettingsStoreInterface            = (*Store)(nil)
+	_ BenchmarkStoreInterface           = (*Store)(nil)
+	_ ModelBenchmarkStoreInterface      = (*Store)(nil)
+	_ WorkerQueueStateStoreInterface    = (*Store)(nil)
+	_ RuntimeStoreInterface             = (*Store)(nil)
+	_ WorkerDeviceEnabledStoreInterface = (*Store)(nil)
+	_ JoinTokenStoreInterface           = (*Store)(nil)
+	_ WorkerStoreInterface              = (*Store)(nil)
+	_ DownloadStoreInterface            = (*Store)(nil)
+	_ StoreInterface                    = (*Store)(nil)
 )

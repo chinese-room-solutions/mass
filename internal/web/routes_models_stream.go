@@ -357,7 +357,7 @@ func appendUnique(slice []string, val string) []string {
 }
 
 const modelsEmptyNoRuntimeHTML = `<div class="flex flex-col items-center justify-center py-16 text-center">` +
-	`<sl-icon name="box-seam" style="font-size:2rem;color:var(--sl-color-warning-500)" class="mb-3"></sl-icon>` +
+	`<sl-icon name="box-seam" style="font-size:2rem;color:var(--mass-warning)" class="mb-3"></sl-icon>` +
 	`<p class="text-sm" style="color:var(--mass-text-muted)">No runtime gateway is running.</p>` +
 	`<p class="text-xs mt-1" style="color:var(--mass-text-faint)">Start one in the <span class="font-medium">Runtimes</span> tab to see installed models.</p>` +
 	`</div>`
@@ -560,7 +560,7 @@ func writeCapabilityIcons(b *strings.Builder, caps *gatewaypb.Capabilities, styl
 		sizeStyle = "font-size:0.85rem"
 	}
 	if caps.GetThinking() {
-		fmt.Fprintf(b, `<sl-tooltip content="Thinking / reasoning capable"><sl-icon name="lightbulb" style="%s;color:var(--sl-color-warning-400)"></sl-icon></sl-tooltip>`, sizeStyle)
+		fmt.Fprintf(b, `<sl-tooltip content="Thinking / reasoning capable"><sl-icon name="lightbulb" style="%s;color:var(--mass-warning)"></sl-icon></sl-tooltip>`, sizeStyle)
 	}
 	if caps.GetVision() {
 		fmt.Fprintf(b, `<sl-tooltip content="Vision capable"><sl-icon name="eye" style="%s;color:var(--sl-color-primary-400)"></sl-icon></sl-tooltip>`, sizeStyle)

@@ -66,7 +66,7 @@ cd mass
 make run          # build web assets + binary, then start bin/mass
 ```
 
-MASS starts as a desktop app: a native window over the dashboard, plus a tray icon (minimizing folds to the tray, Quit exits). On a server, run `mass --headless` to skip the window — or `make build-headless` for a CGO-free static binary with no GUI at all — and open the dashboard in a browser instead.
+MASS starts as a desktop app: a native window over the dashboard, plus a tray icon (minimizing folds to the tray, Quit closes the window). The window is a thin client — the backend runs as a separate daemon the window attaches to, starting one on demand if none is running. A daemon started this way retires itself after 2 minutes without clients; on a server, run `mass serve` for a permanent one with no window — or `make build-headless` for a CGO-free static binary with no GUI at all — and open the dashboard in a browser instead.
 
 MASS loads its config from the user config dir (e.g. `~/.config/mass/config.yml`), writing defaults on first run. Then, in the dashboard at `http://localhost:3455`:
 
@@ -101,7 +101,7 @@ After approving once, MASS launches normally by double-click.
 
 ## Command-line management
 
-The `mass` binary is also a client for its own `mass.v1` management API, so the whole control surface is scriptable without the dashboard. A leading subcommand runs the CLI (`mass -headless` / `mass -version` still start the server):
+The `mass` binary is also a client for its own `mass.v1` management API, so the whole control surface is scriptable without the dashboard. A leading subcommand runs the CLI (`mass serve` runs the daemon; `mass -version` prints the build). A verb aimed at the local address starts the daemon on demand when none is running:
 
 ```bash
 mass status                                   # orchestrator health
@@ -112,19 +112,27 @@ mass runtimes start llama-cpp                 # bring a gateway up
 mass models import-remote --runtime llama-cpp --repo owner/model --file q4.gguf
 mass workers list                             # fleet state + device IDs
 mass queue list                               # inspect queued/running jobs
+mass queue cancel --help                      # synopsis + detail for any command
 ```
 
 `runtimes install` takes the registry **package** name; `start`/`stop`/`uninstall`
 and every `--runtime` flag take the **runtime** name that package declares
 (`mass-runtime-gateway-llama-cpp` → `llama-cpp`). Both columns show in `runtimes search`.
 
-The verb groups mirror the dashboard tabs: `status`, `models`, `runtimes`, `workers`, `scheduler`, and `queue`. Shared flags on every command: `--addr` (target URL; defaults to `$MASS_ADDR`, else the local config), `--token` (`$MASS_AUTH_TOKEN`), `--json` (raw protojson — use this when parsing), and `--timeout`. Errors map to exit codes `0`/`1`/`2` (ok/error/usage). For the full verb reference and common workflows, see the [`mass-cli` skill](.claude/skills/mass-cli/SKILL.md).
+The verb groups mirror the dashboard tabs: `status`, `models`, `runtimes`, `workers`, `scheduler`, and `queue`. Shared flags on every command that reaches the server: `--addr` (target URL; defaults to `$MASS_ADDR`, else the local config), `--token` (`$MASS_AUTH_TOKEN`), `--json` (raw protojson — use this when parsing), and `--timeout`. Errors map to exit codes `0`/`1`/`2` (ok/error/usage).
 
-The skill is a plain Markdown instruction file — any agent can use it: point yours at `SKILL.md` directly, or install it wherever your agent discovers skills. With Claude Code, for example, it's picked up automatically when working inside this repo; for other projects copy (or symlink) the skill directory into the project's `.claude/skills/mass-cli/`, or install it user-wide so every project sees it:
+### Agent skill
+
+For the full verb reference and common workflows, point your agent at the [`mass-cli` skill](skills/mass-cli/SKILL.md).
+
+The skill is a plain Markdown instruction file, tied to no particular agent, and it ships inside the binary — so it documents the verbs your build actually has, with no checkout required:
 
 ```bash
-cp -r .claude/skills/mass-cli ~/.claude/skills/
+mass skill                    # print it (pipe it wherever you like)
+mass skill install <dir>      # write it to <dir>/mass-cli/SKILL.md
 ```
+
+`<dir>` is whatever directory your agent discovers skills in — there is no default, and no server is needed, so this works on a fresh install. Reinstall after upgrading MASS: an old copy describes verbs that may have moved.
 
 ## Build commands
 

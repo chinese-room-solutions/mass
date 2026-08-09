@@ -29,6 +29,10 @@ type WorkerInfo struct {
 	Enabled     bool // operator toggle: any device on this worker enabled
 	ActiveJobs  int
 	Devices     []DeviceInfo
+	// BenchingModel is the store key of the model being measured on this
+	// worker right now, "" when it isn't benching. A benching worker takes
+	// no jobs until the measurement finishes.
+	BenchingModel string
 }
 
 // DeviceInfo is the transport-neutral view of one worker device.
@@ -45,8 +49,10 @@ type DeviceInfo struct {
 	HasBenchmark   bool
 	MemoryGBs      float64
 	LoadGBs        float64
-	ComputeGFlops  float64            // primary (highest) throughput axis, for the one-line UI card
-	Throughput     map[string]float64 // full runtime-private axis map, for the API
+	// Flops is the device's generic matmul throughput in raw FLOPS —
+	// the unit the worker reports and the store keeps. Display layers
+	// scale it themselves (the Workers tab renders GFLOPS).
+	Flops float64
 }
 
 // workerInfos assembles per-worker neutral views from the live fleet plus any
@@ -99,8 +105,7 @@ func (h *Handler) workerInfos() []WorkerInfo {
 				if row, err := h.store.GetBenchmark(wkr.ID(), dev.ID); err == nil {
 					di.MemoryGBs = row.MemoryGBs
 					di.LoadGBs = row.LoadGBs
-					di.ComputeGFlops = primaryThroughput(row.Throughput)
-					di.Throughput = row.Throughput
+					di.Flops = row.Flops
 					di.HasBenchmark = true
 				}
 			}
@@ -119,16 +124,22 @@ func (h *Handler) workerInfos() []WorkerInfo {
 		// with no devices yet (race before first heartbeat) is treated enabled.
 		workerEnabled := anyEnabled || len(devices) == 0
 
+		benching := ""
+		if h.orch != nil {
+			benching = h.orch.BenchInFlight(wkr.ID())
+		}
+
 		out = append(out, WorkerInfo{
-			ID:          wkr.ID(),
-			Name:        wkr.Name(),
-			RuntimeName: wkr.RuntimeName(),
-			Version:     wkr.Version(),
-			Compatible:  wkr.Compatible(),
-			Online:      status.Online,
-			Enabled:     workerEnabled,
-			ActiveJobs:  wkr.ActiveJobs(),
-			Devices:     devices,
+			ID:            wkr.ID(),
+			Name:          wkr.Name(),
+			RuntimeName:   wkr.RuntimeName(),
+			Version:       wkr.Version(),
+			Compatible:    wkr.Compatible(),
+			Online:        status.Online,
+			Enabled:       workerEnabled,
+			ActiveJobs:    wkr.ActiveJobs(),
+			Devices:       devices,
+			BenchingModel: benching,
 		})
 	}
 	return out
@@ -345,6 +356,11 @@ func (h *Handler) revokeWorker(workerID, actor string) error {
 	}
 	if !deleted {
 		return fmt.Errorf("%w: worker %s", ErrOpNotFound, workerID)
+	}
+	// A revoked worker is never coming back under this id, so its
+	// measurements are dead weight.
+	if h.orch != nil {
+		h.orch.OnWorkerRemoved(workerID)
 	}
 	audit.Log(h.logger, "worker.revoked", workerID, audit.OutcomeOK).
 		Str("actor", actor).Msg("")

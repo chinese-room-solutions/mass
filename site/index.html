@@ -69,10 +69,11 @@
   <h2>Features</h2>
   <div class="cards">
     <div class="card"><h3>Pure-Go core</h3><p>Inference toolchains stay in the workers. One static server binary.</p></div>
+    <div class="card"><h3>Daemon plus thin clients</h3><p>The hub is a daemon the window only attaches to. Run <code>mass serve</code> and the fleet stays up, dashboard open or not.</p></div>
     <div class="card"><h3>Live runtime installs</h3><p>Install, start, stop gateway packages from the dashboard. No rebuilds.</p></div>
     <div class="card"><h3>One model store</h3><p>Import from Hugging Face or disk. Workers pull what they run, deletes propagate.</p></div>
     <div class="card"><h3>Latency-aware scheduling</h3><p>Placement by predicted wall-clock cost. Streams survive reconnects.</p></div>
-    <div class="card"><h3>Fleet control</h3><p>Enable workers and devices individually. New workers benchmark themselves.</p></div>
+    <div class="card"><h3>Fleet control</h3><p>Enable workers and devices individually. Every model is measured on every worker before a job lands there.</p></div>
     <div class="card"><h3>Operator dashboard</h3><p>Live view of runtimes, models, queues, and workers. Prometheus metrics, TLS.</p></div>
     <div class="card"><h3>SQLite or Postgres</h3><p>One config flag. Queues and results survive restarts either way.</p></div>
   </div>
@@ -193,9 +194,12 @@
   <p class="d">The <code>mass</code> binary doubles as a CLI for the whole management API —
   <code>status</code>, <code>models</code>, <code>runtimes</code>, <code>workers</code>,
   <code>scheduler</code>, <code>queue</code> — so everything the dashboard does is scriptable.
-  It is agent-native too: the repo ships a ready-made
-  <a href="https://github.com/chinese-room-solutions/mass/tree/main/.claude/skills/mass-cli">CLI skill</a>
-  that teaches coding agents the verbs, and the same <code>mass.v1</code> API speaks gRPC and
+  A verb starts the daemon on demand, so the first command works on a fresh install, and
+  <code>mass serve</code> runs it in the foreground for a server or a container.
+  It is agent-native too: the binary carries a ready-made
+  <a href="https://github.com/chinese-room-solutions/mass/tree/main/skills/mass-cli">CLI skill</a>
+  that teaches coding agents the verbs — <code>mass skill install DIR</code> writes it into
+  whichever directory your agent reads — and the same <code>mass.v1</code> API speaks gRPC and
   plain HTTP/JSON for anything else you build on top.</p>
 </div></section>
 

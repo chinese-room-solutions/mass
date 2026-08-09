@@ -220,20 +220,6 @@ func (m *Manager) LoadedGatewayFor(runtimeName string) (*LoadedGateway, error) {
 	return g, nil
 }
 
-// DefaultCostAxisFor returns the running gateway's declared
-// default_cost_axis, or "" if no gateway is running for runtimeName.
-// The scheduler reads this at score time to fall back to the runtime's
-// required axis when an envelope's cost_axis names something a worker
-// hasn't benched.
-func (m *Manager) DefaultCostAxisFor(runtimeName string) string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if g, ok := m.running[runtimeName]; ok {
-		return g.DefaultCostAxis
-	}
-	return ""
-}
-
 // RunningGateways returns every currently-running gateway. Callers use it
 // to fan out per-runtime work (HF install routing, the Models stream
 // multiplexer).

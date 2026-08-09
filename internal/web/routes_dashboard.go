@@ -581,16 +581,16 @@ func (h *Handler) sendWorkersEvent(w io.Writer, f http.Flusher, kind, data strin
 }
 
 // benchResult is one device's benchmark outcome, returned in the
-// /api/workers/benchmark JSON response. Throughput is the worker's
-// runtime-private axis map (e.g. {"q4k_matvec": 154.0}).
+// /api/workers/benchmark JSON response. Flops is the device's generic
+// matmul throughput — hardware description, not a scheduling input.
 type benchResult struct {
-	WorkerID   string             `json:"worker_id"`
-	DeviceID   string             `json:"device_id"`
-	DeviceName string             `json:"device_name"`
-	MemoryGBs  float64            `json:"memory_gbs"`
-	LoadGBs    float64            `json:"load_gbs"`
-	Throughput map[string]float64 `json:"throughput"`
-	Error      string             `json:"error,omitempty"`
+	WorkerID   string  `json:"worker_id"`
+	DeviceID   string  `json:"device_id"`
+	DeviceName string  `json:"device_name"`
+	MemoryGBs  float64 `json:"memory_gbs"`
+	LoadGBs    float64 `json:"load_gbs"`
+	Flops      float64 `json:"flops"`
+	Error      string  `json:"error,omitempty"`
 }
 
 // handleWorkersBenchmark runs a benchmark on the targeted workers/devices,
@@ -682,7 +682,7 @@ func (h *Handler) benchmarkWorker(wkr worker.WorkerInterface, wantDevices map[st
 			DeviceName: res.DeviceName,
 			MemoryGBs:  res.MemoryGBs,
 			LoadGBs:    res.LoadGBs,
-			Throughput: res.Throughput,
+			Flops:      res.Flops,
 			BenchedAt:  res.BenchedAt,
 		}); err != nil {
 			h.logger.Warn().Err(err).Str("worker", wkr.ID()).Str("device", dev.ID).Msg("saving benchmark")
@@ -700,7 +700,7 @@ func (h *Handler) benchmarkWorker(wkr worker.WorkerInterface, wantDevices map[st
 			DeviceName: res.DeviceName,
 			MemoryGBs:  res.MemoryGBs,
 			LoadGBs:    res.LoadGBs,
-			Throughput: res.Throughput,
+			Flops:      res.Flops,
 		})
 		mu.Unlock()
 	}

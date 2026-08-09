@@ -4,6 +4,7 @@
 - Subagent: do the work yourself. Never spawn further agents.
 - Scale verification to the risk of being wrong. A cosmetic markup/CSS change needs a rebuild and one look at it; a cross-engine, multi-file, or unproven diagnosis needs measured numbers. Over-specified verification is how a small fix gets expensive.
 - Verify a diagnosis against current code before fixing it. One commit per fix.
+- Commit messages: as short as the change allows — one subject line, a body only for a why the diff doesn't show. No `Co-Authored-By` or any other trailer.
 
 ## Code quality
 - Follow the best practices of this repo's stack, and good project organization.
@@ -53,4 +54,5 @@ Follow only if Datastar is part of this repo's stack:
 - Use `make lint`, `make test`, and `make build` (where present) — not ad-hoc go commands.
 - Prefer the standard library; a new dependency must earn its place. Never bump version-paired dependencies without a smoke test.
 - Before calling work done, run `make lint` and `make test` and exercise the changed behavior for real; report what you verified and what you couldn't.
+- The CLI's agent skill is `skills/mass-cli/SKILL.md`, embedded in the binary and installed by `mass skill install DIR`. A change to a CLI verb updates it in the same commit.
 - Where templ is part of the stack, generate with `go tool templ generate` (the version pinned in go.mod), never a globally-installed `templ` — a mismatched global binary silently rewrites the `_templ.go` version header and produces spurious diffs.

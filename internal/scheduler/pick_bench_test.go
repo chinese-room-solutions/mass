@@ -26,7 +26,6 @@ import (
 func BenchmarkPickWorkerQueue(b *testing.B) {
 	const (
 		runtimeName = "llama-cpp"
-		axis        = "q4k_matvec"
 		workers     = 8
 	)
 	st, err := store.Open(store.DialectSQLite, filepath.Join(b.TempDir(), "bench.db"))
@@ -40,9 +39,9 @@ func BenchmarkPickWorkerQueue(b *testing.B) {
 		id := fmt.Sprintf("w%d", i)
 		require.NoError(b, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: id, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{axis: 100 + float64(i)},
-			LoadGBs:    10,
-			BenchedAt:  time.Now(),
+			Flops:     100 + float64(i),
+			LoadGBs:   10,
+			BenchedAt: time.Now(),
 		}))
 		w := worker.NewFakeStreamWorker(id, runtimeName,
 			[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
@@ -58,7 +57,6 @@ func BenchmarkPickWorkerQueue(b *testing.B) {
 		RuntimeName: runtimeName,
 		ModelID:     "m-bench",
 		Cost:        100,
-		CostAxis:    axis,
 		Files:       []*workerpb.ModelFile{{Url: "http://models.local/m-bench.gguf", SizeBytes: 4 << 30}},
 	}
 	b.ReportAllocs()

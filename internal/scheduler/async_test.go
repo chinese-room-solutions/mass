@@ -22,7 +22,7 @@ func stageRunningJob(t *testing.T, s *Scheduler, st *store.Store) (requestID str
 	const runtimeName, modelID = "llama-cpp", "m-1"
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	cancelCh := make(chan string, 4)
 	w = worker.NewFakeStreamWorker("w1", runtimeName,
@@ -43,7 +43,7 @@ func stageRunningJob(t *testing.T, s *Scheduler, st *store.Store) (requestID str
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -137,6 +137,75 @@ func TestCancelByRequestID(t *testing.T) {
 		require.Equal(t, queue.ResultStatusError, r.Status)
 	})
 
+	// Submit places inline, so a job that is merely queued normally sits
+	// unleased on a WORKER queue behind a global anchor that's hidden for
+	// anchorLeaseDuration. Scanning global alone misses it and the cancel
+	// 404s against a job nobody has started.
+	t.Run("row queued on a worker queue cancelled via worker scan", func(t *testing.T) {
+		const runtimeName, modelID = "llama-cpp", "m-1"
+		s, st := newTestScheduler(t)
+		ctx := context.Background()
+		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+			WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+			Flops: 100, BenchedAt: time.Now(),
+		}))
+
+		assigns := make(chan string, 4)
+		w := worker.NewFakeStreamWorker("w1", runtimeName,
+			[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+		w.SetFakeCapacity(4)
+		w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+		w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+			if aj := msg.GetAssignJob(); aj != nil {
+				select {
+				case assigns <- aj.GetJobId():
+				default:
+				}
+			}
+			return nil
+		})
+		require.NoError(t, s.workers.Register(w))
+		s.OnWorkerConnected(w)
+
+		// Submitted, placed, not yet dispatched.
+		rid, err := s.Submit(ctx, SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
+			Cost: 100,
+		})
+		require.NoError(t, err)
+		s.queueMu.RLock()
+		wq := s.devQueues[workerQueueName("w1")]
+		s.queueMu.RUnlock()
+		require.NotNil(t, wq)
+		rows, err := wq.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Len(t, rows, 1, "Submit must place the job on the worker queue")
+		require.False(t, rows[0].Leased, "the placed row waits unleased until dispatch")
+
+		require.NoError(t, s.CancelByRequestID(ctx, rid))
+
+		rows, err = wq.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Empty(t, rows, "the cancelled worker row must be deleted")
+		gRows, err := s.globalQ.PeekAll(ctx, 10)
+		require.NoError(t, err)
+		require.Empty(t, gRows, "the leased global anchor must be deleted too, not just hidden")
+
+		r, err := s.GetResult(rid)
+		require.NoError(t, err)
+		require.Equal(t, queue.ResultStatusError, r.Status)
+		require.Equal(t, "cancelled by operator", r.Error)
+
+		// Nothing left for the dispatcher to hand to the worker.
+		s.dispatchPass(ctx)
+		waitDispatchIdle(t, s)
+		select {
+		case jobID := <-assigns:
+			t.Fatalf("cancelled job was still dispatched (job_id %q)", jobID)
+		default:
+		}
+	})
+
 	t.Run("no live job returns ErrNotInflight", func(t *testing.T) {
 		s, _ := newTestScheduler(t)
 		// Nothing pending, nothing inflight: pending scan misses, running
@@ -188,7 +257,7 @@ func TestCancelByRequestID(t *testing.T) {
 
 		// The recorded intent makes the subsequent promotion abort: startInflight
 		// returns false (job never reaches AssignJob).
-		require.False(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", "axis", 1.0, 0),
+		require.False(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", 1.0, 0),
 			"a cancel recorded mid-dispatch must abort the inflight promotion")
 
 		// No inflight record was created.
@@ -205,7 +274,7 @@ func TestCancelByRequestID(t *testing.T) {
 
 		s.markDispatching(rid)
 		// No cancel: promotion succeeds and the marker is consumed.
-		require.True(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", "axis", 1.0, 0))
+		require.True(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", 1.0, 0))
 		s.inflightMu.Lock()
 		_, tracked := s.inflightByRequest[rid]
 		_, stillDispatching := s.dispatchingByRequest[rid]
@@ -239,14 +308,14 @@ func TestWorkerDisconnect_RevertsResultToPending(t *testing.T) {
 // The gateway's ?wait=1 path drains StreamChunks to the terminal frame and
 // immediately reads the durable result, so the pump must store the result
 // BEFORE publishing the terminal chunk. Regression: the store used to happen
-// after the publish (with the throughput-correction DB upsert in between),
-// and wait-callers routinely read a still-processing row for a completed job.
+// after the publish (with a DB write in between), and wait-callers routinely
+// read a still-processing row for a completed job.
 func TestAsyncWait_ResultDurableBeforeTerminalChunk(t *testing.T) {
 	const runtimeName, modelID = "llama-cpp", "m-1"
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	assigns := make(chan string, 1)
@@ -268,7 +337,7 @@ func TestAsyncWait_ResultDurableBeforeTerminalChunk(t *testing.T) {
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -305,7 +374,7 @@ func TestAsyncEndToEnd_SubmitDispatchCompleteGetResult(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	assigns := make(chan string, 1)
@@ -327,7 +396,7 @@ func TestAsyncEndToEnd_SubmitDispatchCompleteGetResult(t *testing.T) {
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 
