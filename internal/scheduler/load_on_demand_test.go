@@ -1039,8 +1039,7 @@ func TestDispatchEnvelope_DisabledGPUFallsThroughToCPUOverlap(t *testing.T) {
 // throughput lookup actually used) on the inflight record. The envelope's
 // QueuedSeconds carries the load-switch latency priced at placement, but
 // the load completes before the inflight clock starts — carrying it over
-// (the old behaviour) overstated the worker's busy-time in scoring and
-// taught the correction EWMA that cold-loading workers beat their bench.
+// (the old behaviour) overstated the worker's busy-time in scoring.
 func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
@@ -1052,8 +1051,7 @@ func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 		MemoryGBs: 100, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
 	}))
 	// The envelope names an axis no device benched — the used-axis
-	// fallback must also be what the inflight record carries, so the
-	// correction sample lands on the key scoring reads.
+	// fallback must also be what the inflight record carries.
 	s.SetRuntimeDefaultAxisFn(func(string) string { return "q4k_matvec" })
 
 	w := worker.NewFakeStreamWorker("w1", runtimeName, gpu1(), time.Now())

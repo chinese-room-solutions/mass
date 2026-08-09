@@ -280,8 +280,8 @@ func TestEffectiveThroughput_FallsBackToDefaultAxis(t *testing.T) {
 	s.OnWorkerConnected(w)
 
 	// Request a different axis; expect fallback to q4k_matvec — and the
-	// returned usedAxis must name the fallback, since callers key
-	// correction samples by it.
+	// returned usedAxis must name the fallback, since callers key their
+	// recorded predictions by it.
 	got, usedAxis, ok := s.effectiveThroughput(w, "f16_matmul", "q4k_matvec")
 	require.True(t, ok, "fallback to default axis should succeed")
 	require.Equal(t, "q4k_matvec", usedAxis)

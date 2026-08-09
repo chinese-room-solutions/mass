@@ -242,20 +242,6 @@ type Scheduler struct {
 	// repeat misses stay cheap.
 	benchCache map[string]map[string]store.BenchmarkRow
 
-	// throughputCorrection holds a live EWMA multiplier on each worker's
-	// benched throughput, keyed "workerID|axis". It learns from completed
-	// jobs: ratio = predicted_seconds / actual_seconds (>1 → worker beat
-	// the bench, <1 → slower than benched). The benchmark is the prior;
-	// real jobs are the evidence. Closes the open loop between one-time
-	// benching and live reality (thermal throttle, contention, a
-	// systematically optimistic gateway Cost). The map is authoritative;
-	// each folded sample is also persisted and restored at startup (see
-	// [Scheduler.restoreCorrections]) so calibration survives restarts.
-	// Reset when the baseline the factor is relative to changes — fresh
-	// bench or device toggle (see [Scheduler.ResetCorrections]).
-	correctionMu         sync.Mutex
-	throughputCorrection map[string]correctionState
-
 	// draining marks worker queues that currently have a drain goroutine
 	// running (see drainDeviceQueues). The entry's bool records whether a
 	// later pass wanted to drain the queue while it was busy — the drainer
@@ -323,8 +309,8 @@ type inflightRecord struct {
 	// the worker's effective throughput), re-priced at dispatch time. It
 	// deliberately EXCLUDES the load-switch latency that the envelope's
 	// QueuedSeconds carries: any model load has already completed before
-	// this record is created, so the queue's remaining busy-time and the
-	// throughput-correction baseline are both compute-only.
+	// this record is created, so the queue's remaining busy-time stays
+	// compute-only.
 	seconds float64
 	// modelID is the envelope's ModelID, captured so the device-set gate
 	// can detect "MASS has already assigned a job for this model on this
@@ -355,24 +341,9 @@ type inflightRecord struct {
 	// dispatched) can be emitted on terminal frames without re-resolving
 	// the envelope.
 	runtimeName string
-	// axis + dispatchedAt feed the throughput correction loop: on an ok
-	// terminal we compare actual wall-clock (now - dispatchedAt) against
-	// the predicted seconds (this record's `seconds`) for workerID|axis.
-	// axis is the throughput axis the prediction actually divided by
-	// (the runtime default when the envelope's CostAxis wasn't benched),
-	// so correction samples land on the key scoring reads.
-	axis         string
-	dispatchedAt time.Time
-	// correction is the EWMA factor that was already baked into this
-	// record's predicted seconds at dispatch (effectiveThroughput
-	// multiplies benched throughput by it). observeThroughput multiplies
-	// the predicted/actual ratio back by this value so every sample is
-	// measured against the UNCORRECTED bench prior. Folding the
-	// corrected-prediction ratio directly would make the EWMA
-	// self-referential: its fixed point lands at sqrt(true ratio), so a
-	// worker running 4x its bench would stabilise at factor 2 and stay
-	// 2x mispredicted forever.
-	correction float64
+	// axis is the throughput axis the prediction actually divided by (the
+	// runtime default when the envelope's CostAxis wasn't benched).
+	axis string
 }
 
 // tailState is one entry of the in-memory tail mirror: the queued
@@ -382,37 +353,6 @@ type tailState struct {
 	seconds float64
 	modelID string
 }
-
-// correctionState is the per-(worker,axis) EWMA of predicted/actual
-// wall-clock ratio. factor multiplies benched throughput at scoring time;
-// samples gates application until enough evidence accrues.
-type correctionState struct {
-	factor  float64
-	samples int
-}
-
-const (
-	// correctionAlpha is the EWMA weight on each new sample. 0.2 ≈ a ~10-
-	// job memory: responsive to a real regime change (throttling kicking
-	// in) without chasing single-job noise.
-	correctionAlpha = 0.2
-	// correctionMinSamples is how many ok-terminals must accrue before the
-	// factor is applied — one or two jobs can't move placement.
-	correctionMinSamples = 5
-	// correctionClamp bounds the factor to [1/clamp, clamp] so a pathological
-	// job (cold cache, a 30s thinking burst predicted at 1s) can't swing
-	// placement wildly. The bench prior dominates outside this band.
-	correctionClamp = 4.0
-	// correctionMinActualSec drops sub-threshold jobs from the EWMA: their
-	// wall-clock is dominated by fixed dispatch/RPC overhead, not compute,
-	// so the ratio is meaningless as a throughput signal.
-	correctionMinActualSec = 0.1
-	// correctionMaxAge bounds how old a persisted correction may be and
-	// still seed the EWMA at startup: month-old evidence says little about
-	// today's thermals or drivers. Older rows are simply not loaded — the
-	// next sample or reset overwrites them.
-	correctionMaxAge = 30 * 24 * time.Hour
-)
 
 // StateStoreInterface is the slice of [store.Store] the scheduler needs for
 // device-queue lifecycle persistence. Tightening the dependency to this
@@ -437,15 +377,6 @@ type StateStoreInterface interface {
 	// GetBenchmark returns the most recent per-device benchmark row.
 	// Scoring requires it (no benchmark = device not schedulable).
 	GetBenchmark(workerID, deviceID string) (store.BenchmarkRow, error)
-	// UpsertThroughputCorrection persists one (worker, axis) entry of the
-	// correction EWMA after a completed job folds in.
-	UpsertThroughputCorrection(c store.ThroughputCorrection) error
-	// ListThroughputCorrections returns every persisted correction entry;
-	// [Scheduler.restoreCorrections] seeds the in-memory EWMA from it.
-	ListThroughputCorrections() ([]store.ThroughputCorrection, error)
-	// DeleteThroughputCorrections drops workerID's persisted corrections
-	// when the baseline they're relative to changes.
-	DeleteThroughputCorrections(workerID string) error
 }
 
 // New builds a Scheduler. Call [Scheduler.InitQueue] once a database is
@@ -467,7 +398,6 @@ func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Sche
 		draining:             make(map[string]bool),
 		orphanSince:          make(map[string]time.Time),
 		orphanGrace:          orphanQueueGrace,
-		throughputCorrection: make(map[string]correctionState),
 		wake:                 make(chan struct{}, 1),
 	}
 }
@@ -481,7 +411,6 @@ func (s *Scheduler) InitQueue(pool *queue.Pool, results queue.ResultStoreInterfa
 	s.results = results
 	s.store = st
 	s.queueMu.Unlock()
-	s.restoreCorrections(st)
 }
 
 // SetWorkerEnabledFn registers the per-worker enable check.
@@ -1179,11 +1108,6 @@ const peekAllLimit = 256
 // The worker_queue_state row stays in either case; re-enabling a
 // device lets the queue receive again without a reconnect cycle.
 func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
-	// The enabled-device set is part of the correction factor's identity —
-	// the bench prior sums across the set (see [Scheduler.throughputForAxis]),
-	// so evidence learned on the old set doesn't transfer to the new one.
-	s.ResetCorrections(workerID)
-
 	wIface := s.workers.Get(workerID)
 	sw, ok := wIface.(*worker.StreamWorker)
 	if !ok || sw == nil {
@@ -2060,10 +1984,6 @@ func (s *Scheduler) debitTail(queueName string, delta float64) {
 // closes the race between the cancel and the promotion.
 func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, axis string, seconds float64, reservedBytes int64) bool {
 	workerID, _ := parseWorkerQueueName(queueName)
-	// The factor effectiveThroughput applied to this prediction moments
-	// ago in dispatchEnvelope — captured so observeThroughput can undo it
-	// and record a bench-relative sample (see inflightRecord.correction).
-	correction := s.correctionFactor(workerID, axis)
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
 	if s.dispatchingByRequest[requestID] {
@@ -2082,8 +2002,6 @@ func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, ax
 		reservedBytes: reservedBytes,
 		runtimeName:   runtimeName,
 		axis:          axis,
-		dispatchedAt:  time.Now(),
-		correction:    correction,
 	}
 	return true
 }
@@ -2192,178 +2110,6 @@ func (s *Scheduler) inflightRuntime(requestID string) string {
 		return ""
 	}
 	return rec.runtimeName
-}
-
-// observeThroughput feeds one completed job into the (worker|axis) EWMA so
-// future scoring reflects how this worker actually performs versus its
-// one-time bench. Reads the inflight record (worker, axis, predicted
-// seconds, dispatch time) and folds predicted/actual into the running
-// factor. Both sides of the ratio are compute-only: the record's
-// seconds exclude load-switch latency and dispatchedAt is stamped
-// after any LoadModel completed, so a cold load can't masquerade as
-// compute speed. Call BEFORE finishInflight removes the record, and
-// only on an ok terminal — error/cancel wall-clock isn't a throughput
-// signal.
-func (s *Scheduler) observeThroughput(requestID string) {
-	s.inflightMu.Lock()
-	rec, ok := s.inflightByRequest[requestID]
-	s.inflightMu.Unlock()
-	if !ok || rec.axis == "" || rec.workerID == "" || rec.seconds <= 0 {
-		return
-	}
-	actual := time.Since(rec.dispatchedAt).Seconds()
-	if actual < correctionMinActualSec {
-		return // dominated by fixed overhead, not compute
-	}
-	rawRatio := rec.seconds / actual // >1: faster than predicted, <1: slower
-	// The prediction already divided by the correction factor in force at
-	// dispatch, so rawRatio measures the residual error of the CORRECTED
-	// prediction. Multiply the factor back in to get a bench-relative
-	// sample — the EWMA state is an absolute multiplier on benched
-	// throughput, and feeding it corrected-prediction ratios would make
-	// the fixed point sqrt(true ratio) instead of the true ratio.
-	appliedCorrection := rec.correction
-	if appliedCorrection <= 0 {
-		appliedCorrection = 1
-	}
-	ratio := rawRatio * appliedCorrection
-	clamped := false
-	if ratio < 1/correctionClamp {
-		ratio = 1 / correctionClamp
-		clamped = true
-	} else if ratio > correctionClamp {
-		ratio = correctionClamp
-		clamped = true
-	}
-
-	key := rec.workerID + "|" + rec.axis
-	s.correctionMu.Lock()
-	cur, seen := s.throughputCorrection[key]
-	if !seen {
-		cur = correctionState{factor: ratio, samples: 1}
-	} else {
-		cur.factor = (1-correctionAlpha)*cur.factor + correctionAlpha*ratio
-		cur.samples++
-	}
-	s.throughputCorrection[key] = cur
-	s.correctionMu.Unlock()
-
-	// Persist the folded state so calibration survives a restart. Best-
-	// effort: a failed write costs re-warming after the next restart, not
-	// correctness now — the in-memory map already holds the sample.
-	s.queueMu.RLock()
-	st := s.store
-	s.queueMu.RUnlock()
-	if st != nil {
-		if err := st.UpsertThroughputCorrection(store.ThroughputCorrection{
-			WorkerID: rec.workerID,
-			Axis:     rec.axis,
-			Factor:   cur.factor,
-			Samples:  cur.samples,
-		}); err != nil {
-			s.logger.Warn().Err(err).Str("worker_id", rec.workerID).Str("axis", rec.axis).Msg("persisting throughput correction")
-		}
-	}
-
-	// Calibration diagnostic: predicted vs actual wall-clock per job.
-	// raw_ratio is relative to the corrected prediction (1.0 = the live
-	// factor is dialled in); bench_ratio is the pre-clamp bench-relative
-	// sample the EWMA folds — a bench_ratio pinned at correctionClamp
-	// exposes a systematic bias the band is hiding. samples shows when
-	// the factor starts applying (>= correctionMinSamples). model_id
-	// isolates per-model error (e.g. vision jobs over-counted by the
-	// projector estimate). Debug level: on when calibrating, quiet in
-	// normal Info operation.
-	s.logger.Debug().
-		Str("worker_id", rec.workerID).
-		Str("axis", rec.axis).
-		Str("model_id", rec.modelID).
-		Float64("predicted_sec", rec.seconds).
-		Float64("actual_sec", actual).
-		Float64("raw_ratio", rawRatio).
-		Float64("bench_ratio", rawRatio*appliedCorrection).
-		Bool("clamped", clamped).
-		Float64("ewma_factor", cur.factor).
-		Int("samples", cur.samples).
-		Msg("throughput calibration sample")
-}
-
-// correctionFactor returns the live throughput multiplier for (workerID,
-// axis), or 1.0 when fewer than correctionMinSamples jobs have completed
-// (the bench prior stands alone until there's real evidence).
-func (s *Scheduler) correctionFactor(workerID, axis string) float64 {
-	if workerID == "" || axis == "" {
-		return 1
-	}
-	s.correctionMu.Lock()
-	defer s.correctionMu.Unlock()
-	cur, ok := s.throughputCorrection[workerID+"|"+axis]
-	if !ok || cur.samples < correctionMinSamples {
-		return 1
-	}
-	return cur.factor
-}
-
-// restoreCorrections seeds the in-memory correction EWMA from rows
-// persisted by earlier runs, so calibration survives a gateway restart
-// instead of re-warming from the bench prior (correctionMinSamples jobs
-// per key each run — a short queue never reopens the gate). Rows older
-// than correctionMaxAge are ignored. Called once from [Scheduler.InitQueue],
-// before the dispatcher starts.
-func (s *Scheduler) restoreCorrections(st StateStoreInterface) {
-	if st == nil {
-		return
-	}
-	rows, err := st.ListThroughputCorrections()
-	if err != nil {
-		s.logger.Warn().Err(err).Msg("restoring throughput corrections")
-		return
-	}
-	cutoff := time.Now().Add(-correctionMaxAge)
-	restored := 0
-	s.correctionMu.Lock()
-	for _, row := range rows {
-		if row.UpdatedAt.Before(cutoff) {
-			continue
-		}
-		s.throughputCorrection[row.WorkerID+"|"+row.Axis] = correctionState{factor: row.Factor, samples: row.Samples}
-		restored++
-	}
-	s.correctionMu.Unlock()
-	if restored > 0 {
-		s.logger.Info().Int("entries", restored).Msg("restored throughput corrections")
-	}
-}
-
-// ResetCorrections drops every learned correction for workerID — in
-// memory and persisted. Called when the baseline the factors are
-// relative to changes: a fresh bench replaces the throughput prior, a
-// device toggle changes the device set the prior sums across (see
-// [Scheduler.throughputForAxis]). Stale evidence would mis-scale the
-// new baseline until the EWMA re-converged, which is worse than
-// re-warming from a correct prior.
-func (s *Scheduler) ResetCorrections(workerID string) {
-	if workerID == "" {
-		return
-	}
-	prefix := workerID + "|"
-	s.correctionMu.Lock()
-	for key := range s.throughputCorrection {
-		if strings.HasPrefix(key, prefix) {
-			delete(s.throughputCorrection, key)
-		}
-	}
-	s.correctionMu.Unlock()
-
-	s.queueMu.RLock()
-	st := s.store
-	s.queueMu.RUnlock()
-	if st == nil {
-		return
-	}
-	if err := st.DeleteThroughputCorrections(workerID); err != nil {
-		s.logger.Warn().Err(err).Str("worker_id", workerID).Msg("deleting persisted throughput corrections")
-	}
 }
 
 // finishInflight removes requestID from the in-flight set. Safe to call
@@ -2746,13 +2492,9 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	// latency priced at placement, but any load has already completed by
 	// this point (the inflight clock starts after LoadModel), so keeping
 	// it would (a) overstate the worker's remaining busy-time in scoring
-	// and (b) teach the correction EWMA that cold-loading workers beat
-	// their bench — predicted included load seconds the measured
-	// wall-clock never sees. The axis recorded is the one the throughput
-	// lookup actually used (post-fallback) so the correction sample lands
-	// on the key scoring reads. taskSec 0 (unbenched axis mid-toggle)
-	// disables calibration for this job — observeThroughput skips
-	// non-positive predictions.
+	// and (b) misprice every later scoring pass against a busy-time the
+	// worker never spends computing. The axis recorded is the one the
+	// throughput lookup actually used (post-fallback).
 	//
 	// startInflight returns false when a cancel landed during the load
 	// window: honour it here, before the job ever reaches the worker —
@@ -3019,11 +2761,6 @@ func (s *Scheduler) pumpWorkerChunks(sw *worker.StreamWorker, q queue.QueueInter
 	// emitted terminal); runtime label is for metrics.
 	wasCancelled := s.isInflightCancelled(requestID)
 	runtimeName := s.inflightRuntime(requestID)
-	// Feed the throughput correction loop on clean completions only —
-	// before finishInflight removes the record we read from.
-	if terminal && errText == "" && !wasCancelled {
-		s.observeThroughput(requestID)
-	}
 	s.finishInflight(requestID)
 	// The slot this job held is free now, and nothing else says so: row
 	// deletion doesn't signal the queue pool. One kick here covers every
@@ -3414,21 +3151,19 @@ func residentsBlockingLoad(w *worker.StreamWorker, targetModelID string, predict
 // defaultAxis (the runtime's gateway-declared required axis). The
 // fallback lets MASS still place jobs on workers that haven't been
 // upgraded to bench every axis a gateway might request. Callers that
-// record predictions must key them by usedAxis — the correction EWMA
-// is folded in here per used axis, so a sample filed under the
-// requested-but-unbenched axis would never be read back.
+// record predictions must key them by usedAxis.
 //
 // Within an axis, throughput sums across the device set the worker will
 // use for incoming work — see [Scheduler.deviceSet].
 func (s *Scheduler) effectiveThroughput(w *worker.StreamWorker, axis, defaultAxis string) (val float64, usedAxis string, ok bool) {
 	if axis != "" {
 		if v := s.throughputForAxis(w, axis); v > 0 {
-			return v * s.correctionFactor(w.ID(), axis), axis, true
+			return v, axis, true
 		}
 	}
 	if defaultAxis != "" && defaultAxis != axis {
 		if v := s.throughputForAxis(w, defaultAxis); v > 0 {
-			return v * s.correctionFactor(w.ID(), defaultAxis), defaultAxis, true
+			return v, defaultAxis, true
 		}
 	}
 	return 0, "", false
@@ -3841,9 +3576,6 @@ func (s *Scheduler) InvalidateBench(workerID, deviceID string) {
 		}
 	}
 	s.benchMu.Unlock()
-	// The fresh bench replaces the prior the correction EWMA measured
-	// against — learned factors don't transfer onto the new baseline.
-	s.ResetCorrections(workerID)
 }
 
 // InvalidateWorkerBench drops every cached row for workerID. Useful

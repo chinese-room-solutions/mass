@@ -7,7 +7,6 @@ DROP TABLE IF EXISTS downloads;
 DROP INDEX IF EXISTS worker_device_enabled_worker_idx;
 DROP TABLE IF EXISTS worker_device_enabled;
 DROP TABLE IF EXISTS runtimes;
-DROP TABLE IF EXISTS throughput_corrections;
 DROP INDEX IF EXISTS model_benchmarks_worker_id_idx;
 DROP INDEX IF EXISTS model_benchmarks_model_id_idx;
 DROP TABLE IF EXISTS model_benchmarks;

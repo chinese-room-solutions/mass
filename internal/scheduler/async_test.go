@@ -308,8 +308,8 @@ func TestWorkerDisconnect_RevertsResultToPending(t *testing.T) {
 // The gateway's ?wait=1 path drains StreamChunks to the terminal frame and
 // immediately reads the durable result, so the pump must store the result
 // BEFORE publishing the terminal chunk. Regression: the store used to happen
-// after the publish (with the throughput-correction DB upsert in between),
-// and wait-callers routinely read a still-processing row for a completed job.
+// after the publish (with a DB write in between), and wait-callers routinely
+// read a still-processing row for a completed job.
 func TestAsyncWait_ResultDurableBeforeTerminalChunk(t *testing.T) {
 	const runtimeName, modelID = "llama-cpp", "m-1"
 	s, st := newTestScheduler(t)

@@ -109,20 +109,6 @@ CREATE TABLE model_benchmarks (
 CREATE INDEX model_benchmarks_model_id_idx ON model_benchmarks (model_id);
 CREATE INDEX model_benchmarks_worker_id_idx ON model_benchmarks (worker_id);
 
--- Learned throughput-correction EWMA per (worker, axis): the scheduler's
--- live multiplier on benched throughput plus the number of completed jobs
--- backing it. Persisted so calibration survives gateway restarts; rows are
--- deleted whenever their baseline changes (fresh bench result, operator
--- device toggle) because the factor is relative to that baseline.
-CREATE TABLE throughput_corrections (
-    worker_id  TEXT NOT NULL,
-    axis       TEXT NOT NULL,
-    factor     DOUBLE PRECISION NOT NULL,
-    samples    INTEGER NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (worker_id, axis)
-);
-
 -- Installed runtime gateway packages. Versioned, persistent across restarts.
 -- auto_start = TRUE means main() launches this gateway during boot; otherwise
 -- it stays dormant until the operator clicks Start.
