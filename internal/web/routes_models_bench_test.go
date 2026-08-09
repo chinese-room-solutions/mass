@@ -9,6 +9,8 @@ import (
 	"github.com/chinese-room-solutions/mass/internal/queue"
 	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/web/templates"
+	"github.com/chinese-room-solutions/mass/internal/worker"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -117,21 +119,31 @@ func TestBuildModelBenchRows(t *testing.T) {
 }
 
 // The view reads the store's verdicts and names the workers from the fleet.
+// Its worker count is the fleet the model could run on — online workers of
+// its own runtime, whether or not they have a verdict yet.
 func TestModelBenchView_ReadsStoredVerdicts(t *testing.T) {
 	h := newTestHandler(t)
 	seedStreamWorker(t, h, "w1", "host-a",
 		[]*workerpb.WorkerDevice{gpuDevice("gpu:0", "Test GPU", 8192)}, nil)
+	seedStreamWorker(t, h, "w2", "host-b",
+		[]*workerpb.WorkerDevice{gpuDevice("gpu:0", "Test GPU", 8192)}, nil)
+	other := worker.NewStreamWorker("w3",
+		&workerpb.WorkerRegister{Name: "host-c", RuntimeName: "other-runtime"},
+		nil, "", "", true, zerolog.Nop())
+	require.NoError(t, h.workers.Register(other))
 	require.NoError(t, h.store.SaveModelBenchmark(measuredRow("w1", "gpu:0")))
 
 	view := h.modelBenchView("llama-cpp", benchModelKey)
 	require.Equal(t, "llama-cpp", view.RuntimeName)
 	require.Equal(t, benchModelKey, view.ModelKey)
+	require.Equal(t, 2, view.ConnectedWorkers)
 	require.Len(t, view.Rows, 1)
 	require.Equal(t, "host-a", view.Rows[0].WorkerName)
 	require.Equal(t, templates.ModelBenchMeasured, view.Rows[0].State)
 
 	html := templates.RenderModelBenchPanel(view)
 	require.Contains(t, html, "42.5 units/s")
+	require.Contains(t, html, "benched on 1/2 workers")
 }
 
 func TestHandleModelBenchStatus_UnresolvableModelRendersNothing(t *testing.T) {

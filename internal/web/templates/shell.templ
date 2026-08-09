@@ -130,7 +130,18 @@ templ Shell(data DashboardData) {
 		<div data-show="$activeTab === 'models'" class="flex-1 min-h-0">
 			<div id="models-tab" style="display:flex;justify-content:center;height:100%">
 				<button id="models-deselect-trigger" style="display:none" data-on:click="$selectedModelID = ''"></button>
-				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem;flex-shrink:0">
+				<!-- MASS-owned benchmark panel, mirroring the gateway's props
+				     panel on the other side: the right one describes the file,
+				     this one says what the fleet measured. -->
+				<div
+					id="models-bench-panel"
+					style="overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0;display:flex;flex-direction:column"
+					data-attr:style="$selectedModelID !== '' ? 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:22rem;opacity:1;flex-shrink:0;display:flex;flex-direction:column' : 'overflow:hidden;transition:width 0.3s ease,opacity 0.3s ease;width:0;opacity:0;flex-shrink:0;display:flex;flex-direction:column'"
+				>
+					<div id="models-bench-spacer" class="flex-shrink-0"></div>
+					<div id="model-bench-pane" class="px-3 pb-3 flex-1 min-h-0 flex flex-col"></div>
+				</div>
+				<div style="display:flex;flex-direction:column;height:100%;min-width:0;width:100%;max-width:44rem">
 					<div style="padding:0.75rem 1.5rem 0">
 						<div class="flex items-center justify-center gap-2 text-sm font-semibold" style="color:var(--mass-text)">
 							<sl-icon name="box-seam"></sl-icon>
@@ -182,10 +193,6 @@ templ Shell(data DashboardData) {
 				>
 					<div id="models-props-spacer"></div>
 					<div id="model-detail-pane" class="px-3 pb-3"></div>
-					<!-- MASS-owned benchmark card: the gateway describes the
-					     file above, this says what the fleet measured. Its own
-					     container so the gateway detail fetch can't wipe it. -->
-					<div id="model-bench-pane" class="px-3 pb-3"></div>
 				</div>
 			</div>
 			@templ.Raw(modelsTabStyles)

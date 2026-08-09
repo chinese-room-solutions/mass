@@ -18,9 +18,9 @@ import (
 // set) measured for the selected model, and the manual re-bench that wipes
 // those verdicts and queues fresh measurements.
 //
-// The card is a MASS-owned fragment sitting under the runtime gateway's own
-// detail panel — the gateway describes the file, MASS describes what the
-// fleet made of it.
+// The card is a MASS-owned fragment filling the panel left of the models
+// list, opposite the runtime gateway's own detail panel — the gateway
+// describes the file, MASS describes what the fleet made of it.
 
 // handleModelBenchStatus renders the benchmark card for one catalogue model.
 // Answers with an empty body (like the gateway's own detail endpoint) when
@@ -110,18 +110,23 @@ func (h *Handler) modelBenchView(runtimeName, modelKey string) templates.ModelBe
 	}
 	names := map[string]string{}
 	var benching []string
+	connected := 0
 	if h.workers != nil {
 		for _, wkr := range h.workers.All() {
 			names[wkr.ID()] = wkr.Name()
+			if wkr.RuntimeName() == runtimeName && wkr.Status().Online {
+				connected++
+			}
 			if h.orch != nil && h.orch.BenchInFlight(wkr.ID()) == modelKey {
 				benching = append(benching, wkr.ID())
 			}
 		}
 	}
 	return templates.ModelBenchView{
-		RuntimeName: runtimeName,
-		ModelKey:    modelKey,
-		Rows:        buildModelBenchRows(rows, names, benching),
+		RuntimeName:      runtimeName,
+		ModelKey:         modelKey,
+		ConnectedWorkers: connected,
+		Rows:             buildModelBenchRows(rows, names, benching),
 	}
 }
 

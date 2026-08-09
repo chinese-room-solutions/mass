@@ -606,7 +606,7 @@
     if (modelsTab && modelsTab.contains(t)) {
       var insideRow    = isInside(t, '.model-row');
       var insideGroup  = isInside(t, 'details.group-card > summary');
-      var insideMPanel = isInside(t, '#models-props-panel');
+      var insideMPanel = isInside(t, '#models-props-panel') || isInside(t, '#models-bench-panel');
       if (!insideRow && !insideGroup && !insideMPanel) {
         var btn2 = document.getElementById('models-deselect-trigger');
         if (btn2) btn2.click();
@@ -694,7 +694,11 @@
       timer = setTimeout(doFilter, 150);
     });
     input.addEventListener('sl-clear', function() { input.value = ''; doFilter(); });
+    doFilter();
   }
+  // Panels that re-render their own filter input (the models tab's benchmark
+  // card) re-bind through this after each swap.
+  window.__massSetupFilter = setupFilter;
   setupFilter('runtime-search-input',   'runtime-list');
   setupFilter('models-filter-input',    'models-list');
   setupFilter('scheduler-filter-input', 'scheduler-list');

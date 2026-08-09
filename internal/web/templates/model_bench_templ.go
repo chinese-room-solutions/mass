@@ -11,14 +11,15 @@ import templruntime "github.com/a-h/templ/runtime"
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/chinese-room-solutions/mass-sdk/format"
 )
 
-// Per-model benchmark card on the Models tab, rendered under the runtime's
-// own detail panel. One row per (worker, device set) the fleet has an
-// answer for, plus a row for whatever worker is measuring the model right
-// now.
+// Per-model benchmark card on the Models tab, rendered in the panel left of
+// the models list, mirroring the runtime's own detail panel on the right.
+// One row per (worker, device set) the fleet has an answer for, plus a row
+// for whatever worker is measuring the model right now.
 
 // ModelBenchState is what one (worker, device set) pair has to say about
 // the selected model.
@@ -45,12 +46,13 @@ type ModelBenchRowView struct {
 	Error        string
 }
 
-// ModelBenchView is the card for one model: its rows plus the identity the
-// re-bench action posts back.
+// ModelBenchView is the card for one model: its rows, the size of the fleet
+// they speak for, plus the identity the re-bench action posts back.
 type ModelBenchView struct {
-	RuntimeName string // runtime that owns the model
-	ModelKey    string // store-relative key of the model's primary file
-	Rows        []ModelBenchRowView
+	RuntimeName      string // runtime that owns the model
+	ModelKey         string // store-relative key of the model's primary file
+	ConnectedWorkers int    // online workers of that runtime — the "of M" in the summary
+	Rows             []ModelBenchRowView
 }
 
 // ModelBenchPanel renders the benchmark card. The root id is what the
@@ -76,17 +78,30 @@ func ModelBenchPanel(view ModelBenchView) templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div id=\"model-bench-card\" class=\"bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5\"><div class=\"flex items-center gap-2 mb-3\"><sl-icon name=\"speedometer2\" style=\"font-size:0.9rem;color:var(--mass-accent)\"></sl-icon><h3 class=\"text-sm font-semibold text-white\">Benchmarks</h3></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div id=\"model-bench-card\" class=\"bg-neutral-800/60 rounded-lg border border-neutral-700/50 p-5 flex flex-col min-h-0\" style=\"max-height:100%\"><div class=\"flex items-center gap-2\"><sl-icon name=\"speedometer2\" style=\"font-size:0.9rem;color:var(--mass-accent)\"></sl-icon><h3 class=\"text-sm font-semibold text-white\">Benchmarks</h3></div><p class=\"text-xs text-neutral-500 mt-1\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var2 string
+		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(modelBenchSummary(view))
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 58, Col: 68}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "</p>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		if len(view.Rows) == 0 {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "<p class=\"text-xs text-neutral-500\">No benchmark yet. MASS measures the model on each worker as it connects.</p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<p class=\"text-xs text-neutral-500 mt-3\">No benchmark yet. MASS measures the model on each worker as it connects.</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		} else {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<div class=\"space-y-3\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "<div class=\"mt-2 flex-shrink-0\"><sl-input id=\"model-bench-filter-input\" size=\"small\" clearable placeholder=\"Filter benchmarks...\"><sl-icon slot=\"prefix\" name=\"search\"></sl-icon></sl-input></div><div id=\"model-bench-rows\" class=\"space-y-3 mt-3 flex-1 min-h-0 overflow-y-auto\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -96,25 +111,25 @@ func ModelBenchPanel(view ModelBenchView) templ.Component {
 					return templ_7745c5c3_Err
 				}
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 4, "</div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "</div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 5, "<div class=\"pt-4 border-t border-neutral-700/50 flex items-center justify-center\" style=\"margin-top:0.75rem\"><sl-button size=\"small\" variant=\"default\" outline data-on:click=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "<div class=\"pt-4 border-t border-neutral-700/50 flex items-center justify-center flex-shrink-0\" style=\"margin-top:0.75rem\"><sl-button size=\"small\" variant=\"default\" outline data-on:click=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var2 string
-		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("@post('/api/models/rebench?runtime=%s&key=%s')", url.QueryEscape(view.RuntimeName), url.QueryEscape(view.ModelKey)))
+		var templ_7745c5c3_Var3 string
+		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.ResolveAttributeValue(fmt.Sprintf("@post('/api/models/rebench?runtime=%s&key=%s')", url.QueryEscape(view.RuntimeName), url.QueryEscape(view.ModelKey)))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 70, Col: 148}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 78, Col: 148}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var2)
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var3)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 6, "\"><sl-icon slot=\"prefix\" name=\"arrow-clockwise\"></sl-icon>Re-bench</sl-button></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "\"><sl-icon slot=\"prefix\" name=\"arrow-clockwise\"></sl-icon>Re-bench</sl-button></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -138,62 +153,75 @@ func modelBenchRow(row ModelBenchRowView) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var3 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var3 == nil {
-			templ_7745c5c3_Var3 = templ.NopComponent
+		templ_7745c5c3_Var4 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var4 == nil {
+			templ_7745c5c3_Var4 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 7, "<div><div class=\"flex items-baseline gap-2\"><sl-icon name=\"pc-display\" style=\"font-size:0.7rem;color:var(--mass-text-faint)\"></sl-icon> <span class=\"text-xs text-neutral-200 font-mono break-all min-w-0\">")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		var templ_7745c5c3_Var4 string
-		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(row.WorkerName)
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 82, Col: 86}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "</span> <span class=\"text-xs text-neutral-500 font-mono ml-auto flex-shrink-0\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 8, "<div data-filter-text=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var5 string
-		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinStringErrs(row.DeviceSet)
+		templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.ResolveAttributeValue(modelBenchRowFilterText(row))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 83, Col: 89}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 87, Col: 53}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var5)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "</span></div><div class=\"mt-1.5 space-y-2.5\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "\"><div class=\"flex items-baseline gap-2\"><sl-icon name=\"pc-display\" style=\"font-size:0.7rem;color:var(--mass-text-faint)\"></sl-icon> <span class=\"text-xs text-neutral-200 font-mono break-all min-w-0\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var6 string
+		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(row.WorkerName)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 90, Col: 86}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "</span> <span class=\"text-xs text-neutral-500 font-mono ml-auto flex-shrink-0\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var7 string
+		templ_7745c5c3_Var7, templ_7745c5c3_Err = templ.JoinStringErrs(row.DeviceSet)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 91, Col: 89}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var7))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "</span></div><div class=\"mt-1.5 space-y-2.5\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		switch row.State {
 		case ModelBenchRunning:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "<div class=\"flex items-center gap-2\"><sl-spinner style=\"font-size:0.7rem;--track-width:2px\"></sl-spinner> <span class=\"text-xs\" style=\"color:var(--mass-warning)\">benchmarking…</span></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "<div class=\"flex items-center gap-2\"><sl-spinner style=\"font-size:0.7rem;--track-width:2px\"></sl-spinner> <span class=\"text-xs\" style=\"color:var(--mass-warning)\">benchmarking…</span></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 		case ModelBenchIncapable:
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 11, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:5.5rem\">Verdict</span> <span class=\"text-xs rounded px-1.5 py-0.5 bg-red-900/60 text-red-300\">Incapable</span></div><p class=\"text-xs break-all\" style=\"color:var(--mass-danger)\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:5.5rem\">Verdict</span> <span class=\"text-xs rounded px-1.5 py-0.5 bg-red-900/60 text-red-300\">Incapable</span></div><p class=\"text-xs break-all\" style=\"color:var(--mass-danger)\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var6 string
-			templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(row.Error)
+			var templ_7745c5c3_Var8 string
+			templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(row.Error)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 97, Col: 78}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 105, Col: 78}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 12, "</p>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, "</p>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -202,7 +230,7 @@ func modelBenchRow(row ModelBenchRowView) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, " ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, " ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -210,7 +238,7 @@ func modelBenchRow(row ModelBenchRowView) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 14, " ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, " ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -218,7 +246,7 @@ func modelBenchRow(row ModelBenchRowView) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, " ")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, " ")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -227,7 +255,7 @@ func modelBenchRow(row ModelBenchRowView) templ.Component {
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "</div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -251,43 +279,93 @@ func benchPropRow(label, value string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var7 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var7 == nil {
-			templ_7745c5c3_Var7 = templ.NopComponent
+		templ_7745c5c3_Var9 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var9 == nil {
+			templ_7745c5c3_Var9 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:5.5rem\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs text-neutral-400 flex-shrink-0 whitespace-nowrap\" style=\"min-width:5.5rem\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var8 string
-		templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(label)
+		var templ_7745c5c3_Var10 string
+		templ_7745c5c3_Var10, templ_7745c5c3_Err = templ.JoinStringErrs(label)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 110, Col: 105}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 118, Col: 105}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "</span> <span class=\"text-xs text-neutral-200 font-mono break-all min-w-0\">")
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var10))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var9 string
-		templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(value)
-		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 111, Col: 76}
-		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "</span> <span class=\"text-xs text-neutral-200 font-mono break-all min-w-0\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "</span></div>")
+		var templ_7745c5c3_Var11 string
+		templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinStringErrs(value)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/model_bench.templ`, Line: 119, Col: 76}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "</span></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		return nil
 	})
+}
+
+// modelBenchSummary is the one-line verdict over the whole card: how much of
+// the fleet has an answer, what the answers span, and how many workers ruled
+// the model out. Counted per worker, not per row — a worker with several
+// device sets is still one worker, and one that measured anywhere isn't
+// incapable.
+func modelBenchSummary(view ModelBenchView) string {
+	benched := map[string]bool{}
+	incapable := map[string]bool{}
+	var minUnits, maxUnits float64
+	measured := false
+	for _, row := range view.Rows {
+		switch row.State {
+		case ModelBenchMeasured:
+			benched[row.WorkerName] = true
+			if !measured || row.UnitsPerSec < minUnits {
+				minUnits = row.UnitsPerSec
+			}
+			if !measured || row.UnitsPerSec > maxUnits {
+				maxUnits = row.UnitsPerSec
+			}
+			measured = true
+		case ModelBenchIncapable:
+			incapable[row.WorkerName] = true
+		}
+	}
+	for name := range benched {
+		delete(incapable, name)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "benched on %d/%d worker%s", len(benched), view.ConnectedWorkers, pluralS(view.ConnectedWorkers))
+	switch {
+	case !measured:
+	case minUnits == maxUnits:
+		fmt.Fprintf(&b, " · %.1f units/s", maxUnits)
+	default:
+		fmt.Fprintf(&b, " · %.1f–%.1f units/s", minUnits, maxUnits)
+	}
+	if len(incapable) > 0 {
+		fmt.Fprintf(&b, " · %d incapable", len(incapable))
+	}
+	return b.String()
+}
+
+// modelBenchRowFilterText feeds the card's filter input through the shell's
+// generic data-filter-text helper: worker, device set, failure reason.
+func modelBenchRowFilterText(row ModelBenchRowView) string {
+	return strings.ToLower(row.WorkerName + " " + row.DeviceSet + " " + row.Error)
 }
 
 // RenderModelBenchPanel renders the card as a string, for the fetch that

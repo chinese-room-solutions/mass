@@ -1,17 +1,19 @@
 // Models tab: handles delete confirmation + selected-model detail fetch.
 (function() {
-  // ── Sync the right-pane spacer with the first list card's vertical
-  // position so the props panel header lines up with the first row.
+  // ── Sync both side-panel spacers with the first list card's vertical
+  // position so the panel headers line up with the first row.
   var mScroll = document.getElementById('models-list-scroll');
-  var mSpacer = document.getElementById('models-props-spacer');
-  if (mScroll && mSpacer) {
+  var mSpacers = ['models-props-spacer', 'models-bench-spacer']
+    .map(function(id) { return document.getElementById(id); })
+    .filter(Boolean);
+  if (mScroll && mSpacers.length) {
     var syncTop = function() {
-      var tab = mSpacer.closest('#models-tab');
+      var tab = mScroll.closest('#models-tab');
       if (!tab) return;
       var tabRect = tab.getBoundingClientRect();
       var scrollTop = mScroll.getBoundingClientRect().top - tabRect.top;
       var scrollPad = parseFloat(getComputedStyle(mScroll).paddingTop) || 0;
-      mSpacer.style.height = (scrollTop + scrollPad) + 'px';
+      mSpacers.forEach(function(s) { s.style.height = (scrollTop + scrollPad) + 'px'; });
     };
     syncTop();
     new ResizeObserver(syncTop).observe(mScroll.parentElement);
@@ -28,20 +30,49 @@
   // valid.
   var _lastRuntime = '';
 
-  // MASS's own benchmark card lives below the gateway's detail panel and
-  // is served by MASS. It moves on its own (a bench concludes, a re-bench
-  // starts), so it refreshes on a timer for as long as a model is selected.
+  // MASS's own benchmark card fills the left panel and is served by MASS.
+  // It moves on its own (a bench concludes, a re-bench starts), so it
+  // refreshes on a timer for as long as a model is selected. The refresh
+  // swaps the whole card, so it carries the reader's place across — filter
+  // text and row scroll — and stands down while they're typing into it.
   var _benchTimer = null;
   var _benchID = '';
   function loadBenchCard() {
     var pane = document.getElementById('model-bench-pane');
     if (!pane) return;
     if (!_benchID || !_lastRuntime) { pane.innerHTML = ''; return; }
+    var input = pane.querySelector('#model-bench-filter-input');
+    if (input && document.activeElement === input) return;
+    var filter = input ? input.value : '';
+    var rows = pane.querySelector('#model-bench-rows');
+    var scrolled = rows ? rows.scrollTop : 0;
     fetch('/api/models/benchmarks?runtime=' + encodeURIComponent(_lastRuntime) +
           '&id=' + encodeURIComponent(_benchID))
       .then(function(r) { return r.text(); })
-      .then(function(html) { pane.innerHTML = html; })
+      .then(function(html) {
+        pane.innerHTML = html;
+        bindBenchFilter(filter);
+        var fresh = pane.querySelector('#model-bench-rows');
+        if (fresh && scrolled) fresh.scrollTop = scrolled;
+      })
       .catch(function() {});
+  }
+  // The card's filter input is part of the swapped HTML, so its binding is
+  // re-made whenever a new one appears — after our own fetch, and after the
+  // re-bench SSE patch, which replaces the card without going through us.
+  // Binding rides the shell's generic data-filter-text helper.
+  var _boundFilter = null;
+  function bindBenchFilter(value) {
+    var input = document.getElementById('model-bench-filter-input');
+    if (!input || input === _boundFilter) return;
+    if (typeof window.__massSetupFilter !== 'function') return;
+    if (value) input.value = value;
+    window.__massSetupFilter('model-bench-filter-input', 'model-bench-rows');
+    _boundFilter = input;
+  }
+  var benchPane = document.getElementById('model-bench-pane');
+  if (benchPane) {
+    new MutationObserver(function() { bindBenchFilter(''); }).observe(benchPane, {childList: true});
   }
   function watchBench(id) {
     _benchID = id;
