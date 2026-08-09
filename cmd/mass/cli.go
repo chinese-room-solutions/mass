@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -55,45 +56,48 @@ var verbs = map[string]verbHandler{
 	"skill":     cmdSkill,
 }
 
-// runCLI dispatches a management subcommand. args is os.Args[1:].
+// runCLI dispatches a management subcommand. args is os.Args[1:]. A -h/--help
+// anywhere in the arguments is answered here rather than by the subcommand's
+// flag set: the flag package would print bare flag defaults, which say nothing
+// about what the verb does or which arguments it needs.
 func runCLI(args []string) int {
+	if helpRequested(args) {
+		if printHelp(os.Stdout, verbChain(args)) {
+			return exitOK
+		}
+		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", strings.Join(verbChain(args), " "))
+		usage(os.Stderr)
+		return exitUsage
+	}
 	verb := args[0]
 	h, ok := verbs[verb]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", verb)
-		usage()
+		usage(os.Stderr)
 		return exitUsage
 	}
 	return h(args[1:])
 }
 
-// usage prints the top-level help text to stderr.
-func usage() {
-	fmt.Fprint(os.Stderr, `mass — MASS management CLI
+// usage prints the top-level help text. The command list comes from the same
+// table --help reads, so the two can't drift.
+func usage(w io.Writer) {
+	_, _ = fmt.Fprintf(w, `mass — MASS management CLI
 
 Usage:
   mass <command> [subcommand] [flags]
+  mass <command> --help            synopsis + detail for any command
 
 Commands:
-  status                                                        Orchestrator health overview
-  models list|import-local|import-remote|delete                 Model store
-  runtimes list|search|install|uninstall|start|stop|auto-start  Runtime gateways
-  workers list|enable|disable|device|benchmark|join-command|install-local
-                                                                Worker fleet
-  scheduler list|evict                                          Loaded model instances
-  queue list|cancel|cancel-running|evict                        Job queues
-  skill show|install DIR                                        Agent skill shipped in this binary
-
-Common flags (every command that reaches the server):
+%s
+Flags (every command that reaches the server):
   --addr string     MASS base URL (env MASS_ADDR, else local config)
   --token string    bearer token (env MASS_AUTH_TOKEN)
   --json            emit the raw JSON response
   --timeout dur     request timeout (default 60s; benchmark 10m)
 
 "skill" reaches no server and takes only --json.
-
-Run "mass <command>" with no subcommand for its subcommand list.
-`)
+`, commandList())
 }
 
 // commonFlags holds the flags shared by every subcommand.

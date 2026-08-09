@@ -9,6 +9,16 @@ The `mass` binary doubles as a client for its own `mass.v1` management API. A
 leading non-flag argument (`mass status`) runs the CLI; `mass -headless` /
 `mass -version` still boot the server.
 
+```sh
+mass <command> [subcommand] [flags]
+mass <command> --help      # synopsis + detail for any command
+```
+
+`--help` works at every level and reaches no server: on a group verb
+(`mass queue --help`) it lists that group's commands, on a leaf
+(`mass queue cancel --help`) it prints the synopsis, what the flags mean, and
+the caveats. Reach for it before guessing at a flag.
+
 ## Connection & auth
 
 - `--addr <url>` — base URL. Default: `$MASS_ADDR`, else the local config's

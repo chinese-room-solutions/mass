@@ -112,6 +112,7 @@ mass runtimes start llama-cpp                 # bring a gateway up
 mass models import-remote --runtime llama-cpp --repo owner/model --file q4.gguf
 mass workers list                             # fleet state + device IDs
 mass queue list                               # inspect queued/running jobs
+mass queue cancel --help                      # synopsis + detail for any command
 ```
 
 `runtimes install` takes the registry **package** name; `start`/`stop`/`uninstall`

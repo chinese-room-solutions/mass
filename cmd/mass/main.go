@@ -58,7 +58,7 @@ func main() {
 	// `mass --help` lands here (leading dash skips the CLI dispatch above), so
 	// stdlib usage alone would hide the management verbs. Show both.
 	flag.Usage = func() {
-		usage()
+		usage(os.Stderr)
 		fmt.Fprintln(os.Stderr, "\nServer flags (bare `mass` starts the app):")
 		flag.PrintDefaults()
 	}
