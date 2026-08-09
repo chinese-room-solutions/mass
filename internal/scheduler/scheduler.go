@@ -2944,6 +2944,10 @@ func (s *Scheduler) retryAfterLoadFailure(q queue.QueueInterface, msgID queue.Me
 // path: orphan request, load failure, AssignJob failure. Best-effort —
 // errors are logged but don't block the failure being recorded.
 func (s *Scheduler) cleanupRows(q queue.QueueInterface, workerMsgID queue.MessageID, globalMsgID string) {
+	// A job that dies before its stream starts still frees what it took
+	// (a batch slot, and an inflight record on the assign-failure path).
+	// Row deletion doesn't signal the queue pool, so say so explicitly.
+	defer s.kick()
 	s.queueMu.RLock()
 	globalQ := s.globalQ
 	s.queueMu.RUnlock()
@@ -3021,6 +3025,11 @@ func (s *Scheduler) pumpWorkerChunks(sw *worker.StreamWorker, q queue.QueueInter
 		s.observeThroughput(requestID)
 	}
 	s.finishInflight(requestID)
+	// The slot this job held is free now, and nothing else says so: row
+	// deletion doesn't signal the queue pool. One kick here covers every
+	// exit below, so the next job goes out immediately instead of waiting
+	// for the dispatcher's slow ticker.
+	s.kick()
 
 	if terminal {
 		if errText != "" {

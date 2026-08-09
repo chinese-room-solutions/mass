@@ -350,6 +350,77 @@ func TestDispatcher_SyncedHeartbeatDoesNotDoubleCountInflight(t *testing.T) {
 	require.Len(t, drive(), 1, "the freed slot must dispatch the queued job")
 }
 
+// A terminal frame must wake the dispatcher. Deleting the job's rows
+// doesn't signal the queue pool, so the job queued behind it used to wait
+// out the loop's 2s ticker — dead time between every pair of jobs on a
+// pool_size=1 worker. Driven through the real loop (Start), since the
+// gap is in the loop's wake-up sources.
+func TestDispatcher_JobTerminalWakesDispatcher(t *testing.T) {
+	const runtimeName = "llama-cpp"
+	const modelID = "m-1"
+
+	s, st := newTestScheduler(t)
+	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+	}))
+
+	assign := make(chan string, 2)
+	w := worker.NewFakeStreamWorker("w1", runtimeName,
+		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
+	w.SetFakeCapacity(1)
+	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
+	w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+		if aj := msg.GetAssignJob(); aj != nil {
+			select {
+			case assign <- aj.GetJobId():
+			default:
+			}
+		}
+		return nil
+	})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s.Start(ctx)
+
+	for range 2 {
+		_, err := s.Submit(ctx, SubmitRequest{
+			RuntimeName: runtimeName, ModelID: modelID,
+			Payload: []byte("p"), Cost: 100, CostAxis: "q4k_matvec",
+		})
+		require.NoError(t, err)
+	}
+
+	var first string
+	select {
+	case first = <-assign:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first job never reached the worker")
+	}
+
+	// The single slot is taken: the second job waits on the worker queue.
+	select {
+	case <-assign:
+		t.Fatal("a pool of 1 must not run two jobs at once")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Finish the first job and touch nothing else — no kick, no
+	// dispatchPass. The second assign has to land well inside the
+	// ticker interval.
+	w.DeliverJobChunk(first, &worker.JobChunk{
+		Type: worker.JobChunkTypeCompleted, Final: []byte("ok"),
+	})
+	select {
+	case <-assign:
+	case <-time.After(time.Second):
+		t.Fatal("the freed slot waited for the dispatcher ticker instead of the completion")
+	}
+}
+
 // tailTracker wraps a StateStoreInterface and counts every tail
 // credit/debit, plus tracks the running sum so a negative observation
 // becomes visible to the test. Every other call — including
