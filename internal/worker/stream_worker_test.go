@@ -188,3 +188,50 @@ func TestStreamWorker_ApplyHeartbeat_Files(t *testing.T) {
 	require.Equal(t, []string{"onnx/whisper"}, w.loaded[1].Files)
 	require.Empty(t, w.loaded[2].Files)
 }
+
+// A load with no pool size must be refused at the boundary rather than
+// sent. On the wire a 0 is indistinguishable from "grow until the VRAM
+// watermark", so a caller that forgot to size the pool would silently
+// get the unbounded behaviour the measured sizing exists to replace —
+// and MASS's memory gate, which is the only OOM protection once a load
+// is pinned, would be reasoning about a pool the worker never built.
+func TestStreamWorker_LoadModel_RejectsUnsetPoolSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		maxConcurrent int32
+		wantSent      bool
+	}{
+		{name: "unset is refused", maxConcurrent: 0, wantSent: false},
+		{name: "negative is refused", maxConcurrent: -1, wantSent: false},
+		{name: "positive is sent verbatim", maxConcurrent: 7, wantSent: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewFakeStreamWorker("w1", "llama-cpp", nil, time.Now())
+			sent := make(chan *workerpb.HubLoadModel, 1)
+			w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+				if lm := msg.GetLoadModel(); lm != nil {
+					sent <- lm
+				}
+				return nil
+			})
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := w.LoadModel(LoadModelRequest{ModelID: "m-1", MaxConcurrent: tt.maxConcurrent})
+				done <- err
+			}()
+
+			if !tt.wantSent {
+				require.ErrorIs(t, <-done, ErrNoPoolSize)
+				require.Empty(t, sent, "a rejected load must not reach the wire")
+				return
+			}
+			lm := <-sent
+			require.Equal(t, tt.maxConcurrent, lm.GetMaxConcurrent())
+			// Unblock the goroutine so it doesn't outlive the test.
+			w.DeliverLoadResult(lm.GetJobId(), LoadResult{PoolSize: tt.maxConcurrent}, "")
+			require.NoError(t, <-done)
+		})
+	}
+}

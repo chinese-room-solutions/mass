@@ -613,15 +613,35 @@ type LoadModelRequest struct {
 	ModelID   string
 	Files     []*workerpb.ModelFile
 	LoadHints []byte
+	// MaxConcurrent pins the context pool to exactly this many slots and
+	// turns the worker's own VRAM headroom gate off — MASS has already
+	// sized the load against the model's measured base and per-slot
+	// bytes, so its memory gate becomes the sole OOM protection.
+	// Required (> 0): 0 silently reverts the load to the worker's legacy
+	// grow-until-watermark behaviour, which is exactly the unbounded
+	// growth the measured pool size exists to replace.
+	MaxConcurrent int32
 	// Source is the gateway-supplied caller identity ("app: <name>",
 	// "direct"); MASS surfaces it in the Scheduler tab. Stored on the
 	// per-instance LoadedModelStatus immediately after a successful load.
 	Source string
 }
 
-// LoadModel asks the worker to load a model. Blocks until the worker reports
-// the result.
+// ErrNoPoolSize is returned when a load request omits MaxConcurrent.
+// Refusing the send is deliberate: a 0 on the wire is indistinguishable
+// from "grow until the watermark", so a caller that forgot to size the
+// pool would silently get the behaviour MASS is supposed to have
+// replaced. Failing loudly at the boundary keeps that impossible.
+var ErrNoPoolSize = errors.New("load model: max_concurrent must be > 0")
+
+// LoadModel asks the worker to load a model with a pinned context-pool
+// size. Blocks until the worker reports the result. Returns
+// [ErrNoPoolSize] without touching the wire when req.MaxConcurrent isn't
+// positive.
 func (w *StreamWorker) LoadModel(req LoadModelRequest) (LoadResult, error) {
+	if req.MaxConcurrent <= 0 {
+		return LoadResult{}, ctxerr.With(ErrNoPoolSize, map[string]any{"worker_id": w.id, "model_id": req.ModelID})
+	}
 	jobID := uuid.NewString()
 	ch := make(chan loadOutcome, 1)
 
@@ -631,10 +651,11 @@ func (w *StreamWorker) LoadModel(req LoadModelRequest) (LoadResult, error) {
 
 	if err := w.send(&workerpb.HubMessage{Msg: &workerpb.HubMessage_LoadModel{
 		LoadModel: &workerpb.HubLoadModel{
-			JobId:     jobID,
-			ModelId:   req.ModelID,
-			Files:     req.Files,
-			LoadHints: req.LoadHints,
+			JobId:         jobID,
+			ModelId:       req.ModelID,
+			Files:         req.Files,
+			LoadHints:     req.LoadHints,
+			MaxConcurrent: req.MaxConcurrent,
 		},
 	}}); err != nil {
 		w.pendingMu.Lock()

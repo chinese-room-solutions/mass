@@ -451,3 +451,112 @@ func TestDrainGlobal_UsableRowKeepsJobWaiting(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, queue.ResultStatusPending, res.Status)
 }
+
+// Every load MASS emits pins the context pool: the worker disables its
+// own VRAM headroom gate when it sees a pinned size, so a 0 here would
+// silently hand the load back to unbounded growth. The number must be
+// the same one plannedPoolSize derived from the model's row, under both
+// the latency-budget rule and the memory bound.
+func TestDispatchEnvelope_LoadCarriesPinnedPoolSize(t *testing.T) {
+	const (
+		runtimeName = "llama-cpp"
+		modelID     = "m-1"
+		modelKey    = "gguf/g/a.gguf"
+		gb          = int64(1024 * 1024 * 1024)
+	)
+	tests := []struct {
+		name         string
+		graphSecs    float64
+		baseBytes    int64
+		perSlotBytes int64
+		deviceMB     int
+		headroomPct  int32
+		want         int32
+	}{
+		{
+			// 2.5s budget / 0.5s decode = 5 slots; the row records no
+			// memory dimension, so nothing trims it.
+			name:      "budget-bound pool",
+			graphSecs: 0.5,
+			deviceMB:  24 * 1024,
+			want:      5,
+		},
+		{
+			// 2.5 / 0.1 = 25 slots, capped at 16 — but 24 GB free, a
+			// 5 GB base and 2 GB per slot at 75% headroom only leaves
+			// room for 7 more, so 8 wins.
+			name:         "memory-bound pool",
+			graphSecs:    0.1,
+			baseBytes:    5 * gb,
+			perSlotBytes: 2 * gb,
+			deviceMB:     24 * 1024,
+			headroomPct:  75,
+			want:         8,
+		},
+		{
+			// A model whose single decode outlasts the whole budget on
+			// hardware with no room to grow still gets one slot — never
+			// zero, which would mean "grow until the watermark".
+			name:         "starved pool floors at one, never zero",
+			graphSecs:    10,
+			baseBytes:    23 * gb,
+			perSlotBytes: 2 * gb,
+			deviceMB:     24 * 1024,
+			headroomPct:  75,
+			want:         1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, st := newStrictTestScheduler(t)
+			require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+				WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
+				Flops: 100, BenchedAt: time.Now(),
+			}))
+			require.NoError(t, st.SaveModelBenchmark(store.ModelBenchmarkRow{
+				WorkerID: "w1", DeviceSet: "gpu:0", ModelID: modelKey,
+				UnitsPerSec:  100,
+				GraphSecs:    tt.graphSecs,
+				BaseBytes:    tt.baseBytes,
+				PerSlotBytes: tt.perSlotBytes,
+			}))
+
+			devices := []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU, TotalMemoryMB: tt.deviceMB}}
+			w := worker.NewFakeStreamWorker("w1", runtimeName, devices, time.Now())
+			w.SetFakeDeviceStats([]stats.DeviceStats{{DeviceID: "gpu:0", UsedMemoryMB: 0, TotalMemoryMB: tt.deviceMB}})
+			w.SetFakeCapacity(0) // nothing resident: the dispatch must load
+			loads := make(chan *workerpb.HubLoadModel, 1)
+			w.SetFakeSender(func(msg *workerpb.HubMessage) error {
+				if lm := msg.GetLoadModel(); lm != nil {
+					select {
+					case loads <- lm:
+					default:
+					}
+				}
+				return nil
+			})
+			require.NoError(t, s.workers.Register(w))
+			s.OnWorkerConnected(w)
+
+			_, err := s.Submit(context.Background(), SubmitRequest{
+				RuntimeName: runtimeName,
+				ModelID:     modelID,
+				Payload:     []byte("p"),
+				Cost:        100,
+				HeadroomPct: tt.headroomPct,
+				Files:       []*workerpb.ModelFile{benchModelFile(modelKey, 1024)},
+			})
+			require.NoError(t, err)
+			s.dispatchPass(context.Background())
+
+			select {
+			case lm := <-loads:
+				require.Positive(t, lm.GetMaxConcurrent(),
+					"a load must never leave the pool size unset: 0 means unbounded growth")
+				require.Equal(t, tt.want, lm.GetMaxConcurrent())
+			case <-time.After(3 * time.Second):
+				t.Fatal("dispatch did not emit a load within 3s")
+			}
+		})
+	}
+}

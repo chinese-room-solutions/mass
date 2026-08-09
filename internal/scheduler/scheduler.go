@@ -2461,7 +2461,13 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 			ModelID:   env.ModelID,
 			Files:     env.Files,
 			LoadHints: env.LoadHints,
-			Source:    env.Source,
+			// The pool is pinned to what the measurement says fits and
+			// keeps latency inside the budget. Pinning also turns the
+			// worker's own headroom gate off, so the same row's memory
+			// figures (via the reservation above) are the only thing
+			// standing between this load and an OOM.
+			MaxConcurrent: int32(s.plannedPoolSize(sw, env, row)),
+			Source:        env.Source,
 		})
 		if err != nil {
 			s.logger.Warn().Err(err).Str("worker", sw.ID()).Str("model_id", env.ModelID).Uint8("attempt", env.Attempts+1).Msg("load-on-demand at dispatch")
