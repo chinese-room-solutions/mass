@@ -955,6 +955,14 @@ func RenderWorkersList(workers []WorkerView) string {
 		if w.Version != "" {
 			fmt.Fprintf(&b, `<span class="text-xs" style="color:var(--mass-text-faint)">v%s</span>`, html.EscapeString(w.Version))
 		}
+		// A worker measuring a model takes no jobs until it finishes. This
+		// is a presence marker only — the Queue tab renders the measurement
+		// as an exclusive unit of running work and is SSE-live, while this
+		// list is re-fetched on tab entry, so the icon may lag by one fetch.
+		if w.BenchingModel != "" {
+			fmt.Fprintf(&b, `<sl-tooltip content="Benchmarking %s"><sl-icon name="speedometer2" style="font-size:0.85rem;color:var(--mass-accent)"></sl-icon></sl-tooltip>`,
+				html.EscapeString(w.BenchingModel))
+		}
 		// Aggregate GFLOPS for the operator-visible "what does this worker
 		// bring" summary. GPU devices sum (tensor split runs them as one
 		// lockstep unit, but the throughput numbers add — bench measures
@@ -1009,12 +1017,6 @@ func RenderWorkersList(workers []WorkerView) string {
 				fmt.Fprintf(&b, `CPU %s`, formatGFlops(cpuGF))
 			}
 			b.WriteString(`</span>`)
-		}
-		// A worker measuring a model takes no jobs until it finishes —
-		// say so, or its idleness looks like a fault.
-		if w.BenchingModel != "" {
-			fmt.Fprintf(&b, `<span style="color:var(--mass-warning)" title="%s">benchmarking %s</span>`,
-				html.EscapeString(w.BenchingModel), html.EscapeString(ShortKey(w.BenchingModel)))
 		}
 		b.WriteString(`</div>`)
 		if len(w.Devices) > 0 {

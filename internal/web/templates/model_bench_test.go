@@ -122,7 +122,9 @@ func TestRenderWorkersList_FlopsAndBenchingState(t *testing.T) {
 			wantAbsent:  []string{"GFLOPS", "benchmarking"},
 		},
 		{
-			name: "benching worker says what it is measuring",
+			// Presence only: the Queue tab carries the live detail, this
+			// list is re-fetched on tab entry.
+			name: "benching worker gets a bench icon naming the model",
 			worker: WorkerView{
 				ID: "w3", Name: "host-c", RuntimeName: "llama-cpp", Online: true, Enabled: true,
 				Devices: []ComputeView{{
@@ -130,7 +132,11 @@ func TestRenderWorkersList_FlopsAndBenchingState(t *testing.T) {
 				}},
 				BenchingModel: "gguf/qwen/qwen3.gguf",
 			},
-			wantContain: []string{"benchmarking qwen3.gguf", `title="gguf/qwen/qwen3.gguf"`},
+			wantContain: []string{
+				`content="Benchmarking gguf/qwen/qwen3.gguf"`,
+				`<sl-icon name="speedometer2"`,
+			},
+			wantAbsent: []string{"benchmarking qwen3.gguf"},
 		},
 	}
 
