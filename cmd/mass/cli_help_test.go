@@ -82,6 +82,7 @@ func TestCLIHelpAfterTerminator(t *testing.T) {
 // usage error.
 func TestCommandListCoversEveryVerb(t *testing.T) {
 	routes := []string{
+		"serve",
 		"status",
 		"models list", "models import-local", "models import-remote", "models delete",
 		"runtimes list", "runtimes search", "runtimes install", "runtimes uninstall",

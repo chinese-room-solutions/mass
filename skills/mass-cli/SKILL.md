@@ -6,8 +6,9 @@ description: Manage a MASS instance — runtimes, models, workers, scheduler, qu
 # mass CLI
 
 The `mass` binary doubles as a client for its own `mass.v1` management API. A
-leading non-flag argument (`mass status`) runs the CLI; `mass -headless` /
-`mass -version` still boot the server.
+leading non-flag argument (`mass status`) runs the CLI. `mass serve` runs the
+daemon itself in the foreground (`--idle-timeout <dur>` makes it retire after
+that long with no client traffic); a bare `mass` opens the desktop app.
 
 ```sh
 mass <command> [subcommand] [flags]
@@ -31,6 +32,13 @@ the caveats. Reach for it before guessing at a flag.
   defaults `10m`).
 
 Every request carries `X-Mass-Actor: cli` for audit attribution.
+
+When the address comes from the local config (no `--addr`, no `$MASS_ADDR`)
+and nothing answers there, the CLI starts a local daemon on demand — detached,
+retiring itself after 2 minutes without client traffic — so verbs work on a
+machine where MASS isn't running yet. Expect the first such call to take a few
+seconds. An explicit `--addr` or `$MASS_ADDR` names a specific server and is
+never booted into existence.
 
 ## Verb reference
 
@@ -62,6 +70,7 @@ Every request carries `X-Mass-Actor: cli` for audit attribution.
 | `mass queue cancel-running --request-id ID` | CancelRunningJob | `mass queue cancel-running --request-id r1` |
 | `mass queue evict --queue Q --msg-id ID` | EvictQueuedJob | `mass queue evict --queue global --msg-id 01H...` |
 | `mass skill [show]` / `install DIR` | — (local) | `mass skill install ~/.claude/skills` |
+| `mass serve [--idle-timeout D]` | — (runs the daemon) | `mass serve` |
 
 Positional-name verbs accept flags after the name (`mass runtimes start llama-cpp --json`).
 

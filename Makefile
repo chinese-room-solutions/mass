@@ -37,7 +37,7 @@ WEBKIT_PC     := $(shell pkg-config --list-all 2>/dev/null | awk '/^webkit2gtk-4
 # WebView2 runtime ships with the OS), so the build is CGO-free and skips the
 # WebKitGTK dance the Linux branch needs. Recipes run under the same MSYS bash
 # as the Linux/macOS branch; the only deltas are the .exe suffix and the
-# -H windowsgui ldflag (the --headless flag re-attaches a console at runtime —
+# -H windowsgui ldflag (`mass serve` re-attaches a console at runtime —
 # cmd/mass/console_windows.go). There is no separate build script.
 
 ifdef IS_WIN
@@ -98,7 +98,7 @@ build-web:
 	fi
 
 # -H windowsgui marks the binary as a GUI app so Windows doesn't allocate a
-# console for it; --headless re-attaches to the parent console at runtime.
+# console for it; `mass serve` re-attaches to the parent console at runtime.
 build: build-web
 	@echo "==> Building mass ($(VERSION))..."
 	@mkdir -p $(BIN_DIR)

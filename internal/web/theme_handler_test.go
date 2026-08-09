@@ -10,33 +10,30 @@ import (
 )
 
 // TestHandleSetTheme drives POST /internal/settings/theme through the real mux.
-// A valid theme name persists cfg.Theme, fires the theme-change callback, and
-// patches both the theme and themeBase signals; an unknown/empty name is a
-// no-op (no persist, no callback, no signal patch).
+// A valid theme name persists cfg.Theme, notifies the GUI channel with the new
+// base, and patches both the theme and themeBase signals; an unknown/empty
+// name is a no-op (no persist, no notification, no signal patch).
 func TestHandleSetTheme(t *testing.T) {
 	tests := []struct {
-		name         string
-		body         string
-		wantTheme    string // expected cfg.Theme after the call ("" = unchanged from start)
-		wantPersist  bool
-		wantCallback bool
-		wantBaseDark bool // callback arg when fired
+		name        string
+		body        string
+		wantTheme   string // expected cfg.Theme after the call ("" = unchanged from start)
+		wantPersist bool
+		wantBase    string // base broadcast to the GUI channel ("" = none)
 	}{
 		{
-			name:         "valid dark persists and patches",
-			body:         `{"theme":"dark"}`,
-			wantTheme:    "dark",
-			wantPersist:  true,
-			wantCallback: true,
-			wantBaseDark: true,
+			name:        "valid dark persists and patches",
+			body:        `{"theme":"dark"}`,
+			wantTheme:   "dark",
+			wantPersist: true,
+			wantBase:    "dark",
 		},
 		{
-			name:         "valid light persists and patches",
-			body:         `{"theme":"light"}`,
-			wantTheme:    "light",
-			wantPersist:  true,
-			wantCallback: true,
-			wantBaseDark: false,
+			name:        "valid light persists and patches",
+			body:        `{"theme":"light"}`,
+			wantTheme:   "light",
+			wantPersist: true,
+			wantBase:    "light",
 		},
 		{
 			name:        "unknown name is a no-op",
@@ -59,9 +56,8 @@ func TestHandleSetTheme(t *testing.T) {
 
 			var saved bool
 			h.saveFn = func() { saved = true }
-			var cbFired bool
-			var cbDark bool
-			h.SetOnThemeChange(func(dark bool) { cbFired = true; cbDark = dark })
+			guiCh := h.gui.subscribe()
+			defer h.gui.unsubscribe(guiCh)
 
 			req := httptest.NewRequest(http.MethodPost, "/internal/settings/theme", strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -71,10 +67,14 @@ func TestHandleSetTheme(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			require.Equal(t, tt.wantTheme, h.cfg.Theme)
 			require.Equal(t, tt.wantPersist, saved)
-			require.Equal(t, tt.wantCallback, cbFired)
+			var gotBase string
+			select {
+			case gotBase = <-guiCh:
+			default:
+			}
+			require.Equal(t, tt.wantBase, gotBase, "GUI channel notification")
 
-			if tt.wantCallback {
-				require.Equal(t, tt.wantBaseDark, cbDark)
+			if tt.wantBase != "" {
 				body := rec.Body.String()
 				require.Contains(t, body, `"theme"`)
 				require.Contains(t, body, `"themeBase"`)

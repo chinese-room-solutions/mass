@@ -21,6 +21,14 @@ type commandDoc struct {
 // commands is the single source for both the top-level usage list and every
 // `--help`. Order is the printed order.
 var commands = []commandDoc{
+	{"serve", "serve [--idle-timeout D]", "run the daemon in the foreground", true, `
+Run the MASS daemon — API, dashboard, worker hub, runtime gateways — in the
+foreground, with no window. This is what a server or a container runs;
+Ctrl-C / SIGTERM stops it. With --idle-timeout the daemon retires itself
+after that long with no client traffic (worker connections don't count) —
+the GUI and the other verbs spawn it this way, detached with 2m, when no
+daemon answers on the configured address. 0 (the default) never retires.`},
+
 	{"status", "status", "orchestrator health overview", false, `
 One-line summary of the orchestrator: version, listen address, how many
 runtimes are installed and running, how many workers are known and online, and
@@ -231,8 +239,12 @@ func printCommandHelp(w io.Writer, prefix string) bool {
 
 // flagsLine is the footer under one command's help: the flags that reach it. A
 // local command touches no server, so naming the connection flags there would
-// send the reader looking for an effect they can't have.
+// send the reader looking for an effect they can't have. serve is local in
+// that sense but has its own flag instead of --json.
 func flagsLine(c commandDoc) string {
+	if c.Name == "serve" {
+		return "Flags: --idle-timeout DUR"
+	}
 	if c.Local {
 		return "Flags: --json"
 	}

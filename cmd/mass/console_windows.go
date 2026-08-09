@@ -11,8 +11,9 @@ var (
 const attachParentProcess = ^uintptr(0) // ATTACH_PARENT_PROCESS = (DWORD)-1
 
 // attachOrAllocConsole attaches to the parent process console (e.g. when
-// launched from cmd.exe or PowerShell) or allocates a new one. This is
-// needed in headless mode so that stderr output is visible.
+// launched from cmd.exe or PowerShell) or allocates a new one. An interactive
+// `mass serve` needs it so its stderr logs are visible; a detached spawn
+// skips it (its stderr is the spawn log).
 func attachOrAllocConsole() {
 	r, _, _ := attachConsole.Call(attachParentProcess)
 	if r == 0 {

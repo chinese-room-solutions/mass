@@ -79,9 +79,6 @@ type Handler struct {
 	authHashMu sync.RWMutex
 	authHash   []byte
 
-	themeMu       sync.RWMutex
-	onThemeChange func(dark bool)
-
 	// Daemon control surface (see daemonctl.go).
 	onDemand   bool
 	gui        *guiChannel
@@ -156,14 +153,6 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 	}
 	h.mux = h.buildRoutes()
 	return h, nil
-}
-
-// SetOnThemeChange registers a callback fired whenever the theme changes
-// (used by the GUI to update the native window).
-func (h *Handler) SetOnThemeChange(fn func(dark bool)) {
-	h.themeMu.Lock()
-	h.onThemeChange = fn
-	h.themeMu.Unlock()
 }
 
 // SetAuthHash atomically swaps the active auth-token hash. Empty disables auth.
@@ -491,10 +480,10 @@ func (h *Handler) handleSetTheme(w http.ResponseWriter, r *http.Request) {
 	h.applyTheme(datastar.NewSSE(w, r), info)
 }
 
-// applyTheme makes info the active theme: persists it, notifies the native
-// chrome callback, and patches $theme (name) + $themeBase so every
+// applyTheme makes info the active theme: persists it, notifies the GUI
+// control channel, and patches $theme (name) + $themeBase so every
 // data-attr-bound element (page background, logo image, dialog tints) flips
-// alongside the OS window. The native callback only affects host chrome — the
+// alongside the OS window. The channel event only affects host chrome — the
 // page itself listens for these signals. Shared by the theme picker and the
 // fallback taken when the active theme is uninstalled.
 func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.ThemeInfo) {
@@ -502,16 +491,9 @@ func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.
 	if h.saveFn != nil {
 		h.saveFn()
 	}
-	h.themeMu.RLock()
-	cb := h.onThemeChange
-	h.themeMu.RUnlock()
-	if cb != nil {
-		// Native chrome tracks the theme's base, so any pluggable theme maps
-		// its window frame onto dark/light correctly.
-		cb(info.Base == uikit.ThemeDark)
-	}
-	// The GUI window is a separate process; it learns the base over its
-	// control channel.
+	// The GUI window is a separate process; its native chrome learns the base
+	// (dark/light) over the control channel, so any pluggable theme maps its
+	// window frame correctly.
 	h.gui.broadcast(string(info.Base))
 	if b, err := json.Marshal(map[string]any{"theme": string(info.Name), "themeBase": string(info.Base)}); err == nil {
 		if err := sse.PatchSignals(b); err != nil {
