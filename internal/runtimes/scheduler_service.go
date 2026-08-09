@@ -57,18 +57,15 @@ func (s *schedulerServiceServer) Submit(ctx context.Context, req *gatewaypb.Subm
 		return nil, status.Error(codes.InvalidArgument, "submit: model_id required")
 	}
 	jobID, err := s.sched.Submit(ctx, scheduler.SubmitRequest{
-		RuntimeName:   s.runtimeName,
-		ModelID:       req.ModelId,
-		Payload:       req.Payload,
-		Cost:          req.Cost,
-		CostAxis:      req.CostAxis,
-		Files:         req.Files,
-		LoadHints:     req.LoadHints,
-		BaseLoadBytes: req.BaseLoadBytes,
-		PerSlotBytes:  req.PerSlotBytes,
-		HeadroomPct:   req.HeadroomPct,
-		Source:        req.Source,
-		Priority:      priorityFromProto(req.GetPriority()),
+		RuntimeName: s.runtimeName,
+		ModelID:     req.ModelId,
+		Payload:     req.Payload,
+		Cost:        req.Cost,
+		Files:       req.Files,
+		LoadHints:   req.LoadHints,
+		HeadroomPct: req.HeadroomPct,
+		Source:      req.Source,
+		Priority:    priorityFromProto(req.GetPriority()),
 	})
 	if err != nil {
 		return nil, mapErrToGRPC(err)
@@ -321,10 +318,7 @@ func mapErrToGRPC(err error) error {
 		return nil
 	case errors.Is(err, scheduler.ErrNoWorker):
 		return status.Error(codes.Unavailable, err.Error())
-	case errors.Is(err, scheduler.ErrNoMemoryFit):
-		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, scheduler.ErrInvalidCost),
-		errors.Is(err, scheduler.ErrInvalidCostAxis),
 		errors.Is(err, scheduler.ErrFieldTooLong):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, scheduler.ErrNoResult),

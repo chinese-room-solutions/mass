@@ -119,24 +119,22 @@ func TestScheduler_ReestimateWorkerQueue_RewritesQueuedSeconds(t *testing.T) {
 	const (
 		wID   = "w1"
 		qName = "worker|w1"
-		axis  = "q4k_matvec"
 	)
 	// Two GPUs benched at different rates; the operator will disable
 	// the slow one to verify the sum shrinks the predicted seconds.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1800}, BenchedAt: time.Now(),
+		Flops: 1800, BenchedAt: time.Now(),
 	}))
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:1", DeviceName: "gpu:1",
-		Throughput: map[string]float64{axis: 200}, BenchedAt: time.Now(),
+		Flops: 200, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}, {ID: "gpu:1", Type: stats.DeviceTypeGPU}},
 		time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -147,10 +145,13 @@ func TestScheduler_ReestimateWorkerQueue_RewritesQueuedSeconds(t *testing.T) {
 	// Pre-fill with QueuedSeconds = 999 (wildly wrong) so we can see the
 	// rewrite. Cost = 2000 tokens. Under both GPUs (1800+200 = 2000) →
 	// 1.0s; under gpu:0 only (1800) → ~1.111s.
+	seedModelBench(t, st, wID, "gpu:0,gpu:1", "m", 2000)
+	seedModelBench(t, st, wID, "gpu:0", "m", 1800)
 	env := queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m", RequestID: "r-1", Payload: []byte("p"),
-		Cost: 2000, CostAxis: axis, QueuedSeconds: 999,
+		Cost: 2000, QueuedSeconds: 999,
+		Files: []*workerpb.ModelFile{benchModelFile("m", 0)},
 	}
 	_, err := wq.Submit(ctx, env)
 	require.NoError(t, err)
@@ -189,19 +190,17 @@ func TestScheduler_ReestimateWorkerQueue_RewritesQueuedSeconds(t *testing.T) {
 func TestScheduler_ReestimateWorkerQueue_MultiEnvelopeSumAndTailModel(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, BenchedAt: time.Now(),
+		Flops: 1000, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -222,10 +221,12 @@ func TestScheduler_ReestimateWorkerQueue_MultiEnvelopeSumAndTailModel(t *testing
 		{"r-b", "m-b", 500, []byte("b")},
 		{"r-c", "m-c", 250, []byte("c")},
 	} {
+		seedModelBench(t, st, wID, "gpu:0", e.model, 1000)
 		env := queue.Envelope{
 			Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 			ModelID: e.model, RequestID: e.req, Payload: e.payload,
-			Cost: e.cost, CostAxis: axis, QueuedSeconds: 999,
+			Cost: e.cost, QueuedSeconds: 999,
+			Files: []*workerpb.ModelFile{benchModelFile(e.model, 0)},
 		}
 		_, err := wq.Submit(ctx, env)
 		require.NoError(t, err)
@@ -313,19 +314,17 @@ func TestScheduler_ReestimateWorkerQueue_NoQueueNoOp(t *testing.T) {
 func TestScheduler_ReestimateWorkerQueue_AllDisabledZeroesEverything(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, BenchedAt: time.Now(),
+		Flops: 1000, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -337,7 +336,7 @@ func TestScheduler_ReestimateWorkerQueue_AllDisabledZeroesEverything(t *testing.
 		_, err := wq.Submit(ctx, queue.Envelope{
 			Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 			ModelID: "m", RequestID: req, Payload: []byte("p"),
-			Cost: 1000, CostAxis: axis, QueuedSeconds: 5,
+			Cost: 1000, QueuedSeconds: 5,
 		})
 		require.NoError(t, err)
 	}
@@ -372,20 +371,18 @@ func TestScheduler_ReestimateWorkerQueue_AllDisabledZeroesEverything(t *testing.
 func TestScheduler_ReestimateWorkerQueue_AccountsForModelSwitchCost(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, LoadGBs: 10,
+		Flops: 1000, LoadGBs: 10,
 		BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -393,11 +390,14 @@ func TestScheduler_ReestimateWorkerQueue_AccountsForModelSwitchCost(t *testing.T
 	s.queueMu.RUnlock()
 	require.NotNil(t, wq)
 
-	// 1st: m-a, no files — no switch cost. Pure compute 0.5s.
+	seedModelBench(t, st, wID, "gpu:0", "m-a", 1000)
+	seedModelBench(t, st, wID, "gpu:0", "m-b", 1000)
+	// 1st: m-a, zero-byte artifact — no switch cost. Pure compute 0.5s.
 	_, err := wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m-a", RequestID: "r-a", Payload: []byte("p"),
-		Cost: 500, CostAxis: axis,
+		Cost:  500,
+		Files: []*workerpb.ModelFile{benchModelFile("m-a", 0)},
 	})
 	require.NoError(t, err)
 	// 2nd: m-b, 1 GB file — pays a switch term of 1GB / 10GB/s = 0.1s
@@ -405,8 +405,8 @@ func TestScheduler_ReestimateWorkerQueue_AccountsForModelSwitchCost(t *testing.T
 	_, err = wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m-b", RequestID: "r-b", Payload: []byte("p"),
-		Cost: 500, CostAxis: axis,
-		Files: []*workerpb.ModelFile{{SizeBytes: 1_000_000_000}},
+		Cost:  500,
+		Files: []*workerpb.ModelFile{benchModelFile("m-b", 1_000_000_000)},
 	})
 	require.NoError(t, err)
 	require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{
@@ -414,8 +414,8 @@ func TestScheduler_ReestimateWorkerQueue_AccountsForModelSwitchCost(t *testing.T
 	}))
 
 	// No model is resident on the worker, so the first envelope (m-a) is
-	// itself a cold load — but it has no Files, so switch cost = 0
-	// (totalLoadBytes returns 0). Subsequent m-a → m-b switch is real.
+	// itself a cold load — but its artifact reports 0 bytes, so switch
+	// cost = 0. The subsequent m-a → m-b switch is real.
 	s.ReestimateWorkerQueue(ctx, wID)
 
 	dqs, err := st.GetWorkerQueueState(qN)
@@ -432,13 +432,12 @@ func TestScheduler_ReestimateWorkerQueue_AccountsForModelSwitchCost(t *testing.T
 func TestScheduler_ReestimateWorkerQueue_RunningResidentSuppressesRepeatSwitch(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, LoadGBs: 10,
+		Flops: 1000, LoadGBs: 10,
 		BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
@@ -446,7 +445,6 @@ func TestScheduler_ReestimateWorkerQueue_RunningResidentSuppressesRepeatSwitch(t
 	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: "m-a"}})
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -463,11 +461,12 @@ func TestScheduler_ReestimateWorkerQueue_RunningResidentSuppressesRepeatSwitch(t
 		{"r-2", "m-b"},
 		{"r-3", "m-b"},
 	} {
+		seedModelBench(t, st, wID, "gpu:0", e.model, 1000)
 		_, err := wq.Submit(ctx, queue.Envelope{
 			Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 			ModelID: e.model, RequestID: e.req, Payload: []byte("p"),
-			Cost: 500, CostAxis: axis,
-			Files: []*workerpb.ModelFile{{SizeBytes: 1_000_000_000}},
+			Cost:  500,
+			Files: []*workerpb.ModelFile{benchModelFile(e.model, 1_000_000_000)},
 		})
 		require.NoError(t, err)
 	}
@@ -488,22 +487,21 @@ func TestScheduler_ReestimateWorkerQueue_RunningResidentSuppressesRepeatSwitch(t
 	require.Equal(t, "m-b", dqs.TailModelID, "last enqueued model wins tail_model_id")
 }
 
-// When the worker's enabled devices have NO bench numbers (operator
-// disabled the only benched device), throughput is unschedulable for
-// every envelope — predicted seconds collapse to 0 and tail goes to 0.
+// When the worker's new device set has NO measured row for the model
+// (the operator disabled the benched device), the envelope is
+// unschedulable — predicted seconds collapse to 0 and tail goes to 0.
 // Dispatch's eligibility gate will surface those rows as "no fit" when
 // they reach the head.
 func TestScheduler_ReestimateWorkerQueue_NoBenchOnEnabledSet(t *testing.T) {
-	s, st := newTestScheduler(t)
+	s, st := newStrictTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	// Bench only gpu:0; operator will disable it.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, BenchedAt: time.Now(),
+		Flops: 1000, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{
@@ -512,23 +510,24 @@ func TestScheduler_ReestimateWorkerQueue_NoBenchOnEnabledSet(t *testing.T) {
 		}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
 	wq := s.devQueues[qN]
 	s.queueMu.RUnlock()
+	seedModelBench(t, st, wID, "gpu:0", "m", 1000)
 	_, err := wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m", RequestID: "r-1", Payload: []byte("p"),
-		Cost: 1000, CostAxis: axis,
+		Cost:  1000,
+		Files: []*workerpb.ModelFile{benchModelFile("m", 0)},
 	})
 	require.NoError(t, err)
 	require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{
 		QueueName: qN, WorkerID: wID,
 	}))
 
-	// Disable the only benched device; gpu:1 has no bench.
+	// Disable the only measured device; the new set has no row.
 	disabled := map[string]bool{"gpu:0": true}
 	s.SetDeviceEnabledFn(func(_, devID string) bool { return !disabled[devID] })
 
@@ -537,7 +536,7 @@ func TestScheduler_ReestimateWorkerQueue_NoBenchOnEnabledSet(t *testing.T) {
 	dqs, err := st.GetWorkerQueueState(qN)
 	require.NoError(t, err)
 	require.InDelta(t, 0.0, dqs.TailSeconds, 1e-9,
-		"no bench on enabled set → unschedulable → predicted seconds zero")
+		"no measured row for the new device set → unschedulable → predicted seconds zero")
 }
 
 // A row whose body fails to decode is logged and excluded from the new
@@ -546,19 +545,17 @@ func TestScheduler_ReestimateWorkerQueue_NoBenchOnEnabledSet(t *testing.T) {
 func TestScheduler_ReestimateWorkerQueue_MalformedRowSkipped(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, BenchedAt: time.Now(),
+		Flops: 1000, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -569,7 +566,7 @@ func TestScheduler_ReestimateWorkerQueue_MalformedRowSkipped(t *testing.T) {
 	res, err := wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m", RequestID: "r-good", Payload: []byte("p"),
-		Cost: 500, CostAxis: axis,
+		Cost: 500,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, res.ID)
@@ -642,17 +639,16 @@ func TestStore_SetTailSeconds_MissingRowIsNoOp(t *testing.T) {
 func TestScheduler_ReestimateWorkerQueue_SkipsLeasedRows(t *testing.T) {
 	s, st := newTestScheduler(t)
 	const (
-		wID  = "w1"
-		qN   = "worker|w1"
-		axis = "q4k_matvec"
+		wID = "w1"
+		qN  = "worker|w1"
 	)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{axis: 1000}, BenchedAt: time.Now(),
+		Flops: 1000, BenchedAt: time.Now(),
 	}))
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: wID, DeviceID: "gpu:1", DeviceName: "gpu:1",
-		Throughput: map[string]float64{axis: 500}, BenchedAt: time.Now(),
+		Flops: 500, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker(wID, "llama-cpp",
 		[]stats.Device{
@@ -661,7 +657,6 @@ func TestScheduler_ReestimateWorkerQueue_SkipsLeasedRows(t *testing.T) {
 		}, time.Now())
 	require.NoError(t, s.workers.Register(w))
 	s.OnWorkerConnected(w)
-	s.SetRuntimeDefaultAxisFn(func(string) string { return axis })
 
 	ctx := context.Background()
 	s.queueMu.RLock()
@@ -678,13 +673,13 @@ func TestScheduler_ReestimateWorkerQueue_SkipsLeasedRows(t *testing.T) {
 	res1, err := wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m", RequestID: "r-leased", Payload: []byte("p"),
-		Cost: 1000, CostAxis: axis, QueuedSeconds: preTogglePrediction,
+		Cost: 1000, QueuedSeconds: preTogglePrediction,
 	})
 	require.NoError(t, err)
 	res2, err := wq.Submit(ctx, queue.Envelope{
 		Priority: queue.PriorityMedium, RuntimeName: "llama-cpp",
 		ModelID: "m", RequestID: "r-pending", Payload: []byte("p"),
-		Cost: 1000, CostAxis: axis, QueuedSeconds: preTogglePrediction,
+		Cost: 1000, QueuedSeconds: preTogglePrediction,
 	})
 	require.NoError(t, err)
 	require.NoError(t, st.UpsertWorkerQueueState(store.WorkerQueueState{

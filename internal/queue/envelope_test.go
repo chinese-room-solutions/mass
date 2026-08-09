@@ -22,7 +22,6 @@ func TestEnvelope_MarshalIdentityFieldCap(t *testing.T) {
 			Source:      max,
 			RequestID:   max,
 			GlobalMsgID: max,
-			CostAxis:    max,
 			Payload:     []byte("p"),
 		}
 		out, err := queue.UnmarshalEnvelope(in.Marshal())
@@ -32,7 +31,6 @@ func TestEnvelope_MarshalIdentityFieldCap(t *testing.T) {
 		require.Equal(t, max, out.Source)
 		require.Equal(t, max, out.RequestID)
 		require.Equal(t, max, out.GlobalMsgID)
-		require.Equal(t, max, out.CostAxis)
 		require.Equal(t, []byte("p"), out.Payload)
 	})
 
@@ -46,7 +44,6 @@ func TestEnvelope_MarshalIdentityFieldCap(t *testing.T) {
 		{name: "source", env: queue.Envelope{Source: oversize}},
 		{name: "request_id", env: queue.Envelope{RequestID: oversize}},
 		{name: "global_msg_id", env: queue.Envelope{GlobalMsgID: oversize}},
-		{name: "cost_axis", env: queue.Envelope{CostAxis: oversize}},
 	}
 	for _, tt := range tests {
 		t.Run("256-byte "+tt.name+" panics", func(t *testing.T) {

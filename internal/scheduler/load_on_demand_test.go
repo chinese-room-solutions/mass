@@ -30,7 +30,7 @@ func TestDrainOneWorkerQueue_PopsWhenCapacityZero(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	// No model loaded → capacity=0. Sender records every HubMessage so
@@ -72,10 +72,10 @@ func TestDrainOneWorkerQueue_PopsWhenCapacityZero(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     wantFiles,
-		LoadHints: wantHints,
-		Source:    "test",
+		Cost:        100,
+		Files:       wantFiles,
+		LoadHints:   wantHints,
+		Source:      "test",
 	})
 	require.NoError(t, err)
 
@@ -117,7 +117,7 @@ func TestPickWorkerQueue_TailModelSuppressesLoadCost(t *testing.T) {
 	for _, wID := range []string{"w-warm", "w-cold"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: wID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			MemoryGBs: 1.0, LoadGBs: 1.0, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			MemoryGBs: 1.0, LoadGBs: 1.0, Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 	// Both workers have capacity and equal compute. The differentiator
@@ -147,8 +147,8 @@ func TestPickWorkerQueue_TailModelSuppressesLoadCost(t *testing.T) {
 	target, _ := s.pickWorkerQueue(queue.Envelope{
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
-		Cost:        float64(100), CostAxis: "q4k_matvec",
-		Files: []*workerpb.ModelFile{{SizeBytes: 10_000_000_000}},
+		Cost:        float64(100),
+		Files:       []*workerpb.ModelFile{{SizeBytes: 10_000_000_000}},
 	})
 	require.NotNil(t, target)
 	require.Equal(t, "worker|w-warm", target.name,
@@ -166,7 +166,7 @@ func TestPumpWorkerChunks_LeavesResultPendingOnDisconnect(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	// Sender that records the AssignJob and immediately responds
@@ -194,7 +194,7 @@ func TestPumpWorkerChunks_LeavesResultPendingOnDisconnect(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.NoError(t, err)
 
@@ -245,7 +245,7 @@ func TestPumpWorkerChunks_CancelledThenDisconnect_NotRedistributed(t *testing.T)
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var assigned atomic.Bool
@@ -270,7 +270,7 @@ func TestPumpWorkerChunks_CancelledThenDisconnect_NotRedistributed(t *testing.T)
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.NoError(t, err)
 
@@ -321,7 +321,7 @@ func TestDispatchEnvelope_OverlapWithActiveResidentDefersLoad(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	// Resident model occupies gpu:0 AND is actively running a job
@@ -350,10 +350,10 @@ func TestDispatchEnvelope_OverlapWithActiveResidentDefersLoad(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     newModelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
-		Source:    "test",
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
+		Source:      "test",
 	})
 	require.NoError(t, err)
 
@@ -380,7 +380,7 @@ func TestDispatchEnvelope_OverlapWithIdleResidentEvictsThenLoads(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var (
@@ -422,10 +422,10 @@ func TestDispatchEnvelope_OverlapWithIdleResidentEvictsThenLoads(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     newModelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
-		Source:    "test",
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
+		Source:      "test",
 	})
 	require.NoError(t, err)
 
@@ -476,7 +476,7 @@ func TestDispatchEnvelope_TwoOverlappingSubmitsDoNotCoLocate(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var (
@@ -518,12 +518,12 @@ func TestDispatchEnvelope_TwoOverlappingSubmitsDoNotCoLocate(t *testing.T) {
 	files := []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}}
 	_, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelA, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec", Files: files, LoadHints: []byte("h"),
+		Cost: 100, Files: files, LoadHints: []byte("h"),
 	})
 	require.NoError(t, err)
 	_, err = s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelB, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec", Files: files, LoadHints: []byte("h"),
+		Cost: 100, Files: files, LoadHints: []byte("h"),
 	})
 	require.NoError(t, err)
 
@@ -578,7 +578,7 @@ func TestDispatchEnvelope_AlreadyResidentSkipsGate(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	var (
@@ -610,7 +610,7 @@ func TestDispatchEnvelope_AlreadyResidentSkipsGate(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -636,7 +636,7 @@ func TestDispatchEnvelope_StaleResidentIdleEvictsThenReloads(t *testing.T) {
 	for _, devID := range []string{"gpu:0", "gpu:1"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: "w1", DeviceID: devID, DeviceName: devID,
-			MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 	// Operator disabled gpu:1 *after* the model was loaded.
@@ -684,10 +684,10 @@ func TestDispatchEnvelope_StaleResidentIdleEvictsThenReloads(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
-		Source:    "test",
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
+		Source:      "test",
 	})
 	require.NoError(t, err)
 
@@ -737,7 +737,7 @@ func TestDispatchEnvelope_StaleResidentActiveBounces(t *testing.T) {
 	for _, devID := range []string{"gpu:0", "gpu:1"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: "w1", DeviceID: devID, DeviceName: devID,
-			MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 	s.SetDeviceEnabledFn(func(_, devID string) bool { return devID != "gpu:1" })
@@ -768,10 +768,10 @@ func TestDispatchEnvelope_StaleResidentActiveBounces(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
-		Source:    "test",
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
+		Source:      "test",
 	})
 	require.NoError(t, err)
 
@@ -985,7 +985,7 @@ func TestDispatchEnvelope_DisabledGPUFallsThroughToCPUOverlap(t *testing.T) {
 	for _, devID := range []string{"gpu:0", "cpu:0"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: "w1", DeviceID: devID, DeviceName: devID,
-			MemoryGBs: 10, LoadGBs: 10, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			MemoryGBs: 10, LoadGBs: 10, Flops: 100, BenchedAt: time.Now(),
 		}))
 	}
 	// Operator: GPU disabled, CPU enabled.
@@ -1023,9 +1023,9 @@ func TestDispatchEnvelope_DisabledGPUFallsThroughToCPUOverlap(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     newModelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
-		Files:     []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
-		LoadHints: []byte("h"),
+		Cost:        100,
+		Files:       []*workerpb.ModelFile{{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 1024}},
+		LoadHints:   []byte("h"),
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -1035,11 +1035,11 @@ func TestDispatchEnvelope_DisabledGPUFallsThroughToCPUOverlap(t *testing.T) {
 		"gate must block load: predicted set [cpu:0] overlaps active resident on [cpu:0]")
 }
 
-// dispatchEnvelope must record COMPUTE-ONLY seconds (and the axis the
-// throughput lookup actually used) on the inflight record. The envelope's
-// QueuedSeconds carries the load-switch latency priced at placement, but
-// the load completes before the inflight clock starts — carrying it over
-// (the old behaviour) overstated the worker's busy-time in scoring.
+// dispatchEnvelope must record COMPUTE-ONLY seconds on the inflight
+// record. The envelope's QueuedSeconds carries the load-switch latency
+// priced at placement, but the load completes before the inflight clock
+// starts — carrying it over (the old behaviour) overstated the worker's
+// busy-time in scoring.
 func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
@@ -1048,12 +1048,8 @@ func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 	// a 25 GB artifact → loadLat = 1.0 s priced into QueuedSeconds.
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 100, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 100, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
-	// The envelope names an axis no device benched — the used-axis
-	// fallback must also be what the inflight record carries.
-	s.SetRuntimeDefaultAxisFn(func(string) string { return "q4k_matvec" })
-
 	w := worker.NewFakeStreamWorker("w1", runtimeName, gpu1(), time.Now())
 	w.SetFakeCapacity(0)
 	loadID := make(chan string, 1)
@@ -1073,7 +1069,7 @@ func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "axis_nobody_benched",
+		Cost:        100,
 		Files: []*workerpb.ModelFile{
 			{Url: "http://x/y.gguf", Filename: "y.gguf", SizeBytes: 25_000_000_000},
 		},
@@ -1099,6 +1095,4 @@ func TestDispatchEnvelope_InflightSecondsComputeOnly(t *testing.T) {
 		"inflight seconds must be Cost/throughput only — no load latency")
 	require.InDelta(t, 1.0, inflightSec, 1e-9,
 		"queue inflight sum must match the compute-only prediction")
-	require.Equal(t, "q4k_matvec", rec.axis,
-		"record must carry the axis the prediction divided by, not the unbenched request axis")
 }

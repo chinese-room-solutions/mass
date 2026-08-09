@@ -46,23 +46,6 @@ func TestFlattenHeaders(t *testing.T) {
 	require.Equal(t, "Bearer tok", out["Authorization"])
 }
 
-func TestPrimaryThroughput(t *testing.T) {
-	tests := []struct {
-		name string
-		axes map[string]float64
-		want float64
-	}{
-		{"empty", nil, 0},
-		{"single", map[string]float64{"q4k": 42}, 42},
-		{"picks max", map[string]float64{"q4k": 10, "fp16": 30, "q8": 20}, 30},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, primaryThroughput(tt.axes))
-		})
-	}
-}
-
 func TestExpectedClientDisconnect(t *testing.T) {
 	require.False(t, expectedClientDisconnect(nil))
 	require.True(t, expectedClientDisconnect(context.Canceled))

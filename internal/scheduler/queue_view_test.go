@@ -34,7 +34,7 @@ func TestQueueSnapshot_ListsGlobalAndWorkerQueues(t *testing.T) {
 	for _, id := range []string{"a", "b"} {
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: id, DeviceID: "gpu:0", DeviceName: "gpu:0",
-			MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 		}))
 		w := newFakeWorker(id, []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 		require.NoError(t, s.workers.Register(w))
@@ -87,7 +87,7 @@ func TestQueuedModelFiles_UnionsAllQueues(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -152,7 +152,7 @@ func TestQueueSnapshot_WorkerInflightFlagDrivenByInflightTracker(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -182,7 +182,7 @@ func TestQueueSnapshot_WorkerInflightFlagDrivenByInflightTracker(t *testing.T) {
 		RequestID: "rid-tracked", Payload: []byte("p"),
 	})
 	require.NoError(t, err)
-	s.startInflight(workerQueueName("w1"), "rid-tracked", "m-tracked", "", "", 1.0, 0)
+	s.startInflight(workerQueueName("w1"), "rid-tracked", "m-tracked", "", 1.0, 0)
 
 	sections, err := s.QueueSnapshot(context.Background())
 	require.NoError(t, err)
@@ -335,10 +335,9 @@ func TestCancelQueuedRow(t *testing.T) {
 // materialises and is available in s.devQueues.
 func stageWorkerQueue(t *testing.T, s *Scheduler, workerID string) {
 	t.Helper()
-	st := s.store.(*store.Store)
-	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
+	require.NoError(t, testStore(s).SaveBenchmark(store.BenchmarkRow{
 		WorkerID: workerID, DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker(workerID, []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -370,7 +369,7 @@ func TestEvictQueuedRowToGlobal(t *testing.T) {
 			queueName: workerQueueName("w1"),
 			stage: func(t *testing.T, s *Scheduler) string {
 				t.Helper()
-				st := s.store.(*store.Store)
+				st := testStore(s)
 				require.NoError(t, s.results.Create(requestID))
 				gres, err := s.globalQ.Submit(context.Background(), queue.Envelope{
 					Priority: queue.PriorityMedium, RuntimeName: "llama-cpp", ModelID: "m-e",
@@ -464,8 +463,7 @@ func TestEvictQueuedRowToGlobal(t *testing.T) {
 				require.Len(t, gPeek, 1, "global anchor must become visible after evict")
 			}
 			if tt.checkTailDebited {
-				st := s.store.(*store.Store)
-				dqState, err := st.GetWorkerQueueState(wqName)
+				dqState, err := testStore(s).GetWorkerQueueState(wqName)
 				require.NoError(t, err)
 				require.InDelta(t, 0.0, dqState.TailSeconds, 1e-9, "tail must be debited")
 			}
@@ -554,7 +552,7 @@ func TestCancelRunningJob(t *testing.T) {
 				if inflightID == "" {
 					inflightID = tt.requestID
 				}
-				s.startInflight(workerQueueName("w1"), inflightID, "", "", "", 1.0, 0)
+				s.startInflight(workerQueueName("w1"), inflightID, "", "", 1.0, 0)
 				if tt.attachJobID {
 					s.attachWorkerJobID(inflightID, "worker-job-"+inflightID)
 				}
@@ -586,7 +584,7 @@ func TestPumpWorkerChunks_OperatorCancelRewritesErrText(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	jobIDCh := make(chan string, 1)
@@ -610,7 +608,7 @@ func TestPumpWorkerChunks_OperatorCancelRewritesErrText(t *testing.T) {
 		RuntimeName: runtimeName,
 		ModelID:     modelID,
 		Payload:     []byte("p"),
-		Cost:        100, CostAxis: "q4k_matvec",
+		Cost:        100,
 	})
 	require.NoError(t, err)
 

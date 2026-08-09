@@ -22,7 +22,7 @@ func stageRunningJob(t *testing.T, s *Scheduler, st *store.Store) (requestID str
 	const runtimeName, modelID = "llama-cpp", "m-1"
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	cancelCh := make(chan string, 4)
 	w = worker.NewFakeStreamWorker("w1", runtimeName,
@@ -43,7 +43,7 @@ func stageRunningJob(t *testing.T, s *Scheduler, st *store.Store) (requestID str
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -147,7 +147,7 @@ func TestCancelByRequestID(t *testing.T) {
 		ctx := context.Background()
 		require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 			WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-			Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+			Flops: 100, BenchedAt: time.Now(),
 		}))
 
 		assigns := make(chan string, 4)
@@ -170,7 +170,7 @@ func TestCancelByRequestID(t *testing.T) {
 		// Submitted, placed, not yet dispatched.
 		rid, err := s.Submit(ctx, SubmitRequest{
 			RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-			Cost: 100, CostAxis: "q4k_matvec",
+			Cost: 100,
 		})
 		require.NoError(t, err)
 		s.queueMu.RLock()
@@ -257,7 +257,7 @@ func TestCancelByRequestID(t *testing.T) {
 
 		// The recorded intent makes the subsequent promotion abort: startInflight
 		// returns false (job never reaches AssignJob).
-		require.False(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", "axis", 1.0, 0),
+		require.False(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", 1.0, 0),
 			"a cancel recorded mid-dispatch must abort the inflight promotion")
 
 		// No inflight record was created.
@@ -274,7 +274,7 @@ func TestCancelByRequestID(t *testing.T) {
 
 		s.markDispatching(rid)
 		// No cancel: promotion succeeds and the marker is consumed.
-		require.True(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", "axis", 1.0, 0))
+		require.True(t, s.startInflight(workerQueueName("w1"), rid, "m", "llama-cpp", 1.0, 0))
 		s.inflightMu.Lock()
 		_, tracked := s.inflightByRequest[rid]
 		_, stillDispatching := s.dispatchingByRequest[rid]
@@ -315,7 +315,7 @@ func TestAsyncWait_ResultDurableBeforeTerminalChunk(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	assigns := make(chan string, 1)
@@ -337,7 +337,7 @@ func TestAsyncWait_ResultDurableBeforeTerminalChunk(t *testing.T) {
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 	s.dispatchPass(context.Background())
@@ -374,7 +374,7 @@ func TestAsyncEndToEnd_SubmitDispatchCompleteGetResult(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	assigns := make(chan string, 1)
@@ -396,7 +396,7 @@ func TestAsyncEndToEnd_SubmitDispatchCompleteGetResult(t *testing.T) {
 
 	rid, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID, Payload: []byte("p"),
-		Cost: 100, CostAxis: "q4k_matvec",
+		Cost: 100,
 	})
 	require.NoError(t, err)
 

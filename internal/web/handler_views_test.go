@@ -70,7 +70,7 @@ func TestBuildWorkerViews_RendersDevicesAndBench(t *testing.T) {
 		DeviceName: "NVIDIA RTX 4090",
 		MemoryGBs:  900.0,
 		LoadGBs:    50.0,
-		Throughput: map[string]float64{"q4k_matvec": 1234.5},
+		Flops:      1234.5,
 		BenchedAt:  time.Unix(1_700_000_000, 0),
 	}))
 

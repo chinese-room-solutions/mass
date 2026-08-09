@@ -533,21 +533,6 @@ func (h *Handler) buildWorkerViews() []templates.WorkerView {
 	return views
 }
 
-// primaryThroughput returns one representative throughput number from a
-// device's runtime-private axis map for the Workers tab card. Today the
-// UI shows one "Compute" line per device; we pick the highest value so a
-// worker that advertises multiple axes still shows its strongest number.
-// Returns 0 when the map is empty.
-func primaryThroughput(axes map[string]float64) float64 {
-	var best float64
-	for _, v := range axes {
-		if v > best {
-			best = v
-		}
-	}
-	return best
-}
-
 // safeDevices calls Devices() with panic recovery — a misbehaving worker
 // implementation must not bring the dashboard down.
 func safeDevices(wkr worker.WorkerInterface) (devices []stats.Device) {

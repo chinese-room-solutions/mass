@@ -125,7 +125,7 @@ func (s *massService) ListWorkers(_ context.Context, _ *connect.Request[rpc.List
 				HasBenchmark:   di.HasBenchmark,
 				MemoryGbs:      di.MemoryGBs,
 				LoadGbs:        di.LoadGBs,
-				Throughput:     di.Throughput,
+				Flops:          di.ComputeGFlops,
 			})
 		}
 		out = append(out, &rpc.Worker{
@@ -190,7 +190,7 @@ func (s *massService) BenchmarkWorkers(_ context.Context, req *connect.Request[r
 			DeviceName: r.DeviceName,
 			MemoryGbs:  r.MemoryGBs,
 			LoadGbs:    r.LoadGBs,
-			Throughput: r.Throughput,
+			Flops:      r.Flops,
 			Error:      r.Error,
 		})
 	}

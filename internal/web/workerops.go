@@ -45,8 +45,7 @@ type DeviceInfo struct {
 	HasBenchmark   bool
 	MemoryGBs      float64
 	LoadGBs        float64
-	ComputeGFlops  float64            // primary (highest) throughput axis, for the one-line UI card
-	Throughput     map[string]float64 // full runtime-private axis map, for the API
+	ComputeGFlops  float64 // device matmul throughput, display only
 }
 
 // workerInfos assembles per-worker neutral views from the live fleet plus any
@@ -99,8 +98,7 @@ func (h *Handler) workerInfos() []WorkerInfo {
 				if row, err := h.store.GetBenchmark(wkr.ID(), dev.ID); err == nil {
 					di.MemoryGBs = row.MemoryGBs
 					di.LoadGBs = row.LoadGBs
-					di.ComputeGFlops = primaryThroughput(row.Throughput)
-					di.Throughput = row.Throughput
+					di.ComputeGFlops = row.Flops
 					di.HasBenchmark = true
 				}
 			}

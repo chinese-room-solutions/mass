@@ -5,32 +5,34 @@ import (
 	"time"
 
 	"github.com/chinese-room-solutions/mass/internal/queue"
+	"github.com/chinese-room-solutions/mass/internal/store"
 	"github.com/chinese-room-solutions/mass/internal/worker"
 	"github.com/chinese-room-solutions/mass/pkg/stats"
 	"github.com/stretchr/testify/require"
 )
 
-// projectedLoadBytes combines the gateway's (base, perSlot) estimate
-// and the effective headroom — the explicit per-load override first
-// (the worker honors it over its own flag), worker-reported second,
-// default 75 last — with the worker's free memory to predict the
-// post-grow pool's total memory footprint. The table covers every
-// degenerate branch plus a realistic GPU-with-headroom case.
+// projectedLoadBytes combines the measured (base, perSlot) figures from
+// the model_benchmarks row and the effective headroom — the explicit
+// per-load override first (the worker honors it over its own flag),
+// worker-reported second, default 75 last — with the worker's free
+// memory to predict the post-grow pool's total memory footprint. The
+// table covers every degenerate branch plus a realistic
+// GPU-with-headroom case.
 func TestScheduler_ProjectedLoadBytes(t *testing.T) {
 	const gb = int64(1024 * 1024 * 1024)
 	tests := []struct {
 		name        string
 		deviceMB    int   // total memory on the worker's single GPU
 		usedMB      int   // used memory (free = total - used)
-		base        int64 // env.BaseLoadBytes
-		perSlot     int64 // env.PerSlotBytes
+		base        int64 // row.BaseBytes
+		perSlot     int64 // row.PerSlotBytes
 		headroomPct int32 // env.HeadroomPct (gateway hint)
 		workerPct   int32 // registration-reported headroom (0 = not reported)
 		want        int64
 	}{
 		{
-			// base == 0 — gateway has no estimate. MASS skips
-			// projection and returns 0; callers fall back to
+			// base == 0 — nothing measured. MASS skips projection
+			// and returns 0; callers fall back to
 			// totalLoadBytes(env.Files).
 			name:    "base=0 returns 0 (unknown)",
 			base:    0,
@@ -38,7 +40,7 @@ func TestScheduler_ProjectedLoadBytes(t *testing.T) {
 		},
 		{
 			// perSlot == 0 — runtime has no concurrency dimension
-			// (API proxy, single-shot job, missing GGUF metadata).
+			// (API proxy, single-shot job).
 			// Projection collapses to pool=1 → returns base.
 			name:        "perSlot=0 collapses to base",
 			deviceMB:    24 * 1024,
@@ -268,95 +270,32 @@ func TestScheduler_ProjectedLoadBytes(t *testing.T) {
 			}
 			require.NoError(t, s.workers.Register(w))
 
-			env := queue.Envelope{
-				BaseLoadBytes: tt.base,
-				PerSlotBytes:  tt.perSlot,
-				HeadroomPct:   tt.headroomPct,
-			}
-			require.Equal(t, tt.want, s.projectedLoadBytes(w, env))
+			env := queue.Envelope{HeadroomPct: tt.headroomPct}
+			row := store.ModelBenchmarkRow{BaseBytes: tt.base, PerSlotBytes: tt.perSlot}
+			require.Equal(t, tt.want, s.projectedLoadBytes(w, env, row))
 		})
 	}
 }
 
-// Envelope round-trips the three load-cost fields verbatim through
-// Marshal/Unmarshal — including the zero-valued sentinels MASS treats
-// as "gateway didn't estimate."
-func TestEnvelope_LoadBytesRoundtrip(t *testing.T) {
+// Envelope round-trips HeadroomPct verbatim through Marshal/Unmarshal,
+// including the zero-valued sentinel MASS treats as "unset". The memory
+// figures no longer ride the envelope — they come from the measured row.
+func TestEnvelope_HeadroomRoundtrip(t *testing.T) {
 	tests := []struct {
 		name string
 		env  queue.Envelope
 	}{
 		{
-			name: "all unset (legacy/unknown)",
-			env: queue.Envelope{
-				RequestID:   "r1",
-				RuntimeName: "llama-cpp",
-				Cost:        1.0,
-				CostAxis:    "q4k_matvec",
-			},
+			name: "unset",
+			env:  queue.Envelope{RequestID: "r1", RuntimeName: "llama-cpp", Cost: 1.0},
 		},
 		{
-			name: "base only (perSlot unknown)",
-			env: queue.Envelope{
-				RequestID:     "r2",
-				RuntimeName:   "llama-cpp",
-				Cost:          1.0,
-				CostAxis:      "q4k_matvec",
-				BaseLoadBytes: 5 * 1024 * 1024 * 1024,
-			},
-		},
-		{
-			name: "full triplet",
-			env: queue.Envelope{
-				RequestID:     "r3",
-				RuntimeName:   "llama-cpp",
-				Cost:          1.0,
-				CostAxis:      "q4k_matvec",
-				BaseLoadBytes: 5 * 1024 * 1024 * 1024,
-				PerSlotBytes:  2 * 1024 * 1024 * 1024,
-				HeadroomPct:   75,
-			},
+			name: "gateway hint",
+			env:  queue.Envelope{RequestID: "r2", RuntimeName: "llama-cpp", Cost: 1.0, HeadroomPct: 75},
 		},
 		{
 			name: "edge: headroom 100",
-			env: queue.Envelope{
-				RequestID:     "r4",
-				RuntimeName:   "llama-cpp",
-				Cost:          1.0,
-				CostAxis:      "q4k_matvec",
-				BaseLoadBytes: 1,
-				PerSlotBytes:  1,
-				HeadroomPct:   100,
-			},
-		},
-		{
-			// perSlot-only is unusual (gateway would normally pair it
-			// with a base) but the wire format must carry whatever the
-			// envelope holds. Documents that the fields are independent.
-			name: "edge: perSlot only, no base",
-			env: queue.Envelope{
-				RequestID:    "r5",
-				RuntimeName:  "llama-cpp",
-				Cost:         1.0,
-				CostAxis:     "q4k_matvec",
-				PerSlotBytes: 2 * 1024 * 1024 * 1024,
-				HeadroomPct:  75,
-			},
-		},
-		{
-			// Large bytes near int64 mid-range — verifies the
-			// little-endian encoding isn't sign-extending the high bit.
-			// 1 PiB is comfortably below 2^62.
-			name: "edge: large byte counts",
-			env: queue.Envelope{
-				RequestID:     "r6",
-				RuntimeName:   "llama-cpp",
-				Cost:          1.0,
-				CostAxis:      "q4k_matvec",
-				BaseLoadBytes: 1 << 50, // 1 PiB
-				PerSlotBytes:  1 << 40, // 1 TiB
-				HeadroomPct:   99,
-			},
+			env:  queue.Envelope{RequestID: "r3", RuntimeName: "llama-cpp", Cost: 1.0, HeadroomPct: 100},
 		},
 	}
 
@@ -364,8 +303,6 @@ func TestEnvelope_LoadBytesRoundtrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			out, err := queue.UnmarshalEnvelope(tt.env.Marshal())
 			require.NoError(t, err)
-			require.Equal(t, tt.env.BaseLoadBytes, out.BaseLoadBytes)
-			require.Equal(t, tt.env.PerSlotBytes, out.PerSlotBytes)
 			require.Equal(t, tt.env.HeadroomPct, out.HeadroomPct)
 		})
 	}

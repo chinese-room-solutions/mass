@@ -272,7 +272,7 @@ func (h *Hub) Connect(ctx context.Context, stream *connect.BidiStream[workerpb.W
 					DeviceName: d.DeviceName,
 					MemoryGBs:  d.MemoryGbs,
 					LoadGBs:    d.LoadGbs,
-					Throughput: d.Throughput,
+					Flops:      d.GetFlops(),
 					BenchedAt:  time.Now(),
 				}
 			}

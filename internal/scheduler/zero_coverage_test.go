@@ -23,7 +23,7 @@ func TestSetWorkerEnabledFn_DropsCandidate(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		MemoryGBs: 25, LoadGBs: 25, Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		MemoryGBs: 25, LoadGBs: 25, Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := worker.NewFakeStreamWorker("w1", runtimeName, gpu1(), time.Now())
 	w.SetFakeCapacity(4)
@@ -33,7 +33,7 @@ func TestSetWorkerEnabledFn_DropsCandidate(t *testing.T) {
 
 	// Baseline: worker is enabled, picked.
 	target, _ := s.pickWorkerQueue(queue.Envelope{
-		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100), CostAxis: "q4k_matvec",
+		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100),
 	})
 	require.NotNil(t, target)
 	require.Equal(t, "worker|w1", target.name)
@@ -42,14 +42,14 @@ func TestSetWorkerEnabledFn_DropsCandidate(t *testing.T) {
 	s.SetWorkerEnabledFn(func(string) bool { return false })
 
 	target, _ = s.pickWorkerQueue(queue.Envelope{
-		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100), CostAxis: "q4k_matvec",
+		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100),
 	})
 	require.Nil(t, target, "operator-disabled worker must drop out of candidates")
 
 	// Re-enable lifts the gate.
 	s.SetWorkerEnabledFn(func(string) bool { return true })
 	target, _ = s.pickWorkerQueue(queue.Envelope{
-		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100), CostAxis: "q4k_matvec",
+		RuntimeName: runtimeName, ModelID: modelID, Cost: float64(100),
 	})
 	require.NotNil(t, target, "re-enabling must restore candidacy")
 }

@@ -73,25 +73,12 @@ var ErrNoDeviceQueue = errors.New("no enabled device queue available for runtime
 // Surfaces as InvalidArgument to gateways.
 var ErrInvalidCost = errors.New("submit: cost must be > 0")
 
-// ErrInvalidCostAxis is returned by Submit when the gateway passed an
-// empty CostAxis. The axis must be non-empty so MASS can look up the
-// worker's throughput. Surfaces as InvalidArgument to gateways.
-var ErrInvalidCostAxis = errors.New("submit: cost_axis must be non-empty")
-
 // ErrFieldTooLong is returned by Submit when a gateway-supplied identity
 // field exceeds the envelope wire format's 255-byte cap. Truncating would
 // silently corrupt identity (a truncated ModelID breaks residency
 // matching and cancellation), so the submit is rejected instead.
 // Surfaces as InvalidArgument to gateways.
 var ErrFieldTooLong = errors.New("submit: field exceeds 255 bytes")
-
-// ErrNoMemoryFit is returned by Submit when no online worker has
-// enough total hardware memory across its default device set to host
-// the requested load. Distinguishes "fleet fundamentally too small"
-// from "fleet busy right now" — the former is operator-actionable
-// (add a bigger worker, shrink the model); the latter would resolve
-// by waiting. Surfaces as FailedPrecondition to gateways.
-var ErrNoMemoryFit = errors.New("submit: no worker has enough memory to host this model")
 
 // ErrWorkerReestimating is returned by toggle entry points when a
 // previous enable/disable change on the same worker is still recomputing
@@ -110,14 +97,6 @@ type WorkerEnabledFn func(workerID string) bool
 // A worker without any enabled devices has no device queues and is skipped
 // entirely. Returns true when no callback is wired.
 type DeviceEnabledFn func(workerID, deviceID string) bool
-
-// RuntimeDefaultAxisFn returns the throughput axis a runtime's gateway
-// declared as required (via InitResponse.default_cost_axis). The
-// scheduler uses it as the fallback when an envelope's CostAxis names
-// an axis a worker hasn't benched. Returns "" when no gateway is
-// running for runtimeName — placement then disregards fallback and only
-// admits workers that bench the exact requested axis.
-type RuntimeDefaultAxisFn func(runtimeName string) string
 
 // dispatchLeaseDuration is how long a dispatcher-leased WORKER-queue row
 // stays invisible to other consumers per extension. A dispatch routinely
@@ -194,7 +173,6 @@ type Scheduler struct {
 	workerEnabledMu sync.RWMutex
 	workerEnabled   WorkerEnabledFn
 	deviceEnabled   DeviceEnabledFn
-	runtimeAxis     RuntimeDefaultAxisFn
 
 	jobsMu     sync.Mutex
 	jobBuffers map[string]*jobBuffer // RequestID → in-memory replay buffer
@@ -241,6 +219,10 @@ type Scheduler struct {
 	// containing an empty BenchmarkRow) records the absence of a row so
 	// repeat misses stay cheap.
 	benchCache map[string]map[string]store.BenchmarkRow
+
+	// modelBench caches the per-(worker, device set, model) measurements
+	// that decide candidacy, estimates, pool size, and the memory gate.
+	modelBench *modelBenchCache
 
 	// draining marks worker queues that currently have a drain goroutine
 	// running (see drainDeviceQueues). The entry's bool records whether a
@@ -341,9 +323,6 @@ type inflightRecord struct {
 	// dispatched) can be emitted on terminal frames without re-resolving
 	// the envelope.
 	runtimeName string
-	// axis is the throughput axis the prediction actually divided by (the
-	// runtime default when the envelope's CostAxis wasn't benched).
-	axis string
 }
 
 // tailState is one entry of the in-memory tail mirror: the queued
@@ -375,8 +354,14 @@ type StateStoreInterface interface {
 	// one write, not incrementally.
 	SetTailSeconds(queueName string, value float64, tailModelID string) error
 	// GetBenchmark returns the most recent per-device benchmark row.
-	// Scoring requires it (no benchmark = device not schedulable).
+	// A worker needs one to get a queue at all; the numbers themselves
+	// are display + load-latency only.
 	GetBenchmark(workerID, deviceID string) (store.BenchmarkRow, error)
+	// GetModelBenchmark returns the measured row for one (worker, device
+	// set, model) triple, or [sql.ErrNoRows] when the bench hasn't
+	// concluded there. Placement, estimates, pool sizing, and the memory
+	// gate all read it.
+	GetModelBenchmark(workerID, deviceSet, modelID string) (store.ModelBenchmarkRow, error)
 }
 
 // New builds a Scheduler. Call [Scheduler.InitQueue] once a database is
@@ -395,6 +380,7 @@ func New(cfg *config.Config, logger zerolog.Logger, workers *worker.Fleet) *Sche
 		memoryReservations:   make(map[string]int64),
 		reestimateLocks:      make(map[string]*sync.Mutex),
 		benchCache:           make(map[string]map[string]store.BenchmarkRow),
+		modelBench:           newModelBenchCache(),
 		draining:             make(map[string]bool),
 		orphanSince:          make(map[string]time.Time),
 		orphanGrace:          orphanQueueGrace,
@@ -426,27 +412,6 @@ func (s *Scheduler) SetDeviceEnabledFn(fn DeviceEnabledFn) {
 	s.workerEnabledMu.Lock()
 	s.deviceEnabled = fn
 	s.workerEnabledMu.Unlock()
-}
-
-// SetRuntimeDefaultAxisFn registers the per-runtime default-axis lookup
-// used by the scheduler's throughput-fallback path. When a Submit names
-// a cost_axis a candidate worker hasn't benched, the scheduler falls
-// back to this axis instead. Without the callback wired, only exact-
-// axis matches are eligible.
-func (s *Scheduler) SetRuntimeDefaultAxisFn(fn RuntimeDefaultAxisFn) {
-	s.workerEnabledMu.Lock()
-	s.runtimeAxis = fn
-	s.workerEnabledMu.Unlock()
-}
-
-func (s *Scheduler) runtimeDefaultAxis(runtimeName string) string {
-	s.workerEnabledMu.RLock()
-	fn := s.runtimeAxis
-	s.workerEnabledMu.RUnlock()
-	if fn == nil {
-		return ""
-	}
-	return fn(runtimeName)
 }
 
 func (s *Scheduler) isWorkerEnabled(id string) bool {
@@ -521,18 +486,14 @@ type SubmitRequest struct {
 	RuntimeName string
 	ModelID     string
 	Payload     []byte
-	// Cost is the gateway's prediction of how expensive this job is in
-	// the runtime's reference cost units. MASS never interprets the
-	// units — all prediction physics lives runtime-side — the only
-	// quantity MASS derives is time: Cost divided by the chosen worker's
-	// throughput on CostAxis is the predicted wall-clock seconds every
-	// scoring, tail, and calibration decision operates on. Required (> 0).
+	// Cost is how expensive this job is in the MODEL'S OWN units, as the
+	// gateway prices it — the same unit it puts on the bench payload it
+	// authors. MASS never interprets the unit; the only quantity it
+	// derives is time: Cost divided by the model's measured
+	// units_per_sec on the chosen worker is the predicted wall-clock
+	// seconds every scoring, tail, and ETA decision operates on.
+	// Required (> 0).
 	Cost float64
-	// CostAxis names the throughput dimension Cost divides by. The
-	// runtime's gateway declares a default axis on Init that MASS uses
-	// as fallback when CostAxis names something a worker hasn't
-	// benched. Required (non-empty).
-	CostAxis string
 	// Files are the load artifacts MASS may need to ship to a worker that
 	// doesn't already have ModelID loaded. Forwarded verbatim as
 	// HubLoadModel.files.
@@ -540,18 +501,6 @@ type SubmitRequest struct {
 	// LoadHints is the gateway-defined load configuration blob.
 	// Forwarded verbatim as HubLoadModel.load_hints.
 	LoadHints []byte
-	// BaseLoadBytes is the gateway's prediction of the fixed device
-	// memory cost the load pays regardless of concurrency. MASS uses
-	// it to reject submits when no fleet member's hardware could fit
-	// it (Submit-time) and to filter workers whose free memory is too
-	// small at dispatch time. 0 = unknown — both checks pass-through.
-	BaseLoadBytes int64
-	// PerSlotBytes is the gateway's prediction of the incremental
-	// memory cost per concurrent slot. MASS combines it with the
-	// chosen worker's free memory and HeadroomPct to project the
-	// post-grow pool size used for wall-clock load latency. 0 = no
-	// concurrency dimension (projection collapses to pool=1).
-	PerSlotBytes int64
 	// HeadroomPct is the operator's explicit per-load device-memory
 	// watermark override (1-100), set only when the load hints carry
 	// one. The worker gives a per-load hint precedence over its own
@@ -582,18 +531,14 @@ type SubmitRequest struct {
 // released-only on a worker disconnect (OnWorkerDisconnected) so
 // drainGlobal can re-place it.
 //
-// Returns ErrNoWorker when no online worker matches the runtime.
-// Returns ErrInvalidCost / ErrInvalidCostAxis when the gateway omitted
-// the throughput contract fields.
+// Returns ErrNoWorker when no online worker matches the runtime, and
+// ErrInvalidCost when the gateway omitted the cost.
 func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, error) {
 	if req.RuntimeName == "" {
 		return "", fmt.Errorf("submit: runtime_name required")
 	}
 	if req.Cost <= 0 {
 		return "", ctxerr.With(ErrInvalidCost, map[string]any{"runtime_name": req.RuntimeName})
-	}
-	if req.CostAxis == "" {
-		return "", ctxerr.With(ErrInvalidCostAxis, map[string]any{"runtime_name": req.RuntimeName})
 	}
 	source := req.Source
 	if source == "" {
@@ -606,7 +551,6 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 	for _, f := range []struct{ name, value string }{
 		{"runtime_name", req.RuntimeName},
 		{"model_id", req.ModelID},
-		{"cost_axis", req.CostAxis},
 		{"source", source},
 	} {
 		if len(f.value) > 255 {
@@ -638,19 +582,16 @@ func (s *Scheduler) Submit(ctx context.Context, req SubmitRequest) (string, erro
 	}
 
 	env := queue.Envelope{
-		Priority:      req.Priority,
-		Cost:          req.Cost,
-		CostAxis:      req.CostAxis,
-		RuntimeName:   req.RuntimeName,
-		ModelID:       req.ModelID,
-		Source:        source,
-		RequestID:     requestID,
-		Files:         req.Files,
-		LoadHints:     req.LoadHints,
-		BaseLoadBytes: req.BaseLoadBytes,
-		PerSlotBytes:  req.PerSlotBytes,
-		HeadroomPct:   req.HeadroomPct,
-		Payload:       req.Payload,
+		Priority:    req.Priority,
+		Cost:        req.Cost,
+		RuntimeName: req.RuntimeName,
+		ModelID:     req.ModelID,
+		Source:      source,
+		RequestID:   requestID,
+		Files:       req.Files,
+		LoadHints:   req.LoadHints,
+		HeadroomPct: req.HeadroomPct,
+		Payload:     req.Payload,
 	}
 	res, err := globalQ.Submit(ctx, env)
 	if err != nil {
@@ -758,13 +699,6 @@ func (s *Scheduler) preflight(req SubmitRequest) error {
 	candidates := s.WorkersForRuntime(req.RuntimeName)
 	if len(candidates) == 0 {
 		return ctxerr.With(fmt.Errorf("%w: %s", ErrNoWorker, req.RuntimeName), map[string]any{"runtime_name": req.RuntimeName})
-	}
-	if !s.feasibleByAnyWorker(queue.Envelope{
-		RuntimeName:   req.RuntimeName,
-		ModelID:       req.ModelID,
-		BaseLoadBytes: req.BaseLoadBytes,
-	}) {
-		return ctxerr.With(fmt.Errorf("%w: %d bytes", ErrNoMemoryFit, req.BaseLoadBytes), map[string]any{"runtime_name": req.RuntimeName, "base_load_bytes": req.BaseLoadBytes})
 	}
 	return nil
 }
@@ -975,10 +909,9 @@ func (s *Scheduler) TryReestimateLock(workerID string) (release func(), ok bool)
 // still contributes to the tail sum unchanged — the prediction is
 // still valid for that specific in-flight job.
 //
-// Envelopes whose ModelID is empty, or whose CostAxis is unbenched on
-// the worker's new device set, contribute 0 to the sum — the
-// dispatcher's eligibility gate will surface those rows as "no fit"
-// when they reach the head. Best-effort: per-row decode/encode errors
+// Envelopes with no usable model_benchmarks row for the worker's new
+// device set contribute 0 to the sum — the dispatcher's eligibility
+// gate will surface those rows as "no fit" when they reach the head. Best-effort: per-row decode/encode errors
 // are logged and the row is skipped — an undecodable row's on-disk
 // QueuedSeconds is unreadable, so it is excluded from the new tail sum;
 // an encode-back failure keeps the row's old on-disk value while the
@@ -1005,7 +938,6 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 		return
 	}
 
-	defaultAxis := s.runtimeDefaultAxis(sw.RuntimeName())
 	loadBytesSec := s.effectiveLoadThroughput(sw)
 
 	var (
@@ -1043,7 +975,7 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 			}
 			continue
 		}
-		newQueued := s.predictedQueuedSeconds(sw, env, defaultAxis, loadBytesSec, residentID)
+		newQueued := s.predictedQueuedSeconds(sw, env, loadBytesSec, residentID)
 		env.QueuedSeconds = newQueued
 		bodyBytes := env.Marshal()
 		if err := q.UpdateBody(ctx, row.ID, bodyBytes); err != nil {
@@ -1072,15 +1004,15 @@ func (s *Scheduler) ReestimateWorkerQueue(ctx context.Context, workerID string) 
 // the worker busy under the current device set: compute time +
 // load-switch cost (zero when env's model will already be resident by
 // the time we get there — same rule as [loadLatencyForCand]).
-func (s *Scheduler) predictedQueuedSeconds(w *worker.StreamWorker, env queue.Envelope, defaultAxis string, loadBytesSec float64, residentID string) float64 {
-	tput, _, ok := s.effectiveThroughput(w, env.CostAxis, defaultAxis)
-	if !ok || tput <= 0 {
+func (s *Scheduler) predictedQueuedSeconds(w *worker.StreamWorker, env queue.Envelope, loadBytesSec float64, residentID string) float64 {
+	row, ok := s.modelBenchmark(w, env)
+	if !ok {
 		return 0
 	}
-	taskSec := env.Cost / tput
+	taskSec := env.Cost / row.UnitsPerSec
 	switchSec := 0.0
 	if env.ModelID != "" && env.ModelID != residentID {
-		bytes := s.projectedLoadBytes(w, env)
+		bytes := s.projectedLoadBytes(w, env, row)
 		if bytes <= 0 {
 			bytes = totalLoadBytes(env.Files)
 		}
@@ -1153,6 +1085,7 @@ func (s *Scheduler) OnWorkerDisconnected(workerID string) {
 	// devices) doesn't read against the previous topology. Cheap and
 	// always-safe regardless of whether the worker had a queue.
 	s.InvalidateWorkerBench(workerID)
+	s.InvalidateModelBenchmarks(workerID)
 
 	s.removeWorkerQueue(context.Background(), workerID)
 }
@@ -1789,8 +1722,9 @@ type workerQueueTarget struct {
 // free, instead of sitting on global until a heartbeat happens to
 // sample an idle gap between jobs.
 //
-// Returns (nil, 0) when no candidate is eligible (no online, enabled,
-// benched worker for the runtime). drainGlobal leaves the row on global
+// Returns (nil, 0) when no candidate is eligible — no online, enabled
+// worker for the runtime holds a usable model_benchmarks row for env's
+// model on its current device set. drainGlobal leaves the row on global
 // in that case and retries next tick.
 func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, float64) {
 	candidates := s.WorkersForRuntime(env.RuntimeName)
@@ -1803,18 +1737,17 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 	// connect/disconnect.
 	type cand struct {
 		t            workerQueueTarget
-		throughput   float64
+		row          store.ModelBenchmarkRow
 		loadBytesSec float64
 	}
-	defaultAxis := s.runtimeDefaultAxis(env.RuntimeName)
 	var cands []cand
 	s.queueMu.RLock()
 	for _, w := range candidates {
-		// Eligibility filter: TargetDeviceIDs (when set) must be a subset
-		// of the worker's enabled devices. Skips workers that physically
-		// can't host the operator's placement choice so MASS doesn't
-		// pick a worker whose load will fail.
-		if !s.eligibleWorker(w, env) {
+		row, ok := s.modelBenchmark(w, env)
+		if !ok {
+			continue // bench hasn't concluded here, or concluded incapable
+		}
+		if !s.eligibleWorker(w, env, row) {
 			continue
 		}
 		name := workerQueueName(w.ID())
@@ -1822,13 +1755,9 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		if !ok {
 			continue
 		}
-		tput, _, ok := s.effectiveThroughput(w, env.CostAxis, defaultAxis)
-		if !ok {
-			continue // worker hasn't benched the requested axis or the runtime fallback
-		}
 		cands = append(cands, cand{
 			t:            workerQueueTarget{name: name, q: q, worker: w},
-			throughput:   tput,
+			row:          row,
 			loadBytesSec: s.effectiveLoadThroughput(w),
 		})
 	}
@@ -1846,14 +1775,14 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		c := cands[i]
 		tail := s.tailSeconds(c.t.name)
 		inflight := s.getInflightSeconds(c.t.name)
-		loadBytes := s.projectedLoadBytes(c.t.worker, env)
+		loadBytes := s.projectedLoadBytes(c.t.worker, env, c.row)
 		if loadBytes <= 0 {
 			loadBytes = fallbackLoadBytes
 		}
 		loadLat := loadLatencyForCand(c.t.worker, c.t.name, env, tail, loadBytes, c.loadBytesSec, s)
 		// QueuedSeconds for this candidate = how long this task plus its
 		// load (if any) will keep the worker busy.
-		taskSec := env.Cost / c.throughput
+		taskSec := env.Cost / c.row.UnitsPerSec
 		queuedSec := taskSec + loadLat
 		score := inflight + tail + queuedSec
 		if best == nil || score < bestScore {
@@ -1970,9 +1899,9 @@ func (s *Scheduler) debitTail(queueName string, delta float64) {
 // startInflight atomically promotes requestID from "dispatching" to
 // "inflight": it records the running seconds/reservation so concurrent
 // scoring sees the worker's real load, transferring the dispatch marker
-// under a single lock. seconds is the compute-only prediction and axis
-// the throughput axis it divided by — see the dispatchEnvelope re-price
-// and [inflightRecord]. modelID is stashed for the device-set gate so a
+// under a single lock. seconds is the compute-only prediction — see the
+// dispatchEnvelope re-price and [inflightRecord]. modelID is stashed
+// for the device-set gate so a
 // subsequent dispatch can detect "MASS already assigned a job against this
 // model" without waiting on a heartbeat. The worker-side jobID is filled
 // in later by [Scheduler.attachWorkerJobID] once AssignJob returns.
@@ -1982,7 +1911,7 @@ func (s *Scheduler) debitTail(queueName string, delta float64) {
 // inflight record is created and the caller must abort before AssignJob.
 // Checking the flag in the same critical section that writes the record
 // closes the race between the cancel and the promotion.
-func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, axis string, seconds float64, reservedBytes int64) bool {
+func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName string, seconds float64, reservedBytes int64) bool {
 	workerID, _ := parseWorkerQueueName(queueName)
 	s.inflightMu.Lock()
 	defer s.inflightMu.Unlock()
@@ -2001,7 +1930,6 @@ func (s *Scheduler) startInflight(queueName, requestID, modelID, runtimeName, ax
 		workerID:      workerID,
 		reservedBytes: reservedBytes,
 		runtimeName:   runtimeName,
-		axis:          axis,
 	}
 	return true
 }
@@ -2407,6 +2335,18 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	blockers := residentsBlockingLoad(sw, env.ModelID, predicted)
 	needsLoad := env.ModelID != "" && (!workerHasModel(sw, env.ModelID) || containsModelID(blockers, env.ModelID))
 
+	// The measured row is what makes this worker a candidate at all, and
+	// it carries the memory figures the reservation is sized from. A row
+	// that vanished between placement and dispatch (model removed, files
+	// changed) bounces the row back for re-placement.
+	row, hasRow := s.modelBenchmark(sw, env)
+	if !hasRow {
+		s.logger.Debug().Str("worker", sw.ID()).Str("model_id", env.ModelID).Msg("no usable model benchmark at dispatch; re-placing")
+		stopKeepAlive()
+		s.releaseLeaseForRetry(q, msgID, env.RequestID)
+		return
+	}
+
 	var reservedBytes int64
 	if needsLoad {
 		// Reserve the projected post-grow memory until terminal frame so
@@ -2415,10 +2355,7 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 		// pool-size, not just base: a concurrent cold-load to the same
 		// worker would otherwise admit against slack that's about to be
 		// consumed by pool growth.
-		reservedBytes = s.projectedLoadBytes(sw, env)
-		if reservedBytes <= 0 {
-			reservedBytes = env.BaseLoadBytes
-		}
+		reservedBytes = s.projectedLoadBytes(sw, env, row)
 	}
 
 	if len(blockers) > 0 {
@@ -2493,20 +2430,14 @@ func (s *Scheduler) dispatchEnvelope(sw *worker.StreamWorker, q queue.QueueInter
 	// this point (the inflight clock starts after LoadModel), so keeping
 	// it would (a) overstate the worker's remaining busy-time in scoring
 	// and (b) misprice every later scoring pass against a busy-time the
-	// worker never spends computing. The axis recorded is the one the
-	// throughput lookup actually used (post-fallback).
+	// worker never spends computing.
 	//
 	// startInflight returns false when a cancel landed during the load
 	// window: honour it here, before the job ever reaches the worker —
 	// finalize as cancelled and drop both rows, mirroring the terminal-
 	// cancel path, rather than dispatching work the operator abandoned.
-	taskSec := 0.0
-	usedAxis := env.CostAxis
-	if tput, axis, ok := s.effectiveThroughput(sw, env.CostAxis, s.runtimeDefaultAxis(env.RuntimeName)); ok && tput > 0 {
-		taskSec = env.Cost / tput
-		usedAxis = axis
-	}
-	if !s.startInflight(queueName, env.RequestID, env.ModelID, env.RuntimeName, usedAxis, taskSec, reservedBytes) {
+	taskSec := env.Cost / row.UnitsPerSec
+	if !s.startInflight(queueName, env.RequestID, env.ModelID, env.RuntimeName, taskSec, reservedBytes) {
 		s.logger.Info().Str("worker", sw.ID()).Str("request_id", env.RequestID).Msg("cancel landed during dispatch; aborting before assign")
 		metrics.JobDispatched(env.RuntimeName, "cancelled")
 		s.failResult(env.RequestID, "cancelled by operator")
@@ -2944,15 +2875,16 @@ func (s *Scheduler) stealWithinRuntime(ctx context.Context, queues []workerQueue
 		}
 		// The stealing worker must actually be able to serve the row:
 		// fetchable files (URL-less artifacts need a loopback worker),
-		// memory fit, and a benched throughput axis. Depth + capacity
+		// memory fit, and a concluded, usable bench. Depth + capacity
 		// alone would steal onto a worker whose dispatch is guaranteed
 		// to fail, burning the envelope's load-attempt budget. Same
 		// generic predicates the picker scores with — nothing
 		// runtime-specific.
-		if !s.eligibleWorker(idle.t.worker, env) {
+		row, ok := s.modelBenchmark(idle.t.worker, env)
+		if !ok {
 			continue
 		}
-		if _, _, ok := s.effectiveThroughput(idle.t.worker, env.CostAxis, s.runtimeDefaultAxis(env.RuntimeName)); !ok {
+		if !s.eligibleWorker(idle.t.worker, env, row) {
 			continue
 		}
 		// Residency is no longer a hard gate — if the idle worker doesn't
@@ -3139,79 +3071,7 @@ func residentsBlockingLoad(w *worker.StreamWorker, targetModelID string, predict
 	return out
 }
 
-// --- Scoring throughput ---
-
-// effectiveThroughput returns the worker's realised throughput on the
-// requested axis and the axis name actually used (== axis on exact
-// match, == defaultAxis on fallback). Returns (0, "", false) when
-// neither the requested axis nor the fallback is benched on any of the
-// worker's enabled devices.
-//
-// Lookup order: try axis exact; if no device advertises it, try
-// defaultAxis (the runtime's gateway-declared required axis). The
-// fallback lets MASS still place jobs on workers that haven't been
-// upgraded to bench every axis a gateway might request. Callers that
-// record predictions must key them by usedAxis.
-//
-// Within an axis, throughput sums across the device set the worker will
-// use for incoming work — see [Scheduler.deviceSet].
-func (s *Scheduler) effectiveThroughput(w *worker.StreamWorker, axis, defaultAxis string) (val float64, usedAxis string, ok bool) {
-	if axis != "" {
-		if v := s.throughputForAxis(w, axis); v > 0 {
-			return v, axis, true
-		}
-	}
-	if defaultAxis != "" && defaultAxis != axis {
-		if v := s.throughputForAxis(w, defaultAxis); v > 0 {
-			return v, defaultAxis, true
-		}
-	}
-	return 0, "", false
-}
-
-// throughputForAxis predicts the worker's compute throughput on axis
-// across the device set it would use for incoming work.
-//
-// Model: llama.cpp's tensor-split assigns each layer's matmul slice to
-// every participating device, then synchronises before the next layer.
-// Wall-clock per layer is gated by the slowest device, so N devices
-// deliver N × min(rates), not Σ rates. Homogeneous pairs collapse to
-// "sum" cleanly (N × min == Σ); heterogeneous pairs honestly reflect
-// the slowest-link gating that an operator observes when they enable
-// a weak GPU and see throughput drop.
-//
-// An enabled-but-unbenched device is treated as "not yet measurable"
-// and skipped — including it as 0 would zero the entire worker until
-// the next bench cycle. The count (N) only includes benched devices,
-// so the result is N_benched × min(benched_rates).
-//
-// Returns 0 when no device in the predicted set has a positive number
-// on axis (unschedulable; eligibility gate surfaces it).
-func (s *Scheduler) throughputForAxis(w *worker.StreamWorker, axis string) float64 {
-	wID := w.ID()
-	var (
-		minRate  float64
-		nBenched int
-	)
-	for _, devID := range s.deviceSet(w) {
-		row, ok := s.getBenchmark(wID, devID)
-		if !ok {
-			continue
-		}
-		t := row.Throughput[axis]
-		if t <= 0 {
-			continue
-		}
-		if nBenched == 0 || t < minRate {
-			minRate = t
-		}
-		nBenched++
-	}
-	if nBenched == 0 {
-		return 0
-	}
-	return float64(nBenched) * minRate
-}
+// --- Load-latency throughput ---
 
 // effectiveLoadThroughput returns the host→device upload bandwidth in
 // bytes/sec we expect w to deliver when loading a model. This is the
@@ -3280,22 +3140,19 @@ func (s *Scheduler) deviceSet(w *worker.StreamWorker) []string {
 	return nil
 }
 
-// eligibleWorker reports whether w can host env. Three predicates today:
-// at least one usable device, file reachability (URL-less load artifacts
-// require a loopback worker), and (when env.BaseLoadBytes > 0) enough
-// free memory across the predicted device set to fit the load.
-// Composable shape so future filters (capability checks, etc.) slot
-// in here.
-func (s *Scheduler) eligibleWorker(w *worker.StreamWorker, env queue.Envelope) bool {
-	if len(s.deviceSet(w)) == 0 {
-		return false
-	}
+// eligibleWorker reports whether w can host env, given the measured row
+// that already made it a candidate. Two predicates on top of the row:
+// file reachability (URL-less load artifacts require a loopback worker)
+// and enough free memory across the predicted device set to fit the
+// load's base allocation. Composable shape so future filters
+// (capability checks, etc.) slot in here.
+func (s *Scheduler) eligibleWorker(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) bool {
 	if filesRequireLoopback(env.Files) && !w.IsLoopback() {
 		s.logger.Debug().Str("worker_id", w.ID()).Str("model_id", env.ModelID).
 			Msg("excluding non-loopback worker: envelope carries URL-less load files it cannot fetch")
 		return false
 	}
-	return s.memoryEligible(w, env)
+	return s.memoryEligible(w, env, row)
 }
 
 // filesRequireLoopback reports whether files contains a load artifact only
@@ -3314,52 +3171,28 @@ func filesRequireLoopback(files []*workerpb.ModelFile) bool {
 }
 
 // memoryEligible reports whether w has enough free memory across its
-// predicted device set to fit env's load. Returns true when:
+// predicted device set to fit the load's measured base allocation.
+// Returns true when:
 //
-//   - env.BaseLoadBytes is 0 (gateway couldn't estimate — fall back
-//     to pay-on-failure for that submit).
-//   - The model is already resident on w (no new load → no new
-//     memory pressure).
-//   - Sum of free bytes across the device set ≥ BaseLoadBytes. We
-//     gate on the minimum (base, i.e. pool=1) rather than the
-//     projected total so a tight-fitting model still gets a chance
-//     to load: the projection caps the pool at whatever fits.
+//   - The model is already resident on w (no new load → no new memory
+//     pressure).
+//   - Sum of free bytes across the device set >= row.BaseBytes. We gate
+//     on the minimum (pool = 1) rather than the projected total so a
+//     tight-fitting model still gets a chance to load: the pool sizing
+//     caps concurrency at whatever fits.
 //
 // "Free" subtracts both heartbeat-reported used memory and MASS's
 // in-flight reservation ledger so two concurrent cold loads to the
 // same worker don't both pass the gate before the first one's
 // memory shows up in stats.
-func (s *Scheduler) memoryEligible(w *worker.StreamWorker, env queue.Envelope) bool {
-	if env.BaseLoadBytes <= 0 {
-		return true
+func (s *Scheduler) memoryEligible(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) bool {
+	if row.BaseBytes <= 0 {
+		return true // measured without a memory dimension
 	}
 	if env.ModelID != "" && workerHasModel(w, env.ModelID) {
 		return true
 	}
-	return s.freeMemoryBytes(w) >= env.BaseLoadBytes
-}
-
-// feasibleByAnyWorker reports whether any online worker for env's
-// runtime has total hardware memory ≥ env.BaseLoadBytes across its
-// default device set. Submit calls this once before persisting so the
-// operator gets fast feedback when the fleet is fundamentally too
-// small for the requested model — no silent accumulation of stuck
-// rows on global.
-//
-// Returns true when env.BaseLoadBytes is 0 (unknown — pass) or when
-// at least one worker has the hardware to ever host the load,
-// regardless of current memory pressure. The dispatch-time check
-// (memoryEligible) handles "fits eventually but not right now."
-func (s *Scheduler) feasibleByAnyWorker(env queue.Envelope) bool {
-	if env.BaseLoadBytes <= 0 {
-		return true
-	}
-	for _, w := range s.WorkersForRuntime(env.RuntimeName) {
-		if s.totalMemoryBytes(w) >= env.BaseLoadBytes {
-			return true
-		}
-	}
-	return false
+	return s.freeMemoryBytes(w) >= row.BaseBytes
 }
 
 // defaultHeadroomPct mirrors the worker's compiled-in
@@ -3368,12 +3201,10 @@ func (s *Scheduler) feasibleByAnyWorker(env queue.Envelope) bool {
 // the gateway supplied a headroom value.
 const defaultHeadroomPct int32 = 75
 
-// effectiveHeadroomPct resolves the headroom watermark used to project
-// w's pool growth, mirroring the worker's own precedence at load time
-// (`hints.has_vram_headroom_pct() ? hint : flag`):
+// effectiveHeadroomPct resolves the device-memory watermark MASS keeps
+// free when it sizes a load's context pool:
 //
-//  1. env.HeadroomPct — the operator's explicit per-load override; the
-//     worker applies it over its own flag, so the projection must too.
+//  1. env.HeadroomPct — the operator's explicit per-load override.
 //  2. The worker's registration-reported --vram-headroom-pct — the
 //     per-worker truth when no override rides the load; the flag is
 //     operator-configurable, so any assumed constant is wrong for a
@@ -3391,67 +3222,31 @@ func effectiveHeadroomPct(w *worker.StreamWorker, env queue.Envelope) int32 {
 	return defaultHeadroomPct
 }
 
-// projectedLoadBytes returns the gateway-aware prediction of total
-// device memory the load will consume on w. Combines the gateway's
-// (base, per_slot) estimate and the effective headroom (see
-// effectiveHeadroomPct) with the worker's current free memory to
-// estimate the post-grow pool size:
+// projectedLoadBytes returns the total device memory the load will
+// consume on w: the row's measured base plus the slots MASS expects the
+// pool to hold.
 //
-//	pool       = floor((free − base) × headroom / 100 / per_slot)
-//	load_bytes = base + pool × per_slot
+//	pool       = floor((free - base) x headroom / 100 / per_slot)
+//	load_bytes = base + pool x per_slot
 //
 // Edge cases:
-//   - base == 0           → 0 (gateway unknown — caller treats as no
-//     prediction; latency math falls back to file bytes).
-//   - per_slot <= 0       → load_bytes = base (no concurrency
-//     dimension; pool collapses to a single implicit slot folded
-//     into base by the gateway).
-//   - free <= base        → load_bytes = base (worker can't grow;
-//     the per-slot term would be negative).
-//
-// Returns base when per_slot > 0 but no additional slot fits — the
-// load still happens with exactly the base allocation. Returns 0
-// only when base itself is 0 (the gateway has no estimate).
-func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelope) int64 {
-	if env.BaseLoadBytes <= 0 {
+//   - base == 0     -> 0 (nothing measured; latency math falls back to
+//     file bytes).
+//   - per_slot <= 0 -> base (no concurrency dimension).
+//   - free <= base  -> base (worker can't grow; the per-slot term would
+//     be negative).
+func (s *Scheduler) projectedLoadBytes(w *worker.StreamWorker, env queue.Envelope, row store.ModelBenchmarkRow) int64 {
+	if row.BaseBytes <= 0 {
 		return 0
 	}
-	if env.PerSlotBytes <= 0 {
-		return env.BaseLoadBytes
+	if row.PerSlotBytes <= 0 {
+		return row.BaseBytes
 	}
-	headroom := effectiveHeadroomPct(w, env)
-	free := s.freeMemoryBytes(w)
-	available := (free - env.BaseLoadBytes) * int64(headroom) / 100
+	available := (s.freeMemoryBytes(w) - row.BaseBytes) * int64(effectiveHeadroomPct(w, env)) / 100
 	if available <= 0 {
-		return env.BaseLoadBytes
+		return row.BaseBytes
 	}
-	pool := available / env.PerSlotBytes
-	return env.BaseLoadBytes + pool*env.PerSlotBytes
-}
-
-// totalMemoryBytes returns the worker's total memory (in bytes) across
-// its current enabled device set. Uses the static TotalMemoryMB
-// reported at registration time — the hardware ceiling that never
-// changes.
-func (s *Scheduler) totalMemoryBytes(w *worker.StreamWorker) int64 {
-	set := s.deviceSet(w)
-	if len(set) == 0 {
-		return 0
-	}
-	byID := make(map[string]int, len(set))
-	for _, id := range set {
-		byID[id] = 0
-	}
-	for _, d := range w.Devices() {
-		if _, ok := byID[d.ID]; ok {
-			byID[d.ID] = d.TotalMemoryMB
-		}
-	}
-	var total int64
-	for _, mb := range byID {
-		total += int64(mb) * 1024 * 1024
-	}
-	return total
+	return row.BaseBytes + (available/row.PerSlotBytes)*row.PerSlotBytes
 }
 
 // freeMemoryBytes returns the worker's free memory (in bytes) across
@@ -3507,13 +3302,11 @@ func (s *Scheduler) getMemoryReservation(workerID string) int64 {
 
 // --- Bench data (read by pickWorkerQueue + workerIsSchedulable) ---
 
-// getBenchmark returns the bench row for (workerID, deviceID), caching
-// hits in-process so the hot scoring path doesn't issue one SQLite
-// read per (candidate × device × envelope). A miss in the store is
-// recorded as a zero-value row so repeat misses stay cheap; ok is
-// false in that case so callers can branch on "no bench yet." A row
-// counts as present when its Throughput map has at least one positive
-// entry — the runtime-private axes the worker actually measured.
+// getBenchmark returns the device bench row for (workerID, deviceID),
+// caching hits in-process so the hot path doesn't issue one SQLite read
+// per (candidate × device). A miss in the store is recorded as a
+// zero-value row so repeat misses stay cheap; ok is false in that case
+// so callers can branch on "no bench yet."
 func (s *Scheduler) getBenchmark(workerID, deviceID string) (store.BenchmarkRow, bool) {
 	s.benchMu.RLock()
 	if dev, has := s.benchCache[workerID]; has {
@@ -3553,15 +3346,11 @@ func (s *Scheduler) getBenchmark(workerID, deviceID string) (store.BenchmarkRow,
 	return row, benchPresent(row)
 }
 
-// benchPresent reports whether a bench row carries any usable throughput
-// measurement — at least one axis with a positive number.
+// benchPresent reports whether a device bench row was ever recorded.
+// The row's numbers are display + load-latency only; its existence is
+// what tells the scheduler the worker has been surveyed at all.
 func benchPresent(row store.BenchmarkRow) bool {
-	for _, v := range row.Throughput {
-		if v > 0 {
-			return true
-		}
-	}
-	return false
+	return row.DeviceID != ""
 }
 
 // InvalidateBench drops the cached row for (workerID, deviceID). Call

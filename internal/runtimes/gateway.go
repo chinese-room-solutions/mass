@@ -38,12 +38,6 @@ import (
 type LoadedGateway struct {
 	Kind     string
 	Manifest Manifest
-	// DefaultCostAxis is the runtime's required fallback axis from the
-	// gateway's InitResponse. Every worker for this runtime must bench
-	// this axis (workers may advertise additional axes). MASS uses it
-	// as the fallback when a Submit names an axis the worker hasn't
-	// measured. Required — empty is rejected at Init time.
-	DefaultCostAxis string
 
 	pluginClient *plugin.Client
 	client       *gatewayClient
@@ -239,17 +233,6 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 			},
 		)
 	}
-	// default_cost_axis is required — it's the throughput axis MASS falls
-	// back to when a Submit names an axis a worker hasn't benched. Without
-	// it MASS would have nothing to divide cost by for unupgraded workers.
-	if resp.DefaultCostAxis == "" {
-		loaded.Close()
-		return nil, ctxerr.With(
-			fmt.Errorf("gateway did not declare default_cost_axis"),
-			map[string]any{"runtime_name": mf.RuntimeName},
-		)
-	}
-	loaded.DefaultCostAxis = resp.DefaultCostAxis
 	// Reconcile the in-memory manifest with what the gateway just reported.
 	loaded.Manifest.Version = resp.Version
 	if resp.DisplayName != "" {
@@ -258,7 +241,7 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 	if resp.Description != "" {
 		loaded.Manifest.Description = resp.Description
 	}
-	gwLogger.Info().Str("version", resp.Version).Str("default_cost_axis", resp.DefaultCostAxis).Msg("gateway started")
+	gwLogger.Info().Str("version", resp.Version).Msg("gateway started")
 	return loaded, nil
 }
 

@@ -271,11 +271,6 @@ func main() {
 		return true
 	})
 
-	// Per-runtime default-axis lookup: the scheduler falls back to this
-	// axis when an envelope's CostAxis names something a worker hasn't
-	// benched. Sourced from the gateway's InitResponse.default_cost_axis.
-	orch.SetRuntimeDefaultAxisFn(rtMgr.DefaultCostAxisFor)
-
 	// Materialise per-device queues whenever a worker connects, drain them
 	// back to global on disconnect. The fleet exposes connect/update/remove
 	// via one callback; we branch on the kind.

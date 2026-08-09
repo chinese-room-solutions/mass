@@ -146,7 +146,7 @@ func TestScheduler_OnWorkerConnected_Lifecycle(t *testing.T) {
 					WorkerID:   "w1",
 					DeviceID:   devID,
 					DeviceName: devID,
-					Throughput: map[string]float64{"q4k_matvec": 100},
+					Flops:      100,
 					BenchedAt:  time.Now(),
 				}))
 			}
@@ -184,7 +184,7 @@ func TestScheduler_OnWorkerDisconnected_DrainsToGlobal(t *testing.T) {
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	s.OnWorkerConnected(w)
@@ -250,7 +250,7 @@ func TestScheduler_DrainWorkerQueue_InflightChargesAttemptBudget(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -327,7 +327,7 @@ func TestScheduler_DrainWorkerQueue_TerminalResultNotRequeued(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -380,7 +380,7 @@ func TestScheduler_OnWorkerDevicesChanged_AllDisabledDrainsToGlobal(t *testing.T
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -423,7 +423,7 @@ func TestScheduler_OnWorkerDevicesChanged_AllDisabledKeepsRunningJob(t *testing.
 	s, st := newTestScheduler(t)
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -481,24 +481,6 @@ func TestScheduler_OnWorkerDevicesChanged_AllDisabledKeepsRunningJob(t *testing.
 	require.Equal(t, queue.ResultStatusProcessing, r.Status)
 }
 
-// eligibleWorker filters out workers with no usable devices (every
-// device disabled). Without the filter MASS would dispatch to a worker
-// whose load would immediately fail.
-func TestScheduler_EligibleWorker_RequiresUsableDevice(t *testing.T) {
-	s, _ := newTestScheduler(t)
-	w := newFakeWorker("w1", []stats.Device{
-		{ID: "gpu:0", Type: stats.DeviceTypeGPU},
-	})
-	require.NoError(t, s.workers.Register(w))
-
-	// Default: device enabled, worker is eligible.
-	require.True(t, s.eligibleWorker(w, queue.Envelope{}))
-
-	// All devices disabled: not eligible.
-	s.SetDeviceEnabledFn(func(_, _ string) bool { return false })
-	require.False(t, s.eligibleWorker(w, queue.Envelope{}))
-}
-
 // A remote (non-loopback) worker can never load a model whose files are
 // shipped by local path only (no URL) — the gateway's LocalPath points at
 // MASS's host filesystem. eligibleWorker must exclude such workers so the
@@ -528,15 +510,16 @@ func TestScheduler_EligibleWorker_LoopbackOnlyFiles(t *testing.T) {
 			w.SetFakeLoopback(tt.loopback)
 			require.NoError(t, s.workers.Register(w))
 
-			got := s.eligibleWorker(w, queue.Envelope{ModelID: "m", Files: tt.files})
+			got := s.eligibleWorker(w, queue.Envelope{ModelID: "m", Files: tt.files}, store.ModelBenchmarkRow{})
 			require.Equal(t, tt.want, got)
 		})
 	}
 }
 
-// memoryEligible passes through when BaseLoadBytes is 0 (unknown),
-// when the model is already resident, or when free memory across the
-// device set is sufficient. Rejects when free is below the request.
+// memoryEligible passes through when the row records no memory
+// dimension, when the model is already resident, or when free memory
+// across the device set is sufficient. Rejects when free is below the
+// measured base allocation.
 func TestScheduler_MemoryEligible_Branches(t *testing.T) {
 	const mb = 1024 * 1024
 	const gb = 1024 * mb
@@ -550,7 +533,7 @@ func TestScheduler_MemoryEligible_Branches(t *testing.T) {
 		want      bool
 	}{
 		{
-			name:    "base=0 passes through (unknown)",
+			name:    "base=0 passes through (no memory dimension)",
 			devices: []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU, TotalMemoryMB: 24 * 1024}},
 			stats:   []stats.DeviceStats{{DeviceID: "gpu:0", UsedMemoryMB: 23 * 1024, TotalMemoryMB: 24 * 1024}},
 			// loadBytes=0; free is only 1 GB, would fail if checked.
@@ -619,39 +602,11 @@ func TestScheduler_MemoryEligible_Branches(t *testing.T) {
 			}
 			require.NoError(t, s.workers.Register(w))
 
-			env := queue.Envelope{
-				ModelID:       tt.resident,
-				BaseLoadBytes: tt.loadBytes,
-			}
-			require.Equal(t, tt.want, s.memoryEligible(w, env))
+			env := queue.Envelope{ModelID: tt.resident}
+			row := store.ModelBenchmarkRow{BaseBytes: tt.loadBytes}
+			require.Equal(t, tt.want, s.memoryEligible(w, env, row))
 		})
 	}
-}
-
-// feasibleByAnyWorker uses total hardware memory (not free) so the
-// Submit-stage check distinguishes "fleet too small" from "fleet busy
-// now." Even when free is 0, total is the hardware ceiling and the
-// predicate accepts if any worker physically could host the load.
-func TestScheduler_FeasibleByAnyWorker_UsesTotalNotFree(t *testing.T) {
-	const mb = 1024 * 1024
-	const gb = 1024 * mb
-	s, _ := newTestScheduler(t)
-	w := worker.NewFakeStreamWorker("w1", "llama-cpp",
-		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU, TotalMemoryMB: 24 * 1024}}, time.Now())
-	// Worker is currently 100% used, but its hardware ceiling is 24 GB.
-	w.SetFakeDeviceStats([]stats.DeviceStats{{DeviceID: "gpu:0", UsedMemoryMB: 24 * 1024, TotalMemoryMB: 24 * 1024}})
-	require.NoError(t, s.workers.Register(w))
-
-	env := queue.Envelope{RuntimeName: "llama-cpp"}
-
-	env.BaseLoadBytes = 20 * gb
-	require.True(t, s.feasibleByAnyWorker(env), "20 GB fits the hardware (24 GB total) even though 0 free now")
-
-	env.BaseLoadBytes = 30 * gb
-	require.False(t, s.feasibleByAnyWorker(env), "30 GB exceeds the hardware ceiling — operator must add capacity")
-
-	env.BaseLoadBytes = 0
-	require.True(t, s.feasibleByAnyWorker(env), "unknown load bytes pass through")
 }
 
 // Reservation lifecycle: startInflight bumps the ledger; finishInflight
@@ -668,22 +623,22 @@ func TestScheduler_MemoryReservation_BridgesHeartbeatLag(t *testing.T) {
 	require.NoError(t, s.workers.Register(w))
 
 	// Initially: 24 GB free, a 16 GB load fits.
-	env := queue.Envelope{BaseLoadBytes: 16 * gb}
-	require.True(t, s.memoryEligible(w, env))
+	env := queue.Envelope{}
+	row := store.ModelBenchmarkRow{BaseBytes: 16 * gb}
+	require.True(t, s.memoryEligible(w, env, row))
 
 	// Dispatch a 16 GB load → reserve 16 GB.
-	s.startInflight(workerQueueName("w1"), "req-1", "m-1", "", "", 1.0, 16*gb)
+	s.startInflight(workerQueueName("w1"), "req-1", "m-1", "", 1.0, 16*gb)
 
 	// A second 16 GB load no longer fits: 24 − 0 − 16 = 8 GB free.
-	require.False(t, s.memoryEligible(w, env))
+	require.False(t, s.memoryEligible(w, env, row))
 
 	// An 8 GB load still fits.
-	envSmall := queue.Envelope{BaseLoadBytes: 8 * gb}
-	require.True(t, s.memoryEligible(w, envSmall))
+	require.True(t, s.memoryEligible(w, env, store.ModelBenchmarkRow{BaseBytes: 8 * gb}))
 
 	// First job finishes → reservation released → 16 GB load fits again.
 	s.finishInflight("req-1")
-	require.True(t, s.memoryEligible(w, env))
+	require.True(t, s.memoryEligible(w, env, row))
 	require.Zero(t, s.getMemoryReservation("w1"), "ledger fully drained")
 }
 
@@ -698,7 +653,7 @@ func TestScheduler_RetryAfterLoadFailure_Cap(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -787,7 +742,7 @@ func TestScheduler_RetryAfterLoadFailure_AnchorlessEnvelope(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -829,7 +784,7 @@ func TestScheduler_RetryAfterLoadFailure_DeleteError(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 	w := newFakeWorker("w1", []stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}})
 	require.NoError(t, s.workers.Register(w))
@@ -890,19 +845,18 @@ func (f *failingQueue) Delete(ctx context.Context, msgID queue.MessageID) error 
 
 // memoryEligible: an empty deviceSet (worker registered without
 // devices, or every device disabled) returns 0 free → reject any
-// non-zero load. Sits adjacent to the existing branches; covers
-// the "len(set) == 0" guard in freeMemoryBytes / totalMemoryBytes.
+// non-zero load. Covers the "len(set) == 0" guard in freeMemoryBytes.
 func TestScheduler_MemoryEligible_WorkerWithNoDevices(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	w := worker.NewFakeStreamWorker("w1", "llama-cpp", nil, time.Now())
 	require.NoError(t, s.workers.Register(w))
 
-	env := queue.Envelope{ModelID: "m1", BaseLoadBytes: 1024 * 1024}
-	require.False(t, s.memoryEligible(w, env), "no-device worker can't fit anything")
+	env := queue.Envelope{ModelID: "m1"}
+	require.False(t, s.memoryEligible(w, env, store.ModelBenchmarkRow{BaseBytes: 1024 * 1024}),
+		"no-device worker can't fit anything")
 
-	// Zero load passes through regardless.
-	env.BaseLoadBytes = 0
-	require.True(t, s.memoryEligible(w, env))
+	// A row with no memory dimension passes through regardless.
+	require.True(t, s.memoryEligible(w, env, store.ModelBenchmarkRow{}))
 }
 
 // memoryEligible with a heartbeat missing for a device: used=0
@@ -918,31 +872,18 @@ func TestScheduler_MemoryEligible_NoHeartbeatYet(t *testing.T) {
 	// No SetFakeDeviceStats — heartbeat hasn't arrived.
 	require.NoError(t, s.workers.Register(w))
 
-	env := queue.Envelope{ModelID: "m1", BaseLoadBytes: 20 * gb}
-	require.True(t, s.memoryEligible(w, env), "no heartbeat: total counts as free")
-}
-
-// feasibleByAnyWorker scopes to the env's runtime. A worker on a
-// different runtime — even with massive memory — doesn't count.
-func TestScheduler_FeasibleByAnyWorker_ScopedToRuntime(t *testing.T) {
-	const gb = int64(1024 * 1024 * 1024)
-	s, _ := newTestScheduler(t)
-	wOther := worker.NewFakeStreamWorker("w-other", "other-runtime",
-		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU, TotalMemoryMB: 96 * 1024}}, time.Now())
-	require.NoError(t, s.workers.Register(wOther))
-
-	require.False(t, s.feasibleByAnyWorker(queue.Envelope{
-		RuntimeName: "llama-cpp", BaseLoadBytes: 20 * gb,
-	}), "worker on other runtime doesn't count for llama-cpp submit")
+	env := queue.Envelope{ModelID: "m1"}
+	require.True(t, s.memoryEligible(w, env, store.ModelBenchmarkRow{BaseBytes: 20 * gb}),
+		"no heartbeat: total counts as free")
 }
 
 // Reservation: zero bytes is a no-op (ledger stays empty), so the
-// fast path through startInflight when BaseLoadBytes==0 doesn't
+// fast path through startInflight when nothing is reserved doesn't
 // pollute the map with empty entries. Mirrors the workerID=="" guard
 // for malformed queue names.
 func TestScheduler_Reservation_ZeroBytesNoOp(t *testing.T) {
 	s, _ := newTestScheduler(t)
-	s.startInflight(workerQueueName("w1"), "req-zero", "m1", "", "", 1.0, 0)
+	s.startInflight(workerQueueName("w1"), "req-zero", "m1", "", 1.0, 0)
 	require.Zero(t, s.getMemoryReservation("w1"), "0 bytes must not populate the ledger")
 	require.Zero(t, s.getMemoryReservation(""), "empty workerID must not populate the ledger")
 	s.finishInflight("req-zero")
@@ -958,8 +899,8 @@ func TestScheduler_Reservation_TwoConcurrentLoadsSum(t *testing.T) {
 	const gb = int64(1024 * 1024 * 1024)
 	s, _ := newTestScheduler(t)
 
-	s.startInflight(workerQueueName("w1"), "req-a", "m-a", "", "", 1.0, 8*gb)
-	s.startInflight(workerQueueName("w1"), "req-b", "m-b", "", "", 1.0, 16*gb)
+	s.startInflight(workerQueueName("w1"), "req-a", "m-a", "", 1.0, 8*gb)
+	s.startInflight(workerQueueName("w1"), "req-b", "m-b", "", 1.0, 16*gb)
 	require.Equal(t, 24*gb, s.getMemoryReservation("w1"), "two reservations sum")
 
 	s.finishInflight("req-a")
@@ -986,47 +927,9 @@ func TestScheduler_FreeMemoryBytes_OverReservedFloorsAtZero(t *testing.T) {
 
 	// Reserve 16 GB — more than the worker has total. free = 2 - 16 = -14
 	// must floor at 0, not return a negative int64.
-	s.startInflight(workerQueueName("w1"), "leak", "m", "", "", 1.0, 16*gb)
+	s.startInflight(workerQueueName("w1"), "leak", "m", "", 1.0, 16*gb)
 
 	require.Zero(t, s.freeMemoryBytes(w))
-}
-
-// totalMemoryBytes returns 0 when the worker has no devices, which
-// in turn lets feasibleByAnyWorker / memoryEligible reject without
-// dividing by zero or summing a nil set.
-func TestScheduler_TotalMemoryBytes_NoDevices(t *testing.T) {
-	s, _ := newTestScheduler(t)
-	w := worker.NewFakeStreamWorker("w1", "llama-cpp", nil, time.Now())
-	require.NoError(t, s.workers.Register(w))
-	require.Zero(t, s.totalMemoryBytes(w))
-}
-
-// Submit-time feasibility surfaces ErrNoMemoryFit through preflight
-// when the gateway estimates a load no fleet member can host. End-
-// to-end check that the predicate is wired into the real Submit path
-// (not just unit-tested in isolation).
-func TestScheduler_Submit_RejectsNoMemoryFit(t *testing.T) {
-	const gb = int64(1024 * 1024 * 1024)
-	s, _ := newTestScheduler(t)
-	w := worker.NewFakeStreamWorker("w1", "llama-cpp",
-		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU, TotalMemoryMB: 8 * 1024}}, time.Now())
-	require.NoError(t, s.workers.Register(w))
-
-	_, err := s.Submit(context.Background(), scheduler_SubmitRequestFor("llama-cpp", "m1", 50*gb))
-	require.ErrorIs(t, err, ErrNoMemoryFit)
-}
-
-// scheduler_SubmitRequestFor builds a minimal SubmitRequest for tests
-// that only exercise the preflight gates (no real dispatch).
-func scheduler_SubmitRequestFor(runtimeName, modelID string, loadBytes int64) SubmitRequest {
-	return SubmitRequest{
-		RuntimeName:   runtimeName,
-		ModelID:       modelID,
-		Cost:          1.0,
-		CostAxis:      "q4k_matvec",
-		Payload:       []byte("p"),
-		BaseLoadBytes: loadBytes,
-	}
 }
 
 // Recovery reattaches to "worker|*" rows from a prior process lifetime
@@ -1043,7 +946,7 @@ func TestScheduler_RecoverPersistedQueues(t *testing.T) {
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
 		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 100}, BenchedAt: time.Now(),
+		Flops: 100, BenchedAt: time.Now(),
 	}))
 
 	first := New(cfg, zerolog.Nop(), worker.NewFleet())
@@ -1370,6 +1273,59 @@ func TestLeaseKeepAlive_ExtendsWorkerRowUntilStopped(t *testing.T) {
 
 func newTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
 	t.Helper()
+	s, st := newStrictTestScheduler(t)
+	s.queueMu.Lock()
+	s.store = defaultBenchStore{Store: st, unitsPerSec: defaultTestUnitsPerSec}
+	s.queueMu.Unlock()
+	return s, st
+}
+
+// defaultTestUnitsPerSec is the throughput the default-bench store hands
+// back for triples no test seeded. Chosen so the Cost: 100 envelopes
+// these tests use predict exactly 1.0 s of compute.
+const defaultTestUnitsPerSec = 100.0
+
+// defaultBenchStore answers a model-benchmark lookup the test never
+// seeded with a usable measurement, so tests about placement, dispatch,
+// and queue mechanics don't each have to record one per model they
+// submit. Seeded rows always win, which is how a test states the rates
+// (or the incapable verdicts) it actually cares about. Tests that are
+// ABOUT candidacy use [newStrictTestScheduler] and see the real store.
+type defaultBenchStore struct {
+	*store.Store
+	unitsPerSec float64
+}
+
+func (d defaultBenchStore) GetModelBenchmark(workerID, deviceSet, modelID string) (store.ModelBenchmarkRow, error) {
+	row, err := d.Store.GetModelBenchmark(workerID, deviceSet, modelID)
+	if err == nil {
+		return row, nil
+	}
+	return store.ModelBenchmarkRow{
+		WorkerID:    workerID,
+		DeviceSet:   deviceSet,
+		ModelID:     modelID,
+		UnitsPerSec: d.unitsPerSec,
+		GraphSecs:   0.1,
+	}, nil
+}
+
+// testStore returns the concrete store behind a test scheduler, whether
+// or not the default-bench wrapper is in front of it.
+func testStore(s *Scheduler) *store.Store {
+	s.queueMu.RLock()
+	defer s.queueMu.RUnlock()
+	if d, ok := s.store.(defaultBenchStore); ok {
+		return d.Store
+	}
+	return s.store.(*store.Store)
+}
+
+// newStrictTestScheduler builds a scheduler over the real store with no
+// default-bench fallback: a worker is a candidate only for triples the
+// test seeded.
+func newStrictTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
+	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(store.DialectSQLite, dbPath)
 	require.NoError(t, err)
@@ -1381,6 +1337,44 @@ func newTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
 	s := New(cfg, zerolog.Nop(), worker.NewFleet())
 	s.InitQueue(pool, results, st)
 	return s, st
+}
+
+// benchModelFile builds the PRIMARY load artifact an envelope must carry
+// for the scheduler to find its model_benchmarks row: the store-relative
+// cache key the bench was recorded under. Production envelopes always
+// have one — the gateway attaches the full artifact set to every Submit
+// — so tests that build envelopes by hand use this.
+func benchModelFile(modelKey string, sizeBytes int64) *workerpb.ModelFile {
+	return &workerpb.ModelFile{
+		Filename:  modelKey,
+		Url:       "http://models.local/" + modelKey,
+		SizeBytes: sizeBytes,
+		Role:      workerpb.ModelFileRole_MODEL_FILE_ROLE_PRIMARY,
+	}
+}
+
+// seedModelBench records a usable measurement so (workerID, deviceSet,
+// modelKey) is a placement candidate. deviceSet is the canonical
+// comma-joined device list [Scheduler.predictDeviceSet] returns for the
+// worker (e.g. "gpu:0").
+func seedModelBench(t *testing.T, st *store.Store, workerID, deviceSet, modelKey string, unitsPerSec float64) {
+	t.Helper()
+	seedModelBenchMem(t, st, workerID, deviceSet, modelKey, unitsPerSec, 0, 0)
+}
+
+// seedModelBenchMem is seedModelBench with the measured memory figures
+// the pool sizer and the memory gate read.
+func seedModelBenchMem(t *testing.T, st *store.Store, workerID, deviceSet, modelKey string, unitsPerSec float64, baseBytes, perSlotBytes int64) {
+	t.Helper()
+	require.NoError(t, st.SaveModelBenchmark(store.ModelBenchmarkRow{
+		WorkerID:     workerID,
+		DeviceSet:    deviceSet,
+		ModelID:      modelKey,
+		UnitsPerSec:  unitsPerSec,
+		GraphSecs:    0.1,
+		BaseBytes:    baseBytes,
+		PerSlotBytes: perSlotBytes,
+	}))
 }
 
 // placeOnWorkerQueueForTest stages env on wq through the real placement

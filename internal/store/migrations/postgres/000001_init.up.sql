@@ -67,17 +67,17 @@ CREATE TABLE worker_queue_state (
     updated_at      TEXT NOT NULL DEFAULT ''
 );
 
--- Device benchmark results (keyed by worker + device). throughput_axes
--- is a JSON object mapping runtime-private axis names (e.g. "q4k_matvec")
--- to realised throughput numbers the worker measured. Schema is opaque
--- to MASS — schedulers look up axis values by name as cost/throughput.
+-- Device benchmark results (keyed by worker + device). flops is the
+-- device's generic matmul throughput. These rows describe HARDWARE and
+-- are display-only: job estimates come from model_benchmarks, never
+-- from here.
 CREATE TABLE device_benchmarks (
     worker_id       TEXT NOT NULL,
     device_id       TEXT NOT NULL,
     device_name     TEXT NOT NULL,
     memory_gbs      DOUBLE PRECISION NOT NULL,
     load_gbs        DOUBLE PRECISION NOT NULL DEFAULT 0,
-    throughput_axes TEXT NOT NULL DEFAULT '{}',
+    flops           DOUBLE PRECISION NOT NULL DEFAULT 0,
     benched_at      TEXT NOT NULL,
     PRIMARY KEY (worker_id, device_id)
 );
