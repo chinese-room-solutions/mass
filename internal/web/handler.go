@@ -51,6 +51,10 @@ type HandlerOptions struct {
 	ConfigDir string
 	LogsDir   string
 	DataDir   string
+	// OnDemand marks a daemon running with an idle timeout. The ping endpoint
+	// reports it so a launcher knows this instance may be replaced on version
+	// skew (an operator-managed one may not).
+	OnDemand bool
 }
 
 // Handler implements http.Handler for the MASS web UI and management API.
@@ -77,6 +81,12 @@ type Handler struct {
 
 	themeMu       sync.RWMutex
 	onThemeChange func(dark bool)
+
+	// Daemon control surface (see daemonctl.go).
+	onDemand   bool
+	gui        *guiChannel
+	shutdownMu sync.Mutex
+	shutdownFn func()
 
 	workersBroker   *Broker[WorkersEvent]
 	schedulerBroker *Broker[changeEvent]
@@ -107,6 +117,8 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 		logsDir:         opts.LogsDir,
 		dataDir:         opts.DataDir,
 		authHash:        opts.AuthHash,
+		onDemand:        opts.OnDemand,
+		gui:             newGUIChannel(),
 		workersBroker:   NewBroker[WorkersEvent](opts.Logger, "workers-broker"),
 		schedulerBroker: NewBroker[changeEvent](opts.Logger, "scheduler-broker"),
 		queueBroker:     NewBroker[changeEvent](opts.Logger, "queue-broker"),
@@ -205,6 +217,13 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 
 	// Internal browser-only HTML/SSE — not part of the public mass.v1 contract.
 	mux.HandleFunc("POST /internal/settings/theme", h.handleSetTheme)
+
+	// Daemon control surface for the local launcher (GUI thin client, CLI):
+	// loopback-only; ping and the GUI channel skip operator auth (see
+	// AuthMiddleware), shutdown does not.
+	mux.HandleFunc("GET /internal/daemon/ping", h.handleDaemonPing)
+	mux.HandleFunc("POST /internal/daemon/shutdown", h.handleDaemonShutdown)
+	mux.HandleFunc("GET /internal/gui/channel", h.handleGUIChannel)
 
 	// Runtime gateway management.
 	// Themes: browse/manage dialog (installed list is local, available list
@@ -491,6 +510,9 @@ func (h *Handler) applyTheme(sse *datastar.ServerSentEventGenerator, info uikit.
 		// its window frame onto dark/light correctly.
 		cb(info.Base == uikit.ThemeDark)
 	}
+	// The GUI window is a separate process; it learns the base over its
+	// control channel.
+	h.gui.broadcast(string(info.Base))
 	if b, err := json.Marshal(map[string]any{"theme": string(info.Name), "themeBase": string(info.Base)}); err == nil {
 		if err := sse.PatchSignals(b); err != nil {
 			h.logger.Debug().Err(err).Msg("patching theme signals")

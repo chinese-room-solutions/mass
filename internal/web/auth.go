@@ -22,13 +22,19 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 		// join-token enrollment contract (join token or per-worker secret, never
 		// the shared operator token), so the operator-token middleware must not
 		// gate it.
+		// The daemon ping and the GUI control channel are loopback-only (the
+		// handlers enforce it) and carry no secrets; the local launcher that
+		// calls them holds no operator token. /internal/daemon/shutdown is
+		// deliberately NOT exempt.
 		if strings.HasPrefix(r.URL.Path, "/public/") ||
 			strings.HasPrefix(r.URL.Path, "/setup/") ||
 			strings.HasPrefix(r.URL.Path, "/mass.v1.worker.WorkerHub/") ||
 			r.URL.Path == "/login" ||
 			r.URL.Path == "/metrics" ||
 			r.URL.Path == "/health" ||
-			r.URL.Path == "/ready" {
+			r.URL.Path == "/ready" ||
+			r.URL.Path == "/internal/daemon/ping" ||
+			r.URL.Path == "/internal/gui/channel" {
 			next.ServeHTTP(w, r)
 			return
 		}
