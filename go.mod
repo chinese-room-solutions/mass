@@ -9,7 +9,7 @@ require (
 	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/a-h/templ v0.3.1020
-	github.com/chinese-room-solutions/mass-proto/gen/go v0.1.0
+	github.com/chinese-room-solutions/mass-proto/gen/go v0.2.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/oklog/ulid/v2 v2.1.1
@@ -48,7 +48,7 @@ require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chinese-room-solutions/mass-sdk v0.1.5
+	github.com/chinese-room-solutions/mass-sdk v0.1.6
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.16.0 // indirect
