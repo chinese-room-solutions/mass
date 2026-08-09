@@ -96,6 +96,7 @@ type benchRunner struct {
 	workerID string
 	wake     chan struct{}
 	stop     chan struct{}
+	stopOnce sync.Once
 	stopped  chan struct{}
 
 	mu      sync.Mutex
@@ -150,7 +151,7 @@ func (s *Scheduler) RebenchModel(runtimeName, modelKey string) error {
 		return err
 	}
 	s.InvalidateModelBenchmarks("")
-	s.bench.queueModelEverywhere(runtimeName, modelKey)
+	go s.bench.queueModelEverywhere(runtimeName, modelKey)
 	return nil
 }
 
@@ -264,6 +265,18 @@ func (s *Scheduler) allStreamWorkers() []*worker.StreamWorker {
 }
 
 // --- Discovery ---
+
+// sweepWorkerAsync runs [benchOrchestrator.sweepWorker] off the caller's
+// goroutine. Discovery talks to the gateway, and the callers — worker
+// connect, device toggle — are latency-sensitive paths that must not
+// block on it. The goroutine is bounded by the orchestrator's context
+// through the RPC it makes and exits as soon as the sweep returns.
+func (b *benchOrchestrator) sweepWorkerAsync(w *worker.StreamWorker) {
+	if ctx, models, _ := b.providers(); ctx == nil || models == nil {
+		return
+	}
+	go b.sweepWorker(w)
+}
 
 // sweepWorker queues a bench for every model of w's runtime that has no
 // valid row on w's CURRENT predicted device set. This is the
@@ -460,11 +473,7 @@ func (r *benchRunner) kick() {
 }
 
 func (r *benchRunner) shutdown() {
-	select {
-	case <-r.stop:
-	default:
-		close(r.stop)
-	}
+	r.stopOnce.Do(func() { close(r.stop) })
 	<-r.stopped
 }
 

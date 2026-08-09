@@ -841,7 +841,7 @@ func (s *Scheduler) OnWorkerConnected(w *worker.StreamWorker) {
 	}
 	// A worker that just appeared owes a measurement for every model it
 	// has no row for on its current device set.
-	s.bench.sweepWorker(w)
+	s.bench.sweepWorkerAsync(w)
 	s.kick()
 }
 
@@ -1082,7 +1082,7 @@ func (s *Scheduler) OnWorkerDevicesChanged(workerID string) {
 	// The predicted device set moved, so the rows keyed on the old one
 	// no longer apply; measure the new set. Old rows are kept — toggling
 	// back reuses them.
-	s.bench.sweepWorker(sw)
+	s.bench.sweepWorkerAsync(sw)
 	s.kick()
 	s.broadcastQueueChange()
 }
@@ -1699,12 +1699,12 @@ func (s *Scheduler) drainGlobal(ctx context.Context) (pending bool) {
 			// still owed somewhere (wait), or every eligible worker has
 			// concluded this model can't run on it (fail — waiting
 			// longer changes nothing).
-			if benchPending, errText := s.modelBenchConclusion(env); benchPending {
+			benchPending, errText := s.modelBenchConclusion(env)
+			if benchPending {
 				pending = true
 				continue
-			} else {
-				s.failUnbenchable(ctx, globalQ, msg.ID, env, errText)
 			}
+			s.failUnbenchable(ctx, globalQ, msg.ID, env, errText)
 			continue
 		}
 		env.QueuedSeconds = queuedSeconds
