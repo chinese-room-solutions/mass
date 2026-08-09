@@ -52,6 +52,7 @@ var verbs = map[string]verbHandler{
 	"workers":   cmdWorkers,
 	"scheduler": cmdScheduler,
 	"queue":     cmdQueue,
+	"skill":     cmdSkill,
 }
 
 // runCLI dispatches a management subcommand. args is os.Args[1:].
@@ -81,12 +82,15 @@ Commands:
                                                                 Worker fleet
   scheduler list|evict                                          Loaded model instances
   queue list|cancel|cancel-running|evict                        Job queues
+  skill show|install DIR                                        Agent skill shipped in this binary
 
-Common flags (all commands):
+Common flags (every command that reaches the server):
   --addr string     MASS base URL (env MASS_ADDR, else local config)
   --token string    bearer token (env MASS_AUTH_TOKEN)
   --json            emit the raw JSON response
   --timeout dur     request timeout (default 60s; benchmark 10m)
+
+"skill" reaches no server and takes only --json.
 
 Run "mass <command>" with no subcommand for its subcommand list.
 `)

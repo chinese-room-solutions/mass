@@ -51,6 +51,7 @@ Every request carries `X-Mass-Actor: cli` for audit attribution.
 | `mass queue cancel --queue Q --msg-id ID` | CancelQueuedJob | `mass queue cancel --queue global --msg-id 01H...` |
 | `mass queue cancel-running --request-id ID` | CancelRunningJob | `mass queue cancel-running --request-id r1` |
 | `mass queue evict --queue Q --msg-id ID` | EvictQueuedJob | `mass queue evict --queue global --msg-id 01H...` |
+| `mass skill [show]` / `install DIR` | — (local) | `mass skill install ~/.claude/skills` |
 
 Positional-name verbs accept flags after the name (`mass runtimes start llama-cpp --json`).
 

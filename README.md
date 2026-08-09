@@ -118,13 +118,20 @@ mass queue list                               # inspect queued/running jobs
 and every `--runtime` flag take the **runtime** name that package declares
 (`mass-runtime-gateway-llama-cpp` → `llama-cpp`). Both columns show in `runtimes search`.
 
-The verb groups mirror the dashboard tabs: `status`, `models`, `runtimes`, `workers`, `scheduler`, and `queue`. Shared flags on every command: `--addr` (target URL; defaults to `$MASS_ADDR`, else the local config), `--token` (`$MASS_AUTH_TOKEN`), `--json` (raw protojson — use this when parsing), and `--timeout`. Errors map to exit codes `0`/`1`/`2` (ok/error/usage). For the full verb reference and common workflows, see the [`mass-cli` skill](.claude/skills/mass-cli/SKILL.md).
+The verb groups mirror the dashboard tabs: `status`, `models`, `runtimes`, `workers`, `scheduler`, and `queue`. Shared flags on every command that reaches the server: `--addr` (target URL; defaults to `$MASS_ADDR`, else the local config), `--token` (`$MASS_AUTH_TOKEN`), `--json` (raw protojson — use this when parsing), and `--timeout`. Errors map to exit codes `0`/`1`/`2` (ok/error/usage).
 
-The skill is a plain Markdown instruction file — any agent can use it: point yours at `SKILL.md` directly, or install it wherever your agent discovers skills. With Claude Code, for example, it's picked up automatically when working inside this repo; for other projects copy (or symlink) the skill directory into the project's `.claude/skills/mass-cli/`, or install it user-wide so every project sees it:
+### Agent skill
+
+For the full verb reference and common workflows, point your agent at the [`mass-cli` skill](skills/mass-cli/SKILL.md).
+
+The skill is a plain Markdown instruction file, tied to no particular agent, and it ships inside the binary — so it documents the verbs your build actually has, with no checkout required:
 
 ```bash
-cp -r .claude/skills/mass-cli ~/.claude/skills/
+mass skill                    # print it (pipe it wherever you like)
+mass skill install <dir>      # write it to <dir>/mass-cli/SKILL.md
 ```
+
+`<dir>` is whatever directory your agent discovers skills in — there is no default, and no server is needed, so this works on a fresh install. Reinstall after upgrading MASS: an old copy describes verbs that may have moved.
 
 ## Build commands
 
