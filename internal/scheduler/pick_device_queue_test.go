@@ -15,9 +15,10 @@ import (
 // pickWorkerQueue minimises expected completion time: inflight_seconds
 // + tail_seconds + load_latency + the job's own compute seconds on the
 // candidate. No hard residency filter — a non-resident worker pays
-// load_latency = file_bytes/memory_throughput. Each subtest isolates one
-// axis: power, in-flight, tail, capacity gate, aggregation across multiple
-// GPUs, GPU-vs-CPU choice.
+// load_latency = file_bytes/memory_throughput. No capacity gate either —
+// a saturated worker is priced by its in-flight and tail terms, not
+// excluded. Each subtest isolates one axis: power, in-flight, tail,
+// saturation, aggregation across multiple GPUs, GPU-vs-CPU choice.
 func TestPickWorkerQueue_Scoring(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
@@ -79,23 +80,36 @@ func TestPickWorkerQueue_Scoring(t *testing.T) {
 			wantQueue: "worker|w2",
 		},
 		{
-			// Capacity gate is residency-aware: a resident worker at
-			// capacity 0 is saturated and excluded. The dispatch will
-			// load-on-demand on the non-resident peer instead.
-			name: "saturated resident worker is excluded",
+			// A resident worker with a full pool still wins when it
+			// scores best: 400/400 = 1.0s on w1 against 400/100 = 4.0s
+			// on the free peer. Saturation is dispatch-side backpressure,
+			// so the row queues on w1 and pipelines out as a slot frees.
+			name: "saturated resident worker still wins on score",
 			workers: []workerSpec{
-				{id: "w1", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 0, hasModel: true},
-				{id: "w2", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 1},
+				{id: "w1", devices: gpu1(), gflops: map[string]float64{"gpu:0": 400}, capacity: 0, hasModel: true},
+				{id: "w2", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 4},
 			},
 			envModel:  modelID,
+			envCost:   400,
+			wantQueue: "worker|w1",
+		},
+		{
+			// A worker that would be busy for 50s loses to an idle peer
+			// even though the peer must cold-load: the in-flight term is
+			// what prices the wait.
+			name: "busy resident worker loses to idle peer on score",
+			workers: []workerSpec{
+				{id: "w1", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 0, hasModel: true},
+				{id: "w2", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 4},
+			},
+			envModel:  modelID,
+			inflight:  map[string]float64{"worker|w1": 50.0},
 			wantQueue: "worker|w2",
 		},
 		{
 			// A non-resident worker reports capacity=0 until LoadModel
-			// materialises its context pool. That's NOT a saturated
-			// signal — placement must be allowed so dispatchEnvelope
-			// can load on demand. With no envelope ModelID, residency
-			// is irrelevant and capacity stays a hard gate.
+			// materialises its context pool. Placement must be allowed so
+			// dispatchEnvelope can load on demand.
 			name: "non-resident zero-capacity worker is still a candidate",
 			workers: []workerSpec{
 				{id: "w1", devices: gpu1(), gflops: map[string]float64{"gpu:0": 100}, capacity: 0},
@@ -502,14 +516,13 @@ func TestPickWorkerQueue_HeterogeneousPairGatedBySlowest(t *testing.T) {
 		"split-model queued_seconds must honour N × min(rates), not sum")
 }
 
-// Saturated GPU worker falls through to the CPU worker. The GPU
-// worker is resident on the model AND has capacity=0 → the
-// residency-aware capacity gate in pickWorkerQueue excludes it.
-// The CPU worker (also resident, capacity>0) takes the placement.
-// Exercises the cross-device fallback path that the existing scoring
-// tests don't reach: every other Test*Scoring case uses single-device
-// workers or pure GPU pairs.
-func TestSubmit_SaturatedGPUFallsThroughToCPUWorker(t *testing.T) {
+// A GPU worker deep enough in work falls through to the CPU worker:
+// 10s of in-flight compute outweighs the CPU's 15× slower rate on this
+// job (10.2s vs 1.25s). Nothing excludes the GPU — the score does the
+// work. Exercises the cross-device fallback path that the scoring table
+// doesn't reach: every case there uses single-device workers or pure
+// GPU pairs.
+func TestSubmit_BusyGPUFallsThroughToCPUWorker(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
 	s, st := newTestScheduler(t)
@@ -523,12 +536,12 @@ func TestSubmit_SaturatedGPUFallsThroughToCPUWorker(t *testing.T) {
 		Throughput: map[string]float64{"q4k_matvec": 80}, BenchedAt: time.Now(),
 	}))
 
-	// GPU resident + capacity 0 = saturated → must be skipped.
+	// GPU resident, pool full, and busy for another 10s.
 	gpuW := worker.NewFakeStreamWorker("gpu-worker", runtimeName,
 		[]stats.Device{{ID: "gpu:0", Type: stats.DeviceTypeGPU}}, time.Now())
 	gpuW.SetFakeCapacity(0)
 	gpuW.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1}})
-	// CPU resident + capacity 4 = takes the load instead.
+	// CPU resident and idle = takes the load instead.
 	cpuW := worker.NewFakeStreamWorker("cpu-worker", runtimeName,
 		[]stats.Device{{ID: "cpu:0", Type: stats.DeviceTypeCPU}}, time.Now())
 	cpuW.SetFakeCapacity(4)
@@ -538,6 +551,7 @@ func TestSubmit_SaturatedGPUFallsThroughToCPUWorker(t *testing.T) {
 	require.NoError(t, s.workers.Register(cpuW))
 	s.OnWorkerConnected(gpuW)
 	s.OnWorkerConnected(cpuW)
+	s.startInflight("worker|gpu-worker", "req-running", modelID, runtimeName, "q4k_matvec", 10.0, 0)
 
 	_, err := s.Submit(context.Background(), SubmitRequest{
 		RuntimeName: runtimeName, ModelID: modelID,
@@ -550,57 +564,61 @@ func TestSubmit_SaturatedGPUFallsThroughToCPUWorker(t *testing.T) {
 	cpuRow, err := st.GetWorkerQueueState("worker|cpu-worker")
 	require.NoError(t, err)
 	require.InDelta(t, 0.0, gpuRow.TailSeconds, 0.001,
-		"saturated GPU worker must be skipped even when it would score lower")
+		"the busy GPU worker's in-flight seconds must price it out of this placement")
 	require.InDelta(t, 100.0/80.0, cpuRow.TailSeconds, 0.001,
-		"CPU worker must absorb the placement when the GPU is saturated")
+		"CPU worker must absorb the placement while the GPU is busy")
 }
 
-// A warm worker with a free slot stays eligible once its heartbeat
-// reflects the job MASS has running on it. Debiting that job against a
-// capacity number that already excludes it made the picker call a warm
-// worker saturated and push the job to a cold peer, forcing a needless
-// model load.
-func TestPickWorkerQueue_SyncedHeartbeatKeepsWarmWorkerEligible(t *testing.T) {
+// The single-worker production case: one pool_size=1 embedding model,
+// resident and busy. The next job must still be placed onto that
+// worker's queue so it pipelines out the moment the running job ends.
+// Gating placement on free slots held it on global instead, until a
+// dispatch pass happened to catch an idle heartbeat — which turned a
+// steady stream into a batchy one.
+func TestPickWorkerQueue_SaturatedSoleWorkerStillTakesPlacement(t *testing.T) {
 	const runtimeName = "llama-cpp"
 	const modelID = "m-1"
 	s, st := newTestScheduler(t)
 
 	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
-		WorkerID: "warm", DeviceID: "gpu:0", DeviceName: "gpu:0",
+		WorkerID: "w1", DeviceID: "gpu:0", DeviceName: "gpu:0",
 		Throughput: map[string]float64{"q4k_matvec": 500}, BenchedAt: time.Now(),
 	}))
-	require.NoError(t, st.SaveBenchmark(store.BenchmarkRow{
-		WorkerID: "cold", DeviceID: "gpu:0", DeviceName: "gpu:0",
-		Throughput: map[string]float64{"q4k_matvec": 80}, BenchedAt: time.Now(),
-	}))
 
-	// Pool of 2, one job running and reported by the heartbeat: one slot
-	// really is free.
-	warm := worker.NewFakeStreamWorker("warm", runtimeName, gpu1(), time.Now())
-	warm.SetFakeCapacity(1)
-	warm.SetFakeActiveJobs(1)
-	warm.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 2, Active: 1}})
-	cold := worker.NewFakeStreamWorker("cold", runtimeName, gpu1(), time.Now())
-	cold.SetFakeCapacity(4)
-	require.NoError(t, s.workers.Register(warm))
-	require.NoError(t, s.workers.Register(cold))
-	s.OnWorkerConnected(warm)
-	s.OnWorkerConnected(cold)
+	// Pool of 1, its only slot taken by a job the heartbeat already
+	// reports: no free capacity anywhere in the fleet.
+	w := worker.NewFakeStreamWorker("w1", runtimeName, gpu1(), time.Now())
+	w.SetFakeCapacity(0)
+	w.SetFakeActiveJobs(1)
+	w.SetFakeLoadedModels([]worker.LoadedModelStatus{{ModelID: modelID, PoolSize: 1, Active: 1}})
+	require.NoError(t, s.workers.Register(w))
+	s.OnWorkerConnected(w)
 
 	// The same job, from MASS's side.
 	s.inflightMu.Lock()
 	s.inflightByRequest["req-running"] = inflightRecord{
-		queueName: "worker|warm", workerID: "warm", modelID: modelID,
+		queueName: "worker|w1", workerID: "w1", modelID: modelID,
 	}
 	s.inflightMu.Unlock()
 
-	target, _ := s.pickWorkerQueue(queue.Envelope{
+	env := queue.Envelope{
 		RuntimeName: runtimeName, ModelID: modelID,
 		Cost: 100, CostAxis: "q4k_matvec",
+	}
+	target, _ := s.pickWorkerQueue(env)
+	require.NotNil(t, target, "a saturated sole worker must still take the placement")
+	require.Equal(t, "worker|w1", target.name)
+
+	// End to end: Submit must move the row onto the worker queue, not
+	// leave it waiting on global.
+	_, err := s.Submit(context.Background(), SubmitRequest{
+		RuntimeName: runtimeName, ModelID: modelID,
+		Payload: []byte("p"), Cost: 100, CostAxis: "q4k_matvec",
 	})
-	require.NotNil(t, target)
-	require.Equal(t, "worker|warm", target.name,
-		"a warm worker with a heartbeat-confirmed free slot must keep the placement")
+	require.NoError(t, err)
+	depth, err := s.devQueues["worker|w1"].Depth(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, depth, "the new job must be queued on the busy worker")
 }
 
 // startInflight and finishInflight must round-trip cleanly: adding a

@@ -6,8 +6,8 @@
 //   - One device queue per (worker, enabled-device) pair receives jobs the
 //     dispatcher has bound to a specific compute target.
 //   - A single dispatcher goroutine leases global rows: it picks a device
-//     queue (filtered by runtime_name, preferring model-loaded targets,
-//     breaking ties by available worker capacity) and atomically moves
+//     queue (filtered by runtime_name, scored by expected completion
+//     time — see [Scheduler.pickWorkerQueue]) and atomically moves
 //     each row to the chosen device queue. Device queues drain on their
 //     own per-queue goroutines — the handoff may block for minutes on a
 //     cold [worker.StreamWorker.LoadModel], and one worker's load must
@@ -1857,9 +1857,17 @@ type workerQueueTarget struct {
 // queue's tail_seconds: env.Cost / throughput_w + load_latency_w. The
 // dispatcher pop subtracts this exact value, so tail stays consistent.
 //
-// Returns (nil, 0) when no candidate is eligible (no online enabled-and-
-// benched worker with capacity > 0). drainGlobal leaves the row on
-// global in that case and retries next tick.
+// Placement is score-only: a saturated worker is priced, not excluded.
+// Its inflight + tail terms already carry the wait, and a cold peer's
+// model switch is priced by load_latency. Free slots are dispatch-side
+// backpressure ([Scheduler.effectiveCapacity] in drainOneWorkerQueue),
+// so rows queue on the best-scoring worker and pipeline out as slots
+// free, instead of sitting on global until a heartbeat happens to
+// sample an idle gap between jobs.
+//
+// Returns (nil, 0) when no candidate is eligible (no online, enabled,
+// benched worker for the runtime). drainGlobal leaves the row on global
+// in that case and retries next tick.
 func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, float64) {
 	candidates := s.WorkersForRuntime(env.RuntimeName)
 	if len(candidates) == 0 {
@@ -1883,23 +1891,6 @@ func (s *Scheduler) pickWorkerQueue(env queue.Envelope) (*workerQueueTarget, flo
 		// can't host the operator's placement choice so MASS doesn't
 		// pick a worker whose load will fail.
 		if !s.eligibleWorker(w, env) {
-			continue
-		}
-		// Capacity gate is residency-aware. A worker with the model
-		// resident AND no blockers has a real concurrency cap
-		// (pool_size) that we must respect — full pool means future
-		// tasks queue, not displace. A worker WITHOUT the model
-		// resident, or one that's resident-stale / has other-model
-		// conflicts, reports a pool that won't survive dispatch
-		// (it'll be evicted + reloaded with a fresh pool), so the
-		// capacity number is meaningless. Exclude only resident-fitting
-		// saturated workers. Capacity is net of the dispatches the last
-		// heartbeat hasn't caught up with, so the picker doesn't route a
-		// burst onto a worker the dispatcher will then refuse — see
-		// [Scheduler.effectiveCapacity].
-		if env.ModelID != "" && workerHasModel(w, env.ModelID) &&
-			len(residentsBlockingLoad(w, env.ModelID, s.predictDeviceSet(w))) == 0 &&
-			s.effectiveCapacity(w) <= 0 {
 			continue
 		}
 		name := workerQueueName(w.ID())
