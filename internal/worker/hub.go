@@ -155,12 +155,16 @@ func (h *Hub) Connect(ctx context.Context, stream *connect.BidiStream[workerpb.W
 	if h.runtimeOK != nil && !h.runtimeOK(reg.RuntimeName) {
 		return ctxerr.With(fmt.Errorf("runtime kind %q is not installed", reg.RuntimeName), map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName})
 	}
+	// Protocol and index-compat rejections are FAILED_PRECONDITION: the worker
+	// treats that code as fatal and stays down instead of retrying, because the
+	// verdict can't change without a reinstall or an index edit. The
+	// runtime-not-installed rejection above stays retryable on purpose.
 	if err := negotiateWorkerProtocol(presentedID, reg.GetProtocolVersions()); err != nil {
-		return ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_protocols": reg.GetProtocolVersions(), "mass_protocols": workerpb.SupportedProtocols})
+		return connect.NewError(connect.CodeFailedPrecondition, ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_protocols": reg.GetProtocolVersions(), "mass_protocols": workerpb.SupportedProtocols}))
 	}
 	if h.compat != nil {
 		if err := h.compat(reg.RuntimeName, reg.Version); err != nil {
-			return ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_version": reg.Version})
+			return connect.NewError(connect.CodeFailedPrecondition, ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_version": reg.Version}))
 		}
 	}
 
