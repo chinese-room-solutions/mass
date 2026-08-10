@@ -69,6 +69,10 @@ gateway Init negotiation, drop the now-dead range plumbing
 (`hub.go` handshake validation, `registryops` worker-compat duplication where
 it hand-rolls what the SDK resolver now owns).
 
+**mass-runtime-gateway-llama-cpp** — the response side of Init negotiation:
+`protocol.Negotiate` over the request's `supported_protocols`, echo the pick,
+refuse on empty intersection. Manifest version stays owner-managed.
+
 **mass-worker-llama-cpp** — delete `kCompatibleRuntimes`, send
 `protocol_versions`, handle rejection. CI: pin the mass-proto checkout to a
 ref instead of the default branch.
