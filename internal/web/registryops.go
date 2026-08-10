@@ -60,6 +60,12 @@ type PackageView struct {
 	DisplayName string
 	Description string
 	Versions    []PackageVersionView
+	// Installable is the version an install would actually fetch here: the
+	// newest one with an artifact for this platform whose mass range covers
+	// this server. Empty when none resolves, and only ever set for runtime
+	// packages — a worker's version additionally depends on the runtime it
+	// pairs with, which a package listing has no way to know.
+	Installable string
 }
 
 // RegistrySearchResult is the neutral view of a registry search: the matching
@@ -132,9 +138,27 @@ func (h *Handler) searchPackages(ctx context.Context, kind, query, runtimeName s
 			DisplayName: pkg.DisplayName,
 			Description: pkg.Description,
 			Versions:    versions,
+			Installable: h.installableRuntimeVersion(res.Index, pkg),
 		})
 	}
 	return RegistrySearchResult{Packages: views, Stale: res.Stale}, nil
+}
+
+// installableRuntimeVersion is the version installing pkg here would fetch, or
+// "" when nothing resolves. It answers for runtime packages only: the same
+// resolver installRuntimeFromRegistry uses, so a listing never advertises a
+// version the install would not produce. Non-runtime kinds return "" — a
+// worker's choice also depends on the runtime version it pairs with, which the
+// listing does not carry.
+func (h *Handler) installableRuntimeVersion(idx *registry.Index, pkg registry.Package) string {
+	if pkg.Kind != registryRuntimeKind {
+		return ""
+	}
+	resolved, err := idx.ResolveRuntime(pkg.Name, serverPlatform(), h.massVersionForResolve())
+	if err != nil {
+		return ""
+	}
+	return resolved.Version.Version
 }
 
 // versionHasArtifact reports whether a package version has an artifact

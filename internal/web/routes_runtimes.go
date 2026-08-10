@@ -199,15 +199,13 @@ func (h *Handler) registryPackageViews(pkgs []PackageView) []templates.RegistryP
 		if p.Kind != registryRuntimeKind {
 			continue
 		}
-		version, installable := "", false
-		if len(p.Versions) > 0 {
-			version = p.Versions[0].Version
-			for _, v := range p.Versions {
-				if v.HasArtifact {
-					installable = true
-					break
-				}
-			}
+		// Show the version an install would actually fetch — the newest one
+		// this server's platform and version resolve to. With none, fall back
+		// to the newest listed so the row still names the package, marked not
+		// installable.
+		version, installable := p.Installable, p.Installable != ""
+		if !installable {
+			version, _ = newestListedVersion(p.Versions)
 		}
 		// Pre-upgrade fleet flag: only for an installed runtime whose newest
 		// listed version is strictly newer than what's on disk. Count the
