@@ -23,8 +23,7 @@ type WorkerInfo struct {
 	ID          string
 	Name        string
 	RuntimeName string
-	Version     string // worker's own semver (required at handshake)
-	Compatible  string // runtime-version range it decodes (required at handshake)
+	Version     string // worker's own semver, as reported at handshake
 	Online      bool
 	Enabled     bool // operator toggle: any device on this worker enabled
 	ActiveJobs  int
@@ -134,7 +133,6 @@ func (h *Handler) workerInfos() []WorkerInfo {
 			Name:          wkr.Name(),
 			RuntimeName:   wkr.RuntimeName(),
 			Version:       wkr.Version(),
-			Compatible:    wkr.Compatible(),
 			Online:        status.Online,
 			Enabled:       workerEnabled,
 			ActiveJobs:    wkr.ActiveJobs(),

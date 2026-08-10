@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/KernelPryanic/ctxerr"
-	"github.com/Masterminds/semver/v3"
 
 	"connectrpc.com/connect"
+	"github.com/chinese-room-solutions/mass-proto/gen/go/protocol"
 	workerpb "github.com/chinese-room-solutions/mass-proto/gen/go/worker"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
 	"github.com/chinese-room-solutions/mass/pkg/bench"
@@ -31,12 +31,14 @@ type CanonicalSetFn func() map[string]struct{}
 // runtime_name is not registered are rejected at handshake.
 type RuntimeNameRegisteredFn func(runtimeName string) bool
 
-// RuntimeVersionFn returns the installed version of runtimeName and whether it
-// is installed. It is the join key into a worker's compatible range: the
-// handshake rejects a worker whose range doesn't cover this version. Sibling to
-// [RuntimeNameRegisteredFn] so the hub stays decoupled from the runtimes
-// manager type.
-type RuntimeVersionFn func(runtimeName string) (version string, ok bool)
+// WorkerCompatFn decides whether a worker of workerVersion may pair with the
+// installed runtimeName runtime. Semver compatibility lives in the registry
+// index, not in either binary, so the check is injected by whoever owns the
+// index (the web layer): a non-nil error rejects the registration and reaches
+// the worker's log, and inconclusive inputs accept — the implementation logs
+// them. Sibling to [RuntimeNameRegisteredFn] so the hub stays decoupled from
+// the registry and runtimes types.
+type WorkerCompatFn func(runtimeName, workerVersion string) error
 
 // EnabledDevicesProviderFn returns the operator-controlled enabled-device
 // whitelist for a worker in explicit three-state form (see
@@ -69,7 +71,7 @@ type Hub struct {
 	modelsDir      string
 	canonical      CanonicalSetFn
 	runtimeOK      RuntimeNameRegisteredFn
-	runtimeVersion RuntimeVersionFn
+	compat         WorkerCompatFn
 	enabledDevices EnabledDevicesProviderFn
 	logger         zerolog.Logger
 }
@@ -106,10 +108,10 @@ func (h *Hub) SetCanonicalFn(fn CanonicalSetFn) { h.canonical = fn }
 // construction. The runtimes manager isn't available when the hub is built.
 func (h *Hub) SetRuntimeNameRegisteredFn(fn RuntimeNameRegisteredFn) { h.runtimeOK = fn }
 
-// SetRuntimeVersionFn wires the installed-runtime-version lookup used by the
-// handshake compatibility check. When nil the check is skipped (workers of any
-// version admitted — tests, and MASS builds without a runtimes manager).
-func (h *Hub) SetRuntimeVersionFn(fn RuntimeVersionFn) { h.runtimeVersion = fn }
+// SetWorkerCompatFn wires the index-driven compatibility check run at
+// handshake. When nil the check is skipped (workers of any version admitted —
+// tests, and MASS builds without a registry).
+func (h *Hub) SetWorkerCompatFn(fn WorkerCompatFn) { h.compat = fn }
 
 // SetEnabledDevicesProvider wires the source of the operator-controlled
 // enabled-device whitelist. When unset, the hub sends all=true on connect
@@ -143,20 +145,22 @@ func (h *Hub) Connect(ctx context.Context, stream *connect.BidiStream[workerpb.W
 	bearer := bearerFromHeader(stream.RequestHeader().Get("Authorization"))
 	presentedID := stream.RequestHeader().Get("X-Mass-Worker-Id")
 
-	// Validate the registration (runtime kind + compat range) BEFORE enrolling,
-	// so a rejected worker never leaves an orphan credential row behind. The id
-	// in these messages is the one the worker presented, or empty when it is
-	// still enrolling — cosmetic either way.
+	// Validate the registration (runtime kind, wire protocol, index compat)
+	// BEFORE enrolling, so a rejected worker never leaves an orphan credential
+	// row behind. The id in these messages is the one the worker presented, or
+	// empty when it is still enrolling — cosmetic either way.
 	if reg.RuntimeName == "" {
 		return fmt.Errorf("worker %s register: runtime_name is required", presentedID)
 	}
 	if h.runtimeOK != nil && !h.runtimeOK(reg.RuntimeName) {
 		return ctxerr.With(fmt.Errorf("runtime kind %q is not installed", reg.RuntimeName), map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName})
 	}
-	if h.runtimeVersion != nil {
-		installedVersion, ok := h.runtimeVersion(reg.RuntimeName)
-		if err := checkRuntimeCompat(presentedID, reg, installedVersion, ok); err != nil {
-			return ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "installed_version": installedVersion, "compatible": reg.Compatible})
+	if err := negotiateWorkerProtocol(presentedID, reg.GetProtocolVersions()); err != nil {
+		return ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_protocols": reg.GetProtocolVersions(), "mass_protocols": workerpb.SupportedProtocols})
+	}
+	if h.compat != nil {
+		if err := h.compat(reg.RuntimeName, reg.Version); err != nil {
+			return ctxerr.With(err, map[string]any{"worker_id": presentedID, "runtime_name": reg.RuntimeName, "worker_version": reg.Version})
 		}
 	}
 
@@ -378,45 +382,14 @@ func bearerFromHeader(authHeader string) string {
 	return authHeader[len(prefix):]
 }
 
-// checkRuntimeCompat validates a worker's declared compatible range against the
-// installed runtime version. installedOK reports whether the runtime is
-// installed (the caller already rejected unregistered runtime_names, so a false
-// here means the runtime vanished between the two lookups — treat as not
-// installed).
-//
-// Both handshake fields are required: the worker binary at HEAD always sends
-// its version and compatible range, so an empty value means a broken or foreign
-// worker and is rejected with a distinct, operator-actionable error. A non-empty
-// range that fails to parse, or an installed version that isn't semver, is
-// likewise rejected — a worker that lies about its range must not slip through.
-func checkRuntimeCompat(workerID string, reg *workerpb.WorkerRegister, installedVersion string, installedOK bool) error {
-	if reg.Version == "" {
-		return fmt.Errorf("worker %s register: version is required (worker sent none)", workerID)
-	}
-	if reg.Compatible == "" {
-		return fmt.Errorf("worker %s (version %q) register: compatible range is required (worker sent none)",
-			workerID, reg.Version)
-	}
-	if !installedOK {
-		return fmt.Errorf("worker %s (version %q) declares compatible range %q but runtime %q is not installed",
-			workerID, reg.Version, reg.Compatible, reg.RuntimeName)
-	}
-	if installedVersion == "" {
-		return nil // runtime reports no version; accept (installed-side gap, not the worker's)
-	}
-	installed, err := semver.NewVersion(installedVersion)
-	if err != nil {
-		return fmt.Errorf("worker %s (version %q, compatible %q): installed runtime %q version %q is not valid semver",
-			workerID, reg.Version, reg.Compatible, reg.RuntimeName, installedVersion)
-	}
-	constraint, err := semver.NewConstraint(reg.Compatible)
-	if err != nil {
-		return fmt.Errorf("worker %s (version %q): compatible range %q is not a valid semver constraint",
-			workerID, reg.Version, reg.Compatible)
-	}
-	if !constraint.Check(installed) {
-		return fmt.Errorf("worker %s (version %q) declares compatible range %q, which excludes installed runtime %q version %q",
-			workerID, reg.Version, reg.Compatible, reg.RuntimeName, installedVersion)
+// negotiateWorkerProtocol picks the wire protocol version MASS and the worker
+// both speak. An empty intersection — including a worker that sends no list at
+// all — is a clean rejection naming both lists, since the error surfaces in the
+// worker's own log where the operator can act on it.
+func negotiateWorkerProtocol(workerID string, workerProtocols []int32) error {
+	if _, ok := protocol.Negotiate(workerpb.SupportedProtocols, workerProtocols); !ok {
+		return fmt.Errorf("worker %s register: no common wire protocol version (worker speaks %v, MASS speaks %v); install a worker build released alongside this MASS",
+			workerID, workerProtocols, workerpb.SupportedProtocols)
 	}
 	return nil
 }

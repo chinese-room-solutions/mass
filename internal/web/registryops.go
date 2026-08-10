@@ -34,7 +34,7 @@ var logDevVersionOnce sync.Once
 var (
 	// errRuntimeNotInstalled is returned when worker-bin resolution is asked
 	// for a runtime the MASS host does not have installed (its version is the
-	// join key into the worker's compatible range).
+	// join key into the index's worker rows).
 	errRuntimeNotInstalled = errors.New("runtime not installed")
 	// errAmbiguousBackend is returned when no backend was requested but the
 	// index has worker artifacts for more than one backend on the os/arch.
@@ -469,27 +469,6 @@ func (h *Handler) workerOptionsFor(ctx context.Context, runtimeName string) ([]W
 	return out, nil
 }
 
-// workerCompat is one connected worker's runtime pairing and declared
-// compatible range, the inputs to the pre-upgrade fleet check.
-type workerCompat struct {
-	RuntimeName string
-	Compatible  string
-}
-
-// fleetCompat snapshots every connected worker's runtime_name + compatible
-// range for the pre-upgrade flag. Returns nil when no fleet is wired.
-func (h *Handler) fleetCompat() []workerCompat {
-	if h.workers == nil {
-		return nil
-	}
-	all := h.workers.All()
-	out := make([]workerCompat, 0, len(all))
-	for _, wkr := range all {
-		out = append(out, workerCompat{RuntimeName: wkr.RuntimeName(), Compatible: wkr.Compatible()})
-	}
-	return out
-}
-
 // isNewerVersion reports whether candidate is strictly newer than installed by
 // semver. Either side unparseable ⇒ false (no reliable "newer" claim, so no
 // upgrade flag).
@@ -503,42 +482,6 @@ func isNewerVersion(candidate, installed string) bool {
 		return false
 	}
 	return c.GreaterThan(i)
-}
-
-// countIncompatibleWorkers reports how many connected workers paired with
-// runtimeName declare a compatible range that excludes candidateVersion — the
-// workers a runtime upgrade to candidateVersion would strand. It is a plain
-// semver computation over the fleet, table-tested independently of any
-// transport.
-//
-// A worker with an empty range counts as incompatible: the hub now requires
-// every worker to declare a compatible range at handshake, so a connected
-// worker can't have an empty one — an empty value here means something is off,
-// and flagging it is the safe, operator-actionable call. A worker whose range
-// fails to parse is counted for the same reason: an unparseable range can't be
-// shown to cover the new version. candidateVersion must be valid semver (it
-// comes from the validated index); an unparseable candidate yields an error so
-// the caller can skip the flag rather than miscount.
-func countIncompatibleWorkers(workers []workerCompat, runtimeName, candidateVersion string) (int, error) {
-	candidate, err := semver.NewVersion(candidateVersion)
-	if err != nil {
-		return 0, fmt.Errorf("parsing candidate version %q: %w", candidateVersion, err)
-	}
-	count := 0
-	for _, wc := range workers {
-		if wc.RuntimeName != runtimeName {
-			continue
-		}
-		if wc.Compatible == "" {
-			count++
-			continue
-		}
-		constraint, err := semver.NewConstraint(wc.Compatible)
-		if err != nil || !constraint.Check(candidate) {
-			count++
-		}
-	}
-	return count, nil
 }
 
 // massVersionForResolve returns MASS's own version for the min_mass check, or a

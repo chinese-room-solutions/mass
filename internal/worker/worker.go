@@ -27,14 +27,9 @@ type WorkerInterface interface {
 	RuntimeName() string
 
 	// Version reports the worker's own semver (e.g. "0.1.0"), set at register
-	// time. Empty when the worker predates the handshake version field.
+	// time. Empty when the worker reported none. It is the join key into the
+	// registry index rows that decide compatibility.
 	Version() string
-
-	// Compatible reports the semver range of runtime versions this worker
-	// decodes (e.g. ">=0.1 <0.2"), set at register time. Empty when the worker
-	// predates the handshake field. Used to flag workers a runtime upgrade
-	// would strand.
-	Compatible() string
 
 	// Status returns the current status of this worker.
 	Status() WorkerStatus

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -9,43 +10,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCheckRuntimeCompat(t *testing.T) {
+func TestNegotiateWorkerProtocol(t *testing.T) {
 	tests := []struct {
-		name             string
-		version          string // worker version
-		compatible       string // worker compatible range
-		installedVersion string
-		installedOK      bool
-		wantErr          bool
+		name            string
+		workerProtocols []int32
+		wantErr         bool
 	}{
-		{"empty version and compatible rejects", "", "", "0.1.0", true, true},
-		{"empty version only rejects", "", ">=0.1 <0.2", "0.1.0", true, true},
-		{"empty compatible only rejects", "0.1.0", "", "0.1.0", true, true},
-		{"in range accepts", "0.1.0", ">=0.1 <0.2", "0.1.5", true, false},
-		{"in range at boundary accepts", "0.1.0", ">=0.1.0", "0.1.0", true, false},
-		{"empty installed version accepts (runtime reports none)", "0.1.0", ">=0.1 <0.2", "", true, false},
-		{"out of range rejects", "0.1.0", ">=0.1 <0.2", "0.2.0", true, true},
-		{"below range rejects", "0.1.0", ">=0.2", "0.1.0", true, true},
-		{"malformed range rejects", "0.1.0", "not-a-range", "0.1.0", true, true},
-		{"unparseable installed version rejects", "0.1.0", ">=0.1 <0.2", "garbage", true, true},
-		{"declares range but runtime not installed rejects", "0.1.0", ">=0.1 <0.2", "", false, true},
+		{"exact match accepts", []int32{1}, false},
+		{"superset accepts", []int32{1, 2, 3}, false},
+		{"unset list rejects", nil, true},
+		{"empty list rejects", []int32{}, true},
+		{"no common version rejects", []int32{2, 3}, true},
+		{"unknown-only version rejects", []int32{99}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reg := &workerpb.WorkerRegister{
-				RuntimeName: "llama-cpp",
-				Version:     tt.version,
-				Compatible:  tt.compatible,
-			}
-			err := checkRuntimeCompat("w1", reg, tt.installedVersion, tt.installedOK)
-			if tt.wantErr {
-				require.Error(t, err)
-				// The operator-facing message names the worker id and, when
-				// relevant, both versions/range so worker logs are actionable.
-				require.Contains(t, err.Error(), "w1")
-			} else {
+			err := negotiateWorkerProtocol("w1", tt.workerProtocols)
+			if !tt.wantErr {
 				require.NoError(t, err)
+				return
 			}
+			require.Error(t, err)
+			// The rejection reaches the worker's log: it must name the
+			// worker and both lists so the operator can act on it.
+			require.Contains(t, err.Error(), "w1")
+			require.Contains(t, err.Error(), fmt.Sprintf("%v", tt.workerProtocols))
+			require.Contains(t, err.Error(), fmt.Sprintf("%v", workerpb.SupportedProtocols))
 		})
 	}
 }

@@ -229,40 +229,6 @@ func TestIsNewerVersion(t *testing.T) {
 	}
 }
 
-func TestCountIncompatibleWorkers(t *testing.T) {
-	workers := []workerCompat{
-		{RuntimeName: "llama-cpp", Compatible: ">=0.1 <0.2"}, // excludes 0.2.0
-		{RuntimeName: "llama-cpp", Compatible: ">=0.1 <0.3"}, // covers 0.2.0
-		{RuntimeName: "llama-cpp", Compatible: ""},           // empty range; counted incompatible
-		{RuntimeName: "llama-cpp", Compatible: "garbage"},    // unparseable; counted incompatible
-		{RuntimeName: "other-rt", Compatible: ">=0.1 <0.2"},  // different runtime; ignored
-	}
-	tests := []struct {
-		name        string
-		runtimeName string
-		candidate   string
-		want        int
-		wantErr     bool
-	}{
-		{"upgrade strands out-of-range + empty + unparseable", "llama-cpp", "0.2.0", 3, false},
-		{"upgrade within all ranges strands empty + unparseable", "llama-cpp", "0.1.5", 2, false},
-		{"other runtime unaffected", "other-rt", "0.2.0", 1, false},
-		{"no workers for runtime", "ghost", "0.2.0", 0, false},
-		{"unparseable candidate errors", "llama-cpp", "latest", 0, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n, err := countIncompatibleWorkers(workers, tt.runtimeName, tt.candidate)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tt.want, n)
-		})
-	}
-}
-
 func TestMassVersionForResolve(t *testing.T) {
 	h := newTestHandler(t)
 

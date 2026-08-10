@@ -29,7 +29,7 @@ type workerRegistryFixture struct {
 }
 
 // newWorkerRegistryFixture stands up a registry serving runtime "test-rt" v0.1.0
-// and worker "test-rt-worker" v0.1.0 (compatible ">=0.1 <0.2") whose artifacts
+// and worker "test-rt-worker" v0.1.0 (runtime range ">=0.1 <0.2") whose artifacts
 // cover the given backends on goos/goarch.
 func newWorkerRegistryFixture(t *testing.T, goos, goarch string, backends ...string) *workerRegistryFixture {
 	t.Helper()
@@ -144,7 +144,13 @@ packages:
 // worker-bin resolution has an installed runtime whose version is the join key.
 func installTestRuntime(t *testing.T, h *Handler) {
 	t.Helper()
-	pkg := buildMassPackage(t, "test-rt", "0.1.0")
+	installTestRuntimeVersion(t, h, "0.1.0")
+}
+
+// installTestRuntimeVersion installs runtime "test-rt" at the given version.
+func installTestRuntimeVersion(t *testing.T, h *Handler, version string) {
+	t.Helper()
+	pkg := buildMassPackage(t, "test-rt", version)
 	path := filepath.Join(t.TempDir(), "rt.mass")
 	require.NoError(t, os.WriteFile(path, pkg, 0o644))
 	_, err := h.runtimes.InstallFromPath(path)
