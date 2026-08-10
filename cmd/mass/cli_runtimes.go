@@ -94,14 +94,12 @@ func runtimesSearch(args []string) int {
 	return code
 }
 
-// latestInstallable returns the first version's number and whether any version
-// has an artifact for the server platform. Versions are index-ordered
-// (newest-first by convention), so the first is the latest.
+// latestInstallable returns the newest version's number and whether any version
+// has an artifact for the server platform. The hand-edited index appends
+// newest-last, so the newest is the final entry — not the first.
 func latestInstallable(versions []*rpc.PackageVersion) (latest string, installable bool) {
-	for i, v := range versions {
-		if i == 0 {
-			latest = v.Version
-		}
+	for _, v := range versions {
+		latest = v.Version
 		if v.HasArtifact {
 			installable = true
 		}

@@ -275,3 +275,86 @@ func TestMassVersionForResolve(t *testing.T) {
 	h.version = "1.2.3"
 	require.Equal(t, "1.2.3", h.massVersionForResolve())
 }
+
+// newTwoVersionFixture serves one runtime package with two versions listed
+// oldest-first — the order the hand-edited index uses — each carrying its own
+// mass range, so a test can pick which one the server resolves to.
+func newTwoVersionFixture(t *testing.T, oldRange, newRange string) string {
+	t.Helper()
+	platform := registry.RuntimePlatform(runtime.GOOS, runtime.GOARCH).Key()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `schema_version: 1
+packages:
+  - name: two-rt
+    kind: runtime
+    runtime_name: two-rt
+    display_name: Two Runtime
+    versions:
+      - version: 0.1.0
+        mass: %q
+        artifacts:
+          %s: {url: "http://%s/a.mass", sha256: aa}
+      - version: 0.2.0
+        mass: %q
+        artifacts:
+          %s: {url: "http://%s/b.mass", sha256: bb}
+`, oldRange, platform, r.Host, newRange, platform, r.Host)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// A package listing must advertise the version an install would actually
+// fetch. The index lists versions oldest-first, so taking the first entry
+// showed 0.1.0 next to a button that installs 0.2.0.
+func TestRegistryPackageViews_ShowsInstallableVersion(t *testing.T) {
+	tests := []struct {
+		name            string
+		massVersion     string
+		oldRange        string
+		newRange        string
+		wantVersion     string
+		wantInstallable bool
+	}{
+		{
+			name:            "newest compatible wins over first listed",
+			massVersion:     "0.2.0",
+			oldRange:        ">=0.1 <0.2",
+			newRange:        ">=0.2",
+			wantVersion:     "0.2.0",
+			wantInstallable: true,
+		},
+		{
+			name:            "older version when the newest excludes this server",
+			massVersion:     "0.1.0",
+			oldRange:        ">=0.1 <0.2",
+			newRange:        ">=0.2",
+			wantVersion:     "0.1.0",
+			wantInstallable: true,
+		},
+		{
+			name:            "nothing resolves: newest listed, not installable",
+			massVersion:     "0.9.0",
+			oldRange:        ">=0.1 <0.2",
+			newRange:        ">=0.2 <0.3",
+			wantVersion:     "0.2.0",
+			wantInstallable: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHandler(t)
+			h.version = tt.massVersion
+			h.cfg.RegistryURL = newTwoVersionFixture(t, tt.oldRange, tt.newRange) + "/"
+
+			res, err := h.searchPackages(context.Background(), "runtime", "", "")
+			require.NoError(t, err)
+			require.Len(t, res.Packages, 1)
+
+			views := h.registryPackageViews(res.Packages)
+			require.Len(t, views, 1)
+			require.Equal(t, tt.wantVersion, views[0].Version)
+			require.Equal(t, tt.wantInstallable, views[0].Installable)
+		})
+	}
+}

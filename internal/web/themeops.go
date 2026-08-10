@@ -98,7 +98,7 @@ func (h *Handler) availableThemes(ctx context.Context, query string) (themes []A
 		if installed[id] {
 			continue
 		}
-		version, ok := newestThemeVersion(p.Versions)
+		version, ok := newestListedVersion(p.Versions)
 		if !ok {
 			continue
 		}
@@ -139,7 +139,7 @@ func (h *Handler) installThemeFromRegistry(ctx context.Context, name, actor stri
 	if pkg == nil || pkg.Kind != registryThemeKind {
 		return fmt.Errorf("%w: %s is not a theme package", ErrOpNotFound, name)
 	}
-	version, ok := newestThemeVersion(themeVersionViews(pkg.Versions))
+	version, ok := newestListedVersion(themeVersionViews(pkg.Versions))
 	if !ok {
 		return fmt.Errorf("%w: %s has no installable version", ErrOpNotFound, name)
 	}
@@ -214,10 +214,12 @@ func themeIDFromPackage(name string) string {
 	return name
 }
 
-// newestThemeVersion returns the newest version with an installable artifact.
-// Theme versions are plain semver maintained append-newest-last in the
-// hand-edited index, so "newest" is the last qualifying entry.
-func newestThemeVersion(versions []PackageVersionView) (string, bool) {
+// newestListedVersion returns the newest version with an installable artifact.
+// Versions are plain semver maintained append-newest-last in the hand-edited
+// index, so "newest" is the last qualifying entry. It answers from the listing
+// alone and so ignores compatibility ranges — where an install can resolve,
+// prefer the version it picks (PackageView.Installable).
+func newestListedVersion(versions []PackageVersionView) (string, bool) {
 	for i := len(versions) - 1; i >= 0; i-- {
 		if versions[i].HasArtifact {
 			return versions[i].Version, true
@@ -227,7 +229,7 @@ func newestThemeVersion(versions []PackageVersionView) (string, bool) {
 }
 
 // themeVersionViews maps raw index versions onto the neutral view shape so
-// newestThemeVersion works on both the searched list and a freshly fetched
+// newestListedVersion works on both the searched list and a freshly fetched
 // package.
 func themeVersionViews(versions []registry.Version) []PackageVersionView {
 	out := make([]PackageVersionView, len(versions))
