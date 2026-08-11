@@ -134,6 +134,12 @@ func admits(rangeExpr, version string) (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("installed version %q is not semver", version)
 	}
+	// A pre-release suffix marks a dev build (git describe: v0.2.1-4-gabc123).
+	// Constraints exclude pre-releases by design, so a verdict here would reject
+	// every dev build; the index can't speak for versions it doesn't list.
+	if v.Prerelease() != "" {
+		return false, fmt.Sprintf("installed version %q is a dev/pre-release build", version)
+	}
 	return constraint.Check(v), ""
 }
 

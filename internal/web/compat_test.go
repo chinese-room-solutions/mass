@@ -132,6 +132,13 @@ func TestCheckWorkerIndexCompat(t *testing.T) {
 			wantReason:     `installed version "dev" is not semver`,
 		},
 		{
+			name:           "git-describe MASS version accepts",
+			workerVersion:  "0.1.0",
+			runtimeVersion: "0.1.5",
+			massVersion:    "v0.2.1-4-g83b4176",
+			wantReason:     `installed version "v0.2.1-4-g83b4176" is a dev/pre-release build`,
+		},
+		{
 			name:           "one admitting row is enough",
 			workerVersion:  "0.5.0",
 			runtimeVersion: "0.1.5",
