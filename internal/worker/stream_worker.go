@@ -75,8 +75,7 @@ type StreamWorker struct {
 	id          string
 	name        string
 	runtimeName string
-	version     string // worker's own semver (required at handshake)
-	compatible  string // semver range of runtime versions it decodes (required at handshake)
+	version     string // worker's own semver, as reported at handshake
 	devices     []stats.Device
 	online      bool
 	lastSeen    time.Time
@@ -179,12 +178,9 @@ func NewFakeStreamWorker(id, runtimeName string, devices []stats.Device, lastSee
 // watermark. Tests only.
 func (w *StreamWorker) SetFakeVRAMHeadroomPct(pct int32) { w.vramHeadroomPct = pct }
 
-// SetFakeVersionCompat seeds the registration-reported worker version and
-// compatible range without a real registration. Tests only.
-func (w *StreamWorker) SetFakeVersionCompat(version, compatible string) {
-	w.version = version
-	w.compatible = compatible
-}
+// SetFakeVersion seeds the registration-reported worker version without a real
+// registration. Tests only.
+func (w *StreamWorker) SetFakeVersion(version string) { w.version = version }
 
 // SetFakeCapacity seeds the worker-wide AvailableCapacity without going
 // through a real heartbeat. Tests only.
@@ -266,7 +262,6 @@ func NewStreamWorker(id string, reg *workerpb.WorkerRegister, sender jobSenderIn
 		name:            reg.Name,
 		runtimeName:     reg.RuntimeName,
 		version:         reg.Version,
-		compatible:      reg.Compatible,
 		devices:         devices,
 		online:          true,
 		lastSeen:        time.Now(),
@@ -290,7 +285,6 @@ func (w *StreamWorker) ID() string          { return w.id }
 func (w *StreamWorker) Name() string        { return w.name }
 func (w *StreamWorker) RuntimeName() string { return w.runtimeName }
 func (w *StreamWorker) Version() string     { return w.version }
-func (w *StreamWorker) Compatible() string  { return w.compatible }
 
 // VRAMHeadroomPct returns the worker-reported effective VRAM headroom
 // watermark (1-100), or 0 when the worker didn't report one.

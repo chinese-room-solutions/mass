@@ -175,16 +175,6 @@ func runServe(idleTimeout time.Duration) int {
 	// the hub (enroll/authenticate) and the control plane (mint join tokens).
 	enroller := worker.NewEnroller(st)
 	hub := worker.NewHub(workers, enroller, massURL, config.ModelsDir(dataDir), canonScan.Set, rtMgr.IsInstalled, logger)
-	// Compat handshake: reject a worker whose declared compatible range
-	// excludes the installed runtime's version. The runtimes manager is the
-	// authority on the installed version (the join key into that range).
-	hub.SetRuntimeVersionFn(func(runtimeName string) (string, bool) {
-		mf, err := rtMgr.Get(runtimeName)
-		if err != nil {
-			return "", false
-		}
-		return mf.Version, true
-	})
 	// Resync per-device enable whitelist on every worker reconnect (workers
 	// are stateless; MASS holds the persisted operator intent).
 	hub.SetEnabledDevicesProvider(func(workerID string, advertised []string) worker.EnabledDevices {
@@ -341,6 +331,10 @@ func runServe(idleTimeout time.Duration) int {
 	// The hub mirrors the dashboard's auth state: with no operator token
 	// configured, workers may enroll without a join token.
 	hub.SetAuthDisabledFn(handler.AuthDisabled)
+	// Compat handshake: the registry index decides which worker version pairs
+	// with the installed runtime. The handler owns the index cache, the
+	// installed-runtime lookup, and this server's version.
+	hub.SetWorkerCompatFn(handler.CheckWorkerCompat)
 
 	authedHandler := handler.MetricsMiddleware(handler.AuthMiddleware(handler))
 

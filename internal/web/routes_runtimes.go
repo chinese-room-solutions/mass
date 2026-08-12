@@ -193,7 +193,13 @@ func (h *Handler) registryPackageViews(pkgs []PackageView) []templates.RegistryP
 		installed[ri.RuntimeName] = true
 		installedVersion[ri.RuntimeName] = ri.Version
 	}
-	fleet := h.fleetCompat()
+	fleet := h.fleetPairings()
+	// Cache-only: the list this renders was just fetched, so the cache is
+	// warm; an unreadable one simply drops the pre-upgrade flag.
+	idx, err := h.cachedIndex()
+	if err != nil {
+		h.logger.Debug().Err(err).Msg("no cached registry index for the pre-upgrade fleet flag")
+	}
 	out := make([]templates.RegistryPackageView, 0, len(pkgs))
 	for _, p := range pkgs {
 		if p.Kind != registryRuntimeKind {
@@ -209,13 +215,11 @@ func (h *Handler) registryPackageViews(pkgs []PackageView) []templates.RegistryP
 		}
 		// Pre-upgrade fleet flag: only for an installed runtime whose newest
 		// listed version is strictly newer than what's on disk. Count the
-		// connected workers whose compatible range excludes that new version —
-		// the ones the upgrade would strand at Register.
+		// connected workers whose index row excludes that new version — the
+		// ones the upgrade would strand at Register.
 		incompatible := 0
-		if installed[p.RuntimeName] && version != "" && isNewerVersion(version, installedVersion[p.RuntimeName]) {
-			if n, err := countIncompatibleWorkers(fleet, p.RuntimeName, version); err == nil {
-				incompatible = n
-			}
+		if idx != nil && installed[p.RuntimeName] && version != "" && isNewerVersion(version, installedVersion[p.RuntimeName]) {
+			incompatible = countIncompatibleWorkers(idx, fleet, p.RuntimeName, version)
 		}
 		out = append(out, templates.RegistryPackageView{
 			Name:                p.Name,

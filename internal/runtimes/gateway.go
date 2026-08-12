@@ -14,6 +14,7 @@ import (
 
 	"github.com/KernelPryanic/ctxerr"
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
+	"github.com/chinese-room-solutions/mass-proto/gen/go/protocol"
 	"github.com/chinese-room-solutions/mass/internal/downloads"
 	"github.com/chinese-room-solutions/mass/internal/scheduler"
 	"github.com/hashicorp/go-hclog"
@@ -217,7 +218,7 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		ModelsDir:             modelsDir,
 		LogLevel:              logLevel,
 		MassSchedulerBrokerId: brokerID,
-		MassGatewayApiVersion: gatewaypb.GatewayAPIVersion,
+		SupportedProtocols:    gatewaypb.SupportedProtocols,
 	})
 	if err != nil {
 		loaded.Close()
@@ -227,21 +228,18 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		loaded.Close()
 		return nil, ctxerr.With(fmt.Errorf("gateway reported runtime_name %q but install expected %q", resp.RuntimeName, mf.RuntimeName), map[string]any{"runtime_name": mf.RuntimeName, "reported": resp.RuntimeName})
 	}
-	// Reject gateways built against a wire version MASS cannot speak.
-	// Gateways too old return GatewayApiVersion=0 (zero value); gateways
-	// too new advertise a version above MASS's pinned constant. Either
-	// way refuse the launch with a clear message — operators should
-	// reinstall a compatible package.
-	if resp.GatewayApiVersion != gatewaypb.GatewayAPIVersion {
+	// Reject gateways built against a wire protocol MASS cannot speak. The
+	// gateway echoes the version it picked out of our list; anything else
+	// (including the 0 an outdated gateway leaves unset) means the pair has
+	// no common contract — refuse the launch so the mismatch surfaces here
+	// rather than as garbled calls later.
+	if err := checkGatewayProtocol(resp.GetProtocol()); err != nil {
 		loaded.Close()
-		return nil, ctxerr.With(
-			fmt.Errorf("gateway api version mismatch: gateway reports %d, MASS speaks %d", resp.GatewayApiVersion, gatewaypb.GatewayAPIVersion),
-			map[string]any{
-				"runtime_name":    mf.RuntimeName,
-				"gateway_version": resp.GatewayApiVersion,
-				"mass_version":    gatewaypb.GatewayAPIVersion,
-			},
-		)
+		return nil, ctxerr.With(err, map[string]any{
+			"runtime_name":     mf.RuntimeName,
+			"gateway_protocol": resp.GetProtocol(),
+			"mass_protocols":   gatewaypb.SupportedProtocols,
+		})
 	}
 	// Reconcile the in-memory manifest with what the gateway just reported.
 	loaded.Manifest.Version = resp.Version
@@ -253,6 +251,18 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 	}
 	gwLogger.Info().Str("version", resp.Version).Msg("gateway started")
 	return loaded, nil
+}
+
+// checkGatewayProtocol validates the wire protocol version a gateway picked in
+// its InitResponse: it must be one MASS itself speaks. Negotiating our list
+// against the single reported version is the membership test — a gateway that
+// answers with anything else (or leaves it unset) shares no contract with us.
+func checkGatewayProtocol(reported int32) error {
+	if _, ok := protocol.Negotiate(gatewaypb.SupportedProtocols, []int32{reported}); !ok {
+		return fmt.Errorf("gateway wire protocol mismatch: gateway picked %d, MASS speaks %v; install a gateway released alongside this MASS",
+			reported, gatewaypb.SupportedProtocols)
+	}
+	return nil
 }
 
 // startCallbackService stands up the MassScheduler gRPC server on a brokered

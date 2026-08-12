@@ -66,18 +66,17 @@ func TestWorkerOps_ReadsAreEmpty(t *testing.T) {
 	})
 }
 
-// workerInfos must surface the registration-reported version + compatible range
-// so the dashboard can show worker versions and flag pre-upgrade incompatibility.
-func TestWorkerInfos_SurfacesVersionCompatible(t *testing.T) {
+// workerInfos must surface the registration-reported version so the dashboard
+// can show it and join it against the registry index.
+func TestWorkerInfos_SurfacesVersion(t *testing.T) {
 	h := newTestHandler(t)
 
 	w := worker.NewFakeStreamWorker("w1", "llama-cpp", nil, time.Now())
-	w.SetFakeVersionCompat("0.1.0", ">=0.1 <0.2")
+	w.SetFakeVersion("0.1.0")
 	require.NoError(t, h.workers.Register(w))
 
 	infos := h.workerInfos()
 	require.Len(t, infos, 1)
 	require.Equal(t, "0.1.0", infos[0].Version)
-	require.Equal(t, ">=0.1 <0.2", infos[0].Compatible)
 	require.Equal(t, "llama-cpp", infos[0].RuntimeName)
 }

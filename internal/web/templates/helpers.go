@@ -121,7 +121,7 @@ type RegistryPackageView struct {
 	RuntimeName string
 	Installable bool
 	Installed   bool
-	// IncompatibleWorkers is the count of connected workers whose compatible
+	// IncompatibleWorkers is the count of connected workers whose index row
 	// range excludes this listed version — the fleet a runtime upgrade to it
 	// would strand. Non-zero only for an installed runtime with a newer listed
 	// version. Rendered as a pre-upgrade warning on the row.
