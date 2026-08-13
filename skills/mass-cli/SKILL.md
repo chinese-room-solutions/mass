@@ -70,6 +70,7 @@ never booted into existence.
 | `mass queue cancel-running --request-id ID` | CancelRunningJob | `mass queue cancel-running --request-id r1` |
 | `mass queue evict --queue Q --msg-id ID` | EvictQueuedJob | `mass queue evict --queue global --msg-id 01H...` |
 | `mass skill [show]` / `install DIR` | — (local) | `mass skill install ~/.claude/skills` |
+| `mass update [--apply] [--force]` | — (daemon HTTP) | `mass update --json` |
 | `mass serve [--idle-timeout D]` | — (runs the daemon) | `mass serve` |
 
 Positional-name verbs accept flags after the name (`mass runtimes start llama-cpp --json`).
@@ -128,6 +129,37 @@ mass workers list --json                  # who is online, device IDs
 mass workers device disable <worker> <device>          # drain a GPU
 mass workers benchmark --workers <worker> --timeout 15m # re-measure throughput
 ```
+
+## Updating MASS
+
+`mass update` reports whether a newer MASS release is available (`v0.5.0
+available …`, or `up to date`). The daemon checks once when it starts, so this
+reads a stored answer — it costs nothing and never blocks on the network. A
+build from source reports itself as `dev` and never has an update.
+
+It also reports the **fleet cost**: how many connected workers the registry
+index says the new build would strand. That matters because a version-skewed
+worker is rejected at Register with `FAILED_PRECONDITION`, which it treats as
+fatal — it exits and stays down until somebody upgrades it. Workers the index
+can't speak for (no cached index, no row for their version, a dev build) are
+counted as compatible, matching what the hub would actually enforce.
+
+`mass update --apply` installs it: MASS downloads the matching installer, runs
+it over its own install, and **exits** — the app restarts itself once the new
+build is staged. It refuses (exit `1`, with the reason on stderr) when:
+
+- there is nothing to install;
+- this MASS wasn't placed by the MASS installer (a hand-copied binary, a `go
+  run`), or it lives in a machine-wide directory needing admin rights — both
+  are the user's to resolve by running the installer themselves;
+- the daemon is an operator-managed `mass serve` — a fleet hub is not restarted
+  from under its workers by a dashboard click. Stop it and run the installer, or
+  update from the desktop app;
+- workers would be stranded. Only this last one is overridable, with `--force`.
+
+**Applying an update is the user's decision.** Report that one is available and
+what it would cost the fleet; don't run `--apply` — and never `--force` —
+unless you were asked to.
 
 ## Exit codes
 

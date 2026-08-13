@@ -92,6 +92,7 @@ func TestCommandListCoversEveryVerb(t *testing.T) {
 		"scheduler list", "scheduler evict",
 		"queue list", "queue cancel", "queue cancel-running", "queue evict",
 		"skill show", "skill install",
+		"update",
 	}
 	documented := make(map[string]bool, len(commands))
 	for _, c := range commands {
