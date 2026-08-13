@@ -9,11 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// seedMigratedDB writes a database recorded as already migrated, optionally
-// without some of the tables the current schema declares — the shape of every
-// database created before those tables were appended to the in-place-edited
-// migration file.
-func seedMigratedDB(t *testing.T, path string, dropTables ...string) {
+// seedOldVintageDB writes a database recorded as migrated up to version 1 and
+// missing the given tables — the shape of every database created before those
+// tables were appended to 000001 back when it was still edited in place.
+func seedOldVintageDB(t *testing.T, path string, dropTables ...string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
@@ -34,31 +33,36 @@ func seedMigratedDB(t *testing.T, path string, dropTables ...string) {
 	require.NoError(t, err)
 }
 
-func TestOpenVerifiesSchema(t *testing.T) {
+// TestOpenConvergesOldVintageDB covers the append-only guarantee: a database
+// stuck at version 1 without tables the current schema declares must gain them
+// on open, not fail startup.
+func TestOpenConvergesOldVintageDB(t *testing.T) {
 	tests := []struct {
-		name        string
-		seed        bool     // pre-create a database recorded as migrated
-		dropTables  []string // tables the seeded database lacks
-		wantMissing []string
+		name       string
+		seed       bool     // pre-create a database recorded at version 1
+		dropTables []string // tables the seeded database lacks
 	}{
 		{
-			name: "fresh database migrates and passes",
+			name: "fresh database migrates",
 		},
 		{
-			name: "already-migrated database with the full schema passes",
+			name: "version-1 database with the full schema converges as a no-op",
 			seed: true,
 		},
 		{
-			name:        "database predating the worker enrollment tables is rejected",
-			seed:        true,
-			dropTables:  []string{"workers", "join_tokens"},
-			wantMissing: []string{"workers", "join_tokens"},
+			name:       "database predating model_benchmarks self-heals",
+			seed:       true,
+			dropTables: []string{"model_benchmarks"},
 		},
 		{
-			name:        "single missing table is reported",
-			seed:        true,
-			dropTables:  []string{"downloads"},
-			wantMissing: []string{"downloads"},
+			name:       "database predating the worker enrollment tables self-heals",
+			seed:       true,
+			dropTables: []string{"workers", "join_tokens"},
+		},
+		{
+			name:       "database predating downloads self-heals",
+			seed:       true,
+			dropTables: []string{"downloads"},
 		},
 	}
 
@@ -66,24 +70,25 @@ func TestOpenVerifiesSchema(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dbPath := filepath.Join(t.TempDir(), "test.db")
 			if tt.seed {
-				seedMigratedDB(t, dbPath, tt.dropTables...)
+				seedOldVintageDB(t, dbPath, tt.dropTables...)
 			}
 
 			s, err := Open(DialectSQLite, dbPath)
-			if len(tt.wantMissing) == 0 {
-				require.NoError(t, err)
-				t.Cleanup(func() { _ = s.Close() })
-				require.NoError(t, s.InsertWorker(WorkerRow{WorkerID: "w1", SecretHash: "h", CreatedAt: 1}))
-				return
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = s.Close() })
+
+			present, err := s.existingTables()
+			require.NoError(t, err)
+			declared, err := declaredTables(DialectSQLite)
+			require.NoError(t, err)
+			for _, table := range declared {
+				require.True(t, present[table], "table %s missing after open", table)
 			}
 
-			require.Error(t, err)
-			for _, table := range tt.wantMissing {
-				require.Contains(t, err.Error(), table)
-			}
-			require.NotContains(t, err.Error(), "settings")
-			require.Contains(t, err.Error(), dbPath)
-			require.Contains(t, err.Error(), "delete the database")
+			require.NoError(t, s.InsertWorker(WorkerRow{WorkerID: "w1", SecretHash: "h", CreatedAt: 1}))
+			require.NoError(t, s.SaveModelBenchmark(ModelBenchmarkRow{
+				WorkerID: "w1", DeviceSet: "gpu:0", ModelID: "m.gguf", UnitsPerSec: 1,
+			}))
 		})
 	}
 }
