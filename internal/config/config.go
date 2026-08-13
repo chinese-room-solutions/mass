@@ -60,6 +60,11 @@ const DefaultBenchSlotsCap = 16
 // off its default branch when RegistryURL is unset.
 const DefaultRegistryURL = "https://raw.githubusercontent.com/chinese-room-solutions/mass-registry/main/index.yml"
 
+// DefaultUpdateURL is the repository MASS's own releases come from: the
+// self-update check reads its /releases/latest redirect for the newest tag and
+// downloads that release's installer asset. Overridden by update_url.
+const DefaultUpdateURL = "https://github.com/chinese-room-solutions/mass"
+
 // ErrLogLevelUnknown is returned when an unrecognized log level string is parsed.
 var ErrLogLevelUnknown = errors.New("unsupported log level")
 
@@ -126,6 +131,7 @@ type Config struct {
 	Theme           string `yaml:"theme,omitempty" json:"theme,omitempty"`       // "dark" or "light", default "dark"
 	DevMode         bool   `yaml:"dev_mode,omitempty" json:"dev_mode,omitempty"` // Enables developer tools
 	RegistryURL     string `yaml:"registry_url,omitempty" json:"registry_url,omitempty"`
+	UpdateURL       string `yaml:"update_url,omitempty" json:"update_url,omitempty"`               // release repo the self-update check reads
 	ResultTTL       string `yaml:"result_ttl,omitempty" json:"result_ttl,omitempty"`               // How long to keep job results (e.g. "24h")
 	IdleEvictionTTL string `yaml:"idle_eviction_ttl,omitempty" json:"idle_eviction_ttl,omitempty"` // How long a loaded model can sit idle before eviction (e.g. "10s")
 	StreamReplayTTL string `yaml:"stream_replay_ttl,omitempty" json:"stream_replay_ttl,omitempty"` // How long per-job chunk buffers survive after terminal frame (e.g. "30s")
@@ -275,6 +281,14 @@ func (c *Config) EffectiveRegistryURL() string {
 		return c.RegistryURL
 	}
 	return DefaultRegistryURL
+}
+
+// EffectiveUpdateURL returns the configured UpdateURL or DefaultUpdateURL.
+func (c *Config) EffectiveUpdateURL() string {
+	if c.UpdateURL != "" {
+		return c.UpdateURL
+	}
+	return DefaultUpdateURL
 }
 
 // EffectiveDataDir returns the configured DataDir or the platform default.
