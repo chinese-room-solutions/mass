@@ -175,14 +175,12 @@ func migrationFiles(dialect Dialect) ([]string, error) {
 // verifySchema checks the database actually holds every table the migration
 // files declare, and fails startup loudly when it doesn't.
 //
-// Pre-1.0 MASS ships a single migration file per dialect that is edited in
-// place as the schema evolves. A database created before a table was added
-// already has that file's version recorded, so [Store.migrate] skips it and
-// the table is never created — a gap that otherwise stays invisible until
-// some unrelated request hits the missing table and fails with a bare
-// "no such table". Drift within a table (a column added later) is not
-// detectable this way and is deliberately not guessed at: re-running the DDL
-// to self-heal would paper over exactly that case.
+// Migrations are append-only: an applied file is never edited again, so every
+// database picks up later schema changes as new numbered migrations. This
+// check is the safety net for that policy, not a repair step — reaching it
+// means a migration declared a table that no migration creates for an
+// existing database. Drift within a table (a column added later) is not
+// detectable this way and is deliberately not guessed at.
 func (s *Store) verifySchema(dsn string) error {
 	declared, err := declaredTables(s.dialect)
 	if err != nil {
@@ -204,9 +202,8 @@ func (s *Store) verifySchema(dsn string) error {
 	}
 	return fmt.Errorf(
 		"%s database %q is missing table(s) %s declared by the current schema. "+
-			"It was created before those tables were added: MASS is pre-1.0 and edits its migration files in place, "+
-			"so a database already recorded as migrated never picks up later schema changes. "+
-			"Stop MASS and delete the database to have it recreated, or apply the missing DDL by hand",
+			"This is a bug: migrations are append-only, so schema changes must land as a new migration "+
+			"that also creates these tables for existing databases — never as an edit to an applied one",
 		s.dialect, redactDSN(dsn), strings.Join(missing, ", "))
 }
 

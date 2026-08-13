@@ -69,7 +69,9 @@ func TestHandleSetTheme(t *testing.T) {
 			require.Equal(t, tt.wantPersist, saved)
 			var gotBase string
 			select {
-			case gotBase = <-guiCh:
+			case ev := <-guiCh:
+				require.Equal(t, GUIEventTheme, ev.name)
+				gotBase = ev.data
 			default:
 			}
 			require.Equal(t, tt.wantBase, gotBase, "GUI channel notification")

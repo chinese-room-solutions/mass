@@ -156,7 +156,7 @@ unittest:
 	go test ./internal/... ./pkg/... -short -count=1
 
 test:
-	$(RACE_ENV) go test ./internal/... ./pkg/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
+	$(RACE_ENV) go test ./internal/... ./pkg/... ./cmd/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
 
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
@@ -320,8 +320,8 @@ package: build build-setup
 	@# .app (macOS), so a user can launch the wizard from their file manager — a
 	@# bare binary won't run on double-click. The wrapped installer then creates
 	@# the app-menu launcher for the installed MASS app.
-	@# mass-pack removes the loose installer stub after wrapping it, so dist/ holds
-	@# only the double-clickable artifact (the .AppImage/.app, already executable).
+	@# The loose installer stays beside the container: the release uploads it
+	@# under a stable name for the self-update to fetch and run.
 	go run ./cmd/mass-pack --host $(SETUP_BINARY) --out $(DIST_DIR)/mass-setup \
 		--container --icon internal/icon/icon.png $(BINARY)
 ifneq ($(IS_MAC),)
@@ -405,7 +405,7 @@ unittest:
 	go test ./internal/... ./pkg/... -short -count=1
 
 test:
-	go test ./internal/... ./pkg/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
+	go test ./internal/... ./pkg/... ./cmd/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
 
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...

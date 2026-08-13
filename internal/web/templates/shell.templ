@@ -355,6 +355,18 @@ templ Shell(data DashboardData) {
 			</div>
 		</sl-dialog>
 
+		<!-- Confirm forcing a self-update past the fleet gate. Driven entirely by
+		     scripts/update.js (no signals): it opens only when the daemon reported
+		     connected workers the new build would strand, and Update anyway is the
+		     only path that sends force. -->
+		<sl-dialog id="mass-confirm-update-dialog" class="mass-dialog" label="Incompatible Workers">
+			<p id="mass-confirm-update-text" class="text-sm" style="color:var(--mass-text)"></p>
+			<div slot="footer" class="flex gap-2 justify-end">
+				<sl-button size="small" id="mass-confirm-update-cancel">Cancel</sl-button>
+				<sl-button variant="danger" size="small" id="mass-confirm-update-ok">Update anyway</sl-button>
+			</div>
+		</sl-dialog>
+
 		<!-- Registry install dialog: search + browse the package registry.
 		     On show it fetches /api/runtimes/registry into #registry-available;
 		     the search box re-fetches (debounced) with the registryQuery filter.
@@ -596,6 +608,7 @@ templ Shell(data DashboardData) {
 		@templ.Raw(modelsTabScript)
 		@templ.Raw(schedulerScript)
 		@templ.Raw(installScript)
+		@templ.Raw(updateScript)
 	</div>
 }
 
@@ -1336,12 +1349,44 @@ templ settingsPanel(data DashboardData) {
 			<h3 class="text-sm font-semibold uppercase tracking-wide" style="color:var(--mass-text)">About</h3>
 			<div class="space-y-2">
 				@aboutRow("Version", data.Version)
+				@updateRow(data)
 				@aboutRow("Data dir", data.EffectiveDataDir)
 				@aboutRow("Logs", data.LogsDir)
 				@aboutRow("Config", data.ConfigFile)
 			</div>
 		</div>
 	</div>
+}
+
+// updateRow is the About section's self-update affordance, rendered only when
+// the daemon's startup check found a newer release. It is what remains after
+// the on-load toast (scripts/update.js) clears; the button carries the tag and
+// the stranded-worker count so the script can confirm before forcing.
+templ updateRow(data DashboardData) {
+	if data.UpdateAvailable != "" {
+		<div class="flex items-baseline gap-3">
+			<span class="text-xs flex-shrink-0 whitespace-nowrap" style="color:var(--mass-text-faint);min-width:5.5rem">Update</span>
+			<div class="flex items-center gap-2 min-w-0 flex-wrap">
+				<span class="text-xs font-mono" style="color:var(--mass-text-muted)">{ data.UpdateAvailable } available</span>
+				<sl-button
+					id="mass-update-btn"
+					size="small"
+					variant="primary"
+					data-mass-update-tag={ data.UpdateAvailable }
+					data-mass-update-incompatible={ fmt.Sprint(data.UpdateIncompatibleWorkers) }
+				>
+					<sl-icon slot="prefix" name="download"></sl-icon>
+					Install
+				</sl-button>
+			</div>
+		</div>
+		if data.UpdateIncompatibleWorkers > 0 {
+			<div class="flex items-center gap-1" style="margin-left:5.5rem">
+				<sl-icon name="exclamation-triangle" style="color:var(--mass-warning);font-size:0.8rem"></sl-icon>
+				<span class="text-xs" style="color:var(--mass-warning)">{ incompatibleWorkersLabel(data.UpdateIncompatibleWorkers) }</span>
+			</div>
+		}
+	}
 }
 
 // aboutRow is one label/value line of the Settings panel's About section,

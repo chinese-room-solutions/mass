@@ -83,9 +83,24 @@ func runInstall(c collected, tag string, mode endMode) actionOutcome {
 		}
 	}
 
+	// Self-update: the app that asked for this install is still exiting, and on
+	// Windows its exe can't be overwritten until it has. Wait for the staged
+	// binary to become replaceable before touching it.
+	if c.relaunch {
+		waitReplaceable(appSpec.StagedExePath(c.installDir), replaceableWait)
+	}
+
 	res, err := doInstall(c, tag, mode)
 	if err != nil {
 		return fail(tag, err.Error(), mode)
+	}
+
+	// Self-update: bring the app back up. A relaunch that fails is a warning —
+	// the new build is staged, and the user can start it themselves.
+	if c.relaunch {
+		if err := startApp(c.installDir); err != nil {
+			fmt.Fprintln(os.Stderr, term.FailMark()+"could not restart MASS: "+err.Error())
+		}
 	}
 
 	// A launcher failure leaves LauncherPath empty; the install is still good.
@@ -361,13 +376,17 @@ func uninstallSummary(installDir string, filesLeft bool) term.Summary {
 // operator chose without re-prompting. The child does the privileged file work
 // and closes; THIS window shows the result + Back, so the child draws no screen.
 func installArgs(c collected) []string {
-	return []string{
+	args := []string{
 		"--install",
 		"--scope", string(c.scope),
 		"--install-dir", c.installDir,
 		"--data-dir", c.dataDir,
 		"--listen-addr", c.listenAddr,
 	}
+	if c.relaunch {
+		args = append(args, "--relaunch")
+	}
+	return args
 }
 
 func uninstallArgs(installDir string, perUser bool) []string {

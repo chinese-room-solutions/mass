@@ -25,6 +25,10 @@ type collected struct {
 	dataDir    string
 	listenAddr string
 	perUser    bool
+	// relaunch marks the self-update install (--relaunch): wait for the running
+	// app to release its files, then start it again once staged. Never set by
+	// the wizard — only MASS's own updater passes it.
+	relaunch bool
 }
 
 // prefill is the seed for the form's fields, gathered from the install record +

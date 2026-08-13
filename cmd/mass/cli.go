@@ -56,6 +56,7 @@ var verbs = map[string]verbHandler{
 	"scheduler": cmdScheduler,
 	"queue":     cmdQueue,
 	"skill":     cmdSkill,
+	"update":    cmdUpdate,
 }
 
 // runCLI dispatches a management subcommand. args is os.Args[1:]. A -h/--help

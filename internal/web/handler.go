@@ -17,6 +17,7 @@ import (
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/rpcconnect"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
+	"github.com/chinese-room-solutions/mass-sdk/install"
 	"github.com/chinese-room-solutions/mass-sdk/uikit"
 	"github.com/chinese-room-solutions/mass/internal/audit"
 	"github.com/chinese-room-solutions/mass/internal/config"
@@ -55,6 +56,11 @@ type HandlerOptions struct {
 	// reports it so a launcher knows this instance may be replaced on version
 	// skew (an operator-managed one may not).
 	OnDemand bool
+	// Updater drives the self-update surface; nil leaves it inert (nothing is
+	// ever available, and an apply reports as much). UpdateURL is the release
+	// repository it reads.
+	Updater   UpdaterInterface
+	UpdateURL string
 }
 
 // Handler implements http.Handler for the MASS web UI and management API.
@@ -84,6 +90,13 @@ type Handler struct {
 	gui        *guiChannel
 	shutdownMu sync.Mutex
 	shutdownFn func()
+
+	// Self-update (see update.go): what the startup check found, and how to
+	// fetch it.
+	update    updateState
+	updater   UpdaterInterface
+	updateURL string
+	recordFn  func() (*install.Record, error) // nil = the real install record
 
 	workersBroker   *Broker[WorkersEvent]
 	schedulerBroker *Broker[changeEvent]
@@ -115,6 +128,8 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 		dataDir:         opts.DataDir,
 		authHash:        opts.AuthHash,
 		onDemand:        opts.OnDemand,
+		updater:         opts.Updater,
+		updateURL:       opts.UpdateURL,
 		gui:             newGUIChannel(),
 		workersBroker:   NewBroker[WorkersEvent](opts.Logger, "workers-broker"),
 		schedulerBroker: NewBroker[changeEvent](opts.Logger, "scheduler-broker"),
@@ -213,6 +228,11 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	mux.HandleFunc("GET /internal/daemon/ping", h.handleDaemonPing)
 	mux.HandleFunc("POST /internal/daemon/shutdown", h.handleDaemonShutdown)
 	mux.HandleFunc("GET /internal/gui/channel", h.handleGUIChannel)
+
+	// Self-update (see update.go). Operator-authed like the rest of /api/:
+	// applying one replaces the binary and restarts the daemon.
+	mux.HandleFunc("GET /api/update/check", h.handleUpdateCheck)
+	mux.HandleFunc("POST /api/update/apply", h.handleUpdateApply)
 
 	// Runtime gateway management.
 	// Themes: browse/manage dialog (installed list is local, available list
@@ -348,6 +368,9 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TLSEnabled:       h.cfg.TLS.Enabled,
 		TLSCertFile:      h.cfg.TLS.CertFile,
 		Runtimes:         h.runtimeViews(),
+	}
+	if data.UpdateAvailable = h.update.get(); data.UpdateAvailable != "" {
+		data.UpdateIncompatibleWorkers = h.updateFleetGate(data.UpdateAvailable).Incompatible
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Layout("MASS", templates.Shell(data), theme).Render(r.Context(), w); err != nil {

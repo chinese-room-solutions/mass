@@ -26,18 +26,15 @@ import (
 	"github.com/chinese-room-solutions/mass-sdk/install"
 	"github.com/chinese-room-solutions/mass-sdk/term"
 	"github.com/chinese-room-solutions/mass-sdk/tui"
+	"github.com/chinese-room-solutions/mass/internal/appspec"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-// appSpec is MASS's installer identity.
-var appSpec = install.AppSpec{
-	Name:        "mass",
-	DisplayName: "MASS",
-	ExeName:     "mass",
-	BundleID:    "solutions.chineseroom.mass",
-}
+// appSpec is MASS's installer identity, shared with the daemon so both agree
+// on the install record.
+var appSpec = appspec.Spec
 
 func main() {
 	var (
@@ -49,6 +46,10 @@ func main() {
 		listenAddr  = flag.String("listen-addr", "", "MASS listen address host:port (default: 127.0.0.1:3455)")
 		scope       = flag.String("scope", "", "Install scope: user (no elevation) or system (machine-wide)")
 		perUser     = flag.Bool("user", false, "Shorthand for --scope user")
+		// The updater's flag, not the operator's: MASS's own self-update runs
+		// this installer over a live install and needs the app back afterwards.
+		relaunch = flag.Bool("relaunch", false,
+			"With --install: wait for the running app's files to be replaceable, then start it again afterwards")
 	)
 	flag.Parse()
 
@@ -76,6 +77,7 @@ func main() {
 			_, _ = fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		c.relaunch = *relaunch
 		os.Exit(runInstall(c, tag, endPlain).code)
 	}
 

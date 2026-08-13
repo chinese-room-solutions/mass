@@ -29,16 +29,24 @@ jobs:
         # `asset` is the release-asset basename: mass_<goos>_<goarch>, no
         # version — stable names keep releases/latest/download/ links evergreen
         # (the website and READMEs hardcode them).
+        # `setup_asset` is the stable name of the RAW installer binary (the
+        # self-extracting mass-setup, not the double-clickable container). The
+        # self-update downloads it by that evergreen name and verifies it
+        # against the release's SHA256SUMS, so it needs a container-free
+        # executable asset. Windows has no container to strip (the console .exe
+        # is already the raw installer), so it needs no entry.
         include:
           - os: ubuntu-24.04
             label: linux-amd64
             asset: mass_linux_amd64
+            setup_asset: mass-setup_linux_amd64
           - os: windows-latest
             label: windows-amd64
             asset: mass_windows_amd64
           - os: macos-15
             label: macos-arm64
             asset: mass_darwin_arm64
+            setup_asset: mass-setup_darwin_arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -74,6 +82,9 @@ jobs:
           else
             make build
           fi
+      # make package leaves the raw self-extracting installer beside the
+      # double-clickable container; the Archive step below uploads it under the
+      # stable name the self-update fetches.
       - name: Package installer
         shell: bash
         run: make package
@@ -82,15 +93,21 @@ jobs:
         run: |
           name="${{ matrix.asset }}"
           setup="mass-setup_${name#mass_}"
+          # Stable name of the raw, container-free installer the self-update
+          # downloads. Empty on Windows, whose .exe below is already
+          # container-free.
+          raw="${{ matrix.setup_asset }}"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "$name.zip" ./bin/mass.exe
             mv dist/mass-setup.exe "$setup.exe"
           elif [ "$RUNNER_OS" = "macOS" ]; then
             tar -czf "$name.tar.gz" -C bin MASS.app
             mv dist/MASS-Setup.zip "$setup.zip"
+            mv dist/mass-setup "$raw"
           else
             tar -czf "$name.tar.gz" -C bin mass
             mv dist/*.AppImage "$setup.AppImage"
+            mv dist/mass-setup "$raw"
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -107,11 +124,21 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+      # download-artifact nests each matrix leg in its own directory, so flatten
+      # first and checksum exactly what gets uploaded. SHA256SUMS is what the
+      # self-update verifies its downloaded installer against — without it the
+      # updater refuses the asset.
+      - name: Collect assets and checksum them
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name 'mass_*' -o -name 'mass-setup_*' \) \
+            -exec mv -t release {} +
+          cd release
+          sha256sum mass_* mass-setup_* > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
-            artifacts/**/*.AppImage
-            artifacts/**/*.exe
+          files: release/*
           generate_release_notes: true
+          # Missing assets are a failed release, not a partial one.
+          fail_on_unmatched_files: true

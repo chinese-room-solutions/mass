@@ -67,6 +67,9 @@ var (
 
 	//go:embed scripts/install.js
 	installJS string
+
+	//go:embed scripts/update.js
+	updateJS string
 )
 
 // Wrapped script blobs used by the templates.
@@ -78,6 +81,7 @@ var (
 	modelsTabScript        = "<script>" + modelsTabJS + "</script>"
 	runtimesScript         = "<script>" + runtimesJS + "</script>"
 	installScript          = "<script>" + installJS + "</script>"
+	updateScript           = "<script>" + updateJS + "</script>"
 	alertScript            = "<script>" + uikit.AlertJS + "</script>"
 )
 
@@ -98,14 +102,20 @@ type DashboardData struct {
 	Theme            string // "dark" or "light"
 	DevMode          bool
 	Version          string // running build's version (shown in About)
-	ConfigFile       string // path to the loaded config.yml (shown in About)
-	LogsDir          string // path to logs directory (shown in About)
-	TLSEnabled       bool
-	TLSCertFile      string
-	ResultTTL        string // job result cache TTL (e.g. "24h")
-	IdleEvictionTTL  string // loaded-model idle eviction TTL (e.g. "10s")
-	LoadAttempts     int    // total attempts before failing a job (1 = no retry)
-	RegistryURL      string // future: package registry
+	// UpdateAvailable is the newer release tag the daemon's startup check
+	// found, or "" when this build is current. UpdateIncompatibleWorkers is how
+	// many connected workers the registry index says that release would strand
+	// — a stranded worker exits at Register and stays down.
+	UpdateAvailable           string
+	UpdateIncompatibleWorkers int
+	ConfigFile                string // path to the loaded config.yml (shown in About)
+	LogsDir                   string // path to logs directory (shown in About)
+	TLSEnabled                bool
+	TLSCertFile               string
+	ResultTTL                 string // job result cache TTL (e.g. "24h")
+	IdleEvictionTTL           string // loaded-model idle eviction TTL (e.g. "10s")
+	LoadAttempts              int    // total attempts before failing a job (1 = no retry)
+	RegistryURL               string // future: package registry
 }
 
 // RegistryPackageView holds template data for one available registry runtime.

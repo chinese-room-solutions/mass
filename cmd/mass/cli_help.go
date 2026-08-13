@@ -156,6 +156,22 @@ needed. DIR is wherever your agent discovers skills — this command has no
 built-in default and assumes no particular agent. An existing file is
 overwritten: reinstalling after an upgrade is how the instructions stay in step
 with the verbs. Reaches no server, so it works on a fresh install.`},
+
+	{"update", "update [--apply] [--force]", "check for a newer MASS, or install it", false, `
+Report whether a newer MASS release is available. The daemon checks once at
+startup, so this reads that answer rather than going to the network. It also
+reports how many connected workers the registry index says the new build would
+strand — a stranded worker is rejected at Register, exits, and stays down until
+it is upgraded.
+
+--apply installs it: the daemon downloads the matching installer, runs it over
+the recorded install, and exits — the app starts itself again once the new build
+is staged. It refuses (exit 1, with the reason) when there is nothing to
+install, when this MASS was not placed by the MASS installer, when the install
+is system-wide and needs administrator rights, when the daemon is an
+operator-managed "mass serve" (stop it and run the installer yourself), or when
+workers would be stranded. --force overrides only that last one. A build from
+source ("dev") never has an update.`},
 }
 
 // helpRequested reports whether a command's own arguments ask for help: a bare
