@@ -320,8 +320,8 @@ package: build build-setup
 	@# .app (macOS), so a user can launch the wizard from their file manager — a
 	@# bare binary won't run on double-click. The wrapped installer then creates
 	@# the app-menu launcher for the installed MASS app.
-	@# mass-pack removes the loose installer stub after wrapping it, so dist/ holds
-	@# only the double-clickable artifact (the .AppImage/.app, already executable).
+	@# The loose installer stays beside the container: the release uploads it
+	@# under a stable name for the self-update to fetch and run.
 	go run ./cmd/mass-pack --host $(SETUP_BINARY) --out $(DIST_DIR)/mass-setup \
 		--container --icon internal/icon/icon.png $(BINARY)
 ifneq ($(IS_MAC),)
