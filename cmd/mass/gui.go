@@ -5,10 +5,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/KernelPryanic/golog"
@@ -17,6 +19,7 @@ import (
 	"github.com/chinese-room-solutions/mass-sdk/webview"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/icon"
+	"github.com/chinese-room-solutions/mass/internal/web"
 	"github.com/rs/zerolog"
 )
 
@@ -117,14 +120,22 @@ const (
 // cancels ctx.
 func runClientChannel(ctx context.Context, wv webview.WindowInterface, ep daemonEndpoint, logger zerolog.Logger) {
 	logger = logger.With().Str("component", "gui-channel").Logger()
+	// An update is replacing this very build: the daemon we are about to lose is
+	// meant to be gone, and the relaunched build brings its own window. Without
+	// this flag the loop would re-attach to that new daemon on the same fixed
+	// port and the user would end up with two MASS windows.
+	var updating atomic.Bool
 	backoff := channelRetryMin
-	for ctx.Err() == nil {
-		attached, err := streamClientChannel(ctx, wv, ep)
+	for ctx.Err() == nil && !updating.Load() {
+		attached, err := streamClientChannel(ctx, wv, ep, &updating, logger)
 		if attached {
 			backoff = channelRetryMin // a working connection earns a fast retry.
 		}
-		if err != nil && ctx.Err() == nil {
+		if err != nil && ctx.Err() == nil && !updating.Load() {
 			logger.Info().Err(err).Msg("gui channel dropped; reconnecting")
+		}
+		if updating.Load() {
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -137,10 +148,13 @@ func runClientChannel(ctx context.Context, wv webview.WindowInterface, ep daemon
 	}
 }
 
-// streamClientChannel holds one connection to the daemon's channel, applying
-// theme events until it ends. attached reports whether the stream was
-// established at all, which tells the caller whether to back off further.
-func streamClientChannel(ctx context.Context, wv webview.WindowInterface, ep daemonEndpoint) (attached bool, err error) {
+// streamClientChannel holds one connection to the daemon's channel, dispatching
+// events until it ends. attached reports whether the stream was established at
+// all, which tells the caller whether to back off further.
+func streamClientChannel(
+	ctx context.Context, wv webview.WindowInterface, ep daemonEndpoint,
+	updating *atomic.Bool, logger zerolog.Logger,
+) (attached bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep.base+"/internal/gui/channel", nil)
 	if err != nil {
 		return false, fmt.Errorf("building the channel request: %w", err)
@@ -163,10 +177,8 @@ func streamClientChannel(ctx context.Context, wv webview.WindowInterface, ep dae
 		line := sc.Text()
 		switch {
 		case line == "":
-			if name == "theme" {
-				// The daemon resolves the theme to its native base
-				// (dark|light), so this process needs no theme registry.
-				wv.SetTheme(data)
+			if name != "" {
+				dispatchGUIEvent(wv, name, data, updating, logger)
 			}
 			name, data = "", ""
 		case strings.HasPrefix(line, "event:"):
@@ -176,4 +188,58 @@ func streamClientChannel(ctx context.Context, wv webview.WindowInterface, ep dae
 		}
 	}
 	return true, sc.Err()
+}
+
+// dispatchGUIEvent applies one channel event to the window.
+func dispatchGUIEvent(
+	wv webview.WindowInterface, name, data string, updating *atomic.Bool, logger zerolog.Logger,
+) {
+	switch name {
+	case web.GUIEventTheme:
+		// The daemon resolves the theme to its native base (dark|light), so
+		// this process needs no theme registry.
+		wv.SetTheme(data)
+	case web.GUIEventUpdateRestarting:
+		// Set before anything else: the stream is about to drop as the daemon
+		// retires, and the reconnect must already be off by then.
+		if updating.Swap(true) {
+			return // already closing for this update.
+		}
+		go closeForUpdate(wv, data, logger)
+	default:
+		logger.Debug().Str("event", name).Msg("ignoring an unknown gui channel event")
+	}
+}
+
+// updateNoticeGrace is how long the "restarting" notice is left on screen
+// before the window goes. It only has to outlast a paint — the installer is
+// already waiting on this process to exit, so every extra second is a second
+// the user spends looking at a dead window.
+const updateNoticeGrace = 1500 * time.Millisecond
+
+// closeForUpdate shows the page the sticky "updating" notice and then quits the
+// window, which is what lets the installer replace this build's files.
+// Terminate unwinds runApp on the main thread, so this exit and the daemon's
+// own shutdown happen together — and the installer starts the new build once
+// both are gone.
+func closeForUpdate(wv webview.WindowInterface, tag string, logger zerolog.Logger) {
+	logger.Info().Str("version", tag).Msg("an update is being installed; closing the window")
+	evalCall(wv, logger, "massUpdateRestarting", tag)
+	time.Sleep(updateNoticeGrace)
+	wv.Terminate()
+}
+
+// evalCall invokes a page function with JSON-encoded arguments, doing nothing
+// when the page hasn't defined it (an old build, a page still loading).
+func evalCall(wv webview.WindowInterface, logger zerolog.Logger, fn string, args ...any) {
+	parts := make([]string, len(args))
+	for i, a := range args {
+		b, err := json.Marshal(a)
+		if err != nil {
+			logger.Warn().Err(err).Str("fn", fn).Msg("encoding webview call argument")
+			return
+		}
+		parts[i] = string(b)
+	}
+	wv.Eval("window." + fn + " && " + fn + "(" + strings.Join(parts, ",") + ")")
 }

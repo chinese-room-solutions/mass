@@ -8,6 +8,23 @@
   // workers the new build would strand, the toast says so and the install goes
   // through an explicit confirm before it re-sends with force — a stranded
   // worker exits at Register and stays down until it is upgraded.
+  // The window process calls this over the webview bridge when the daemon says
+  // an update is being installed: MASS is about to be replaced and the window
+  // closed behind this notice. Sticky (duration Infinity) — the window goes away
+  // before any timeout would matter, and a notice that vanished first would
+  // leave the closing window unexplained. Defined before the button guard: the
+  // update may have been applied from the CLI, or from another browser tab,
+  // while this page shows no Install row at all.
+  // Raised at most once: in the desktop app the clicking page shows it on the
+  // 200 and the daemon pushes the same event to the window process a moment
+  // later, and two identical sticky toasts would stack.
+  var restartingShown = false;
+  window.massUpdateRestarting = function(tag) {
+    if (restartingShown) return;
+    restartingShown = true;
+    window.massToast('Updating MASS to ' + tag + ' — restarting…', {duration: Infinity});
+  };
+
   var btn = document.getElementById('mass-update-btn');
   if (!btn) return;
 
@@ -26,9 +43,12 @@
       body: JSON.stringify({force: !!force}),
     }).then(function(r) {
       if (r.ok) {
-        // The daemon retires behind this: the page's streams drop, and the app
-        // comes back on the new build a moment later.
-        window.massToast('Updating MASS to ' + tag + ' — restarting…', {duration: Infinity});
+        // The daemon retires behind this: the page's streams drop, and MASS
+        // comes back on the new build a moment later. In the desktop app the
+        // daemon also pushes update-restarting to the window process, which
+        // calls this same function — so the notice reads identically whether it
+        // was raised here or from there.
+        window.massUpdateRestarting(tag);
         return;
       }
       return r.text().then(function(t) {

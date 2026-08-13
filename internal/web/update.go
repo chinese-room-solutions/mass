@@ -432,12 +432,30 @@ func (h *Handler) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug().Err(err).Msg("writing the update apply response")
 	}
 
+	// Tell the attached window before retiring. Without this it would just
+	// reconnect to whatever answers on the same port next — which is the
+	// relaunched build's own daemon — and the user would be left with two MASS
+	// windows: this one re-attached, and the new instance's. With no window
+	// attached (a headless serve, a browser) there is nobody to tell, and the
+	// browser tab simply reloads against the new daemon.
+	h.gui.send(guiEvent{name: GUIEventUpdateRestarting, data: tag})
+
 	// The installer is waiting for this process's files to be replaceable, so
-	// the daemon has to go.
+	// the daemon has to go. The window is quitting on the event above; the grace
+	// gives that event its trip down the SSE stream before Shutdown closes it.
 	h.shutdownMu.Lock()
 	fn := h.shutdownFn
 	h.shutdownMu.Unlock()
 	if fn != nil {
-		go fn()
+		go func() {
+			time.Sleep(updateShutdownGrace)
+			fn()
+		}()
 	}
 }
+
+// updateShutdownGrace is the pause between telling the window an update is
+// coming and tearing the server down. Only long enough for that event to be
+// written and read — the window's own notice-then-quit grace runs in parallel,
+// and the installer is already waiting on both processes to exit.
+const updateShutdownGrace = 250 * time.Millisecond

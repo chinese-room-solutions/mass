@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	workerpb "github.com/chinese-room-solutions/mass-proto/gen/go/worker"
 	"github.com/chinese-room-solutions/mass-sdk/install"
@@ -25,6 +28,10 @@ type stubUpdater struct {
 	newer     bool
 	fetchErr  error
 	fetched   bool
+	// setup is the stand-in installer's contents. Empty means FetchSetup only
+	// reports a path, which is enough for every case that never gets far enough
+	// to run it.
+	setup string
 }
 
 func (s *stubUpdater) Latest(context.Context, string) (string, error) {
@@ -38,7 +45,13 @@ func (s *stubUpdater) FetchSetup(_ context.Context, _, _, _, destDir string) (st
 		return "", s.fetchErr
 	}
 	s.fetched = true
-	return destDir + "/mass-setup", nil
+	path := filepath.Join(destDir, "mass-setup")
+	if s.setup != "" {
+		if err := os.WriteFile(path, []byte(s.setup), 0o700); err != nil {
+			return "", err
+		}
+	}
+	return path, nil
 }
 
 func TestCheckForUpdate(t *testing.T) {
@@ -285,6 +298,47 @@ func TestHandleUpdateApply(t *testing.T) {
 		require.Equal(t, http.StatusConflict, rec.Code)
 		require.Contains(t, rec.Body.String(), "administrator rights")
 	})
+}
+
+// TestUpdateApplyNotifiesTheWindow proves the daemon tells the attached window
+// before it retires. Without that event the window would just reconnect to the
+// relaunched build's daemon on the same port and the user would be left with
+// two MASS windows.
+func TestUpdateApplyNotifiesTheWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in installer is a shell script")
+	}
+	installDir := t.TempDir()
+	h := newTestHandler(t)
+	h.onDemand = true
+	h.update.set("v0.5.0")
+	h.recordFn = func() (*install.Record, error) { return &install.Record{InstallDir: installDir}, nil }
+	// A stand-in installer that exits at once: applyUpdate only has to be able
+	// to start it, and the event under test is sent after that.
+	h.updater = &stubUpdater{setup: "#!/bin/sh\nexit 0\n"}
+
+	ch := h.gui.subscribe()
+	defer h.gui.unsubscribe(ch)
+
+	var shutdown atomic.Bool
+	h.SetShutdownFunc(func() { shutdown.Store(true) })
+
+	rec := httptest.NewRecorder()
+	h.handleUpdateApply(rec, httptest.NewRequest(http.MethodPost, "/api/update/apply", strings.NewReader("{}")))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	select {
+	case ev := <-ch:
+		require.Equal(t, GUIEventUpdateRestarting, ev.name)
+		require.Equal(t, "v0.5.0", ev.data, "the event carries the incoming tag")
+	default:
+		t.Fatal("the daemon retired without telling the window")
+	}
+
+	// The shutdown is deliberately delayed so that event gets down the stream
+	// before Shutdown closes it.
+	require.False(t, shutdown.Load(), "the shutdown must not pre-empt the notice")
+	require.Eventually(t, shutdown.Load, 5*time.Second, 20*time.Millisecond)
 }
 
 // TestUpdateApplyFleetGate proves the gate runs before anything is downloaded,
