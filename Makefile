@@ -156,7 +156,7 @@ unittest:
 	go test ./internal/... ./pkg/... -short -count=1
 
 test:
-	$(RACE_ENV) go test ./internal/... ./pkg/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
+	$(RACE_ENV) go test ./internal/... ./pkg/... ./cmd/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
 
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
@@ -405,7 +405,7 @@ unittest:
 	go test ./internal/... ./pkg/... -short -count=1
 
 test:
-	go test ./internal/... ./pkg/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
+	go test ./internal/... ./pkg/... ./cmd/... -race -covermode=atomic -coverprofile=coverage.out -count=1 -timeout 15m
 
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
