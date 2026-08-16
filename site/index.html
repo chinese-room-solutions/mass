@@ -74,8 +74,6 @@
     <div class="card"><h3>One model store</h3><p>Import from Hugging Face or disk. Workers pull what they run, deletes propagate.</p></div>
     <div class="card"><h3>Latency-aware scheduling</h3><p>Placement by predicted wall-clock cost. Streams survive reconnects.</p></div>
     <div class="card"><h3>Fleet control</h3><p>Enable workers and devices individually. Every model is measured on every worker before a job lands there.</p></div>
-    <div class="card"><h3>Operator dashboard</h3><p>Live view of runtimes, models, queues, and workers. Prometheus metrics, TLS.</p></div>
-    <div class="card"><h3>SQLite or Postgres</h3><p>One config flag. Queues and results survive restarts either way.</p></div>
   </div>
 </div></section>
 
@@ -83,12 +81,7 @@
   <h2>Downloads</h2>
 
   <div class="dl-group">
-    <h3>MASS</h3>
-    <p class="d">The hub: scheduler, model storage, dashboard. The only download you need —
-    runtimes and workers are installed from inside MASS.</p>
-    <p class="d">On macOS and Linux, one line fetches the installer and runs the wizard. A
-    curl-fetched file carries no quarantine flag, so macOS skips the Gatekeeper
-    "Open Anyway" dance:</p>
+    <p class="d">On macOS and Linux, one line fetches the installer and runs the wizard:</p>
 <pre><span class="k">$</span> <span class="cmd">curl -fsSL https://raw.githubusercontent.com/chinese-room-solutions/mass/main/install.sh | sh</span></pre>
     <p class="d">Or download the installer for your platform:</p>
     <table>
@@ -195,16 +188,11 @@
 <span class="c"># 7 — inference, OpenAI-style, through MASS</span>
 <span class="k">&gt;</span> <span class="cmd">curl.exe -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions -d '{"model":"cli/Qwen3.5-0.8B-Q4_0.gguf","messages":[{"role":"user","content":"hi"}]}'</span></pre>
 
-  <p class="d">The <code>mass</code> binary doubles as a CLI for the whole management API —
-  <code>status</code>, <code>models</code>, <code>runtimes</code>, <code>workers</code>,
-  <code>scheduler</code>, <code>queue</code> — so everything the dashboard does is scriptable.
-  A verb starts the daemon on demand, so the first command works on a fresh install, and
-  <code>mass serve</code> runs it in the foreground for a server or a container.
-  It is agent-native too: the binary carries a ready-made
+  <p class="d">The <code>mass</code> binary is also the CLI for the whole <code>mass.v1</code> API —
+  a verb starts the daemon on demand, so the first command works on a fresh install. It carries a
   <a href="https://github.com/chinese-room-solutions/mass/tree/main/skills/mass-cli">CLI skill</a>
-  that teaches coding agents the verbs — <code>mass skill install DIR</code> writes it into
-  whichever directory your agent reads — and the same <code>mass.v1</code> API speaks gRPC and
-  plain HTTP/JSON for anything else you build on top.</p>
+  that teaches coding agents the verbs (<code>mass skill install DIR</code>), and the same API
+  speaks gRPC and plain HTTP/JSON.</p>
 </div></section>
 
 <section id="ecosystem"><div class="wrap">
