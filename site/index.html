@@ -86,6 +86,11 @@
     <h3>MASS</h3>
     <p class="d">The hub: scheduler, model storage, dashboard. The only download you need —
     runtimes and workers are installed from inside MASS.</p>
+    <p class="d">On macOS and Linux, one line fetches the installer and runs the wizard. A
+    curl-fetched file carries no quarantine flag, so macOS skips the Gatekeeper
+    "Open Anyway" dance:</p>
+<pre><span class="k">$</span> <span class="cmd">curl -fsSL https://raw.githubusercontent.com/chinese-room-solutions/mass/main/install.sh | sh</span></pre>
+    <p class="d">Or download the installer for your platform:</p>
     <table>
       <tr><th>Platform</th><th>Installer</th></tr>
       <tr data-class="{'os-mine': $os === 'linux'}">
@@ -115,9 +120,9 @@
     <button class="tab" data-class="{active: $qs === 'windows'}" data-on:click="$qs = 'windows'">Windows</button>
   </div>
 
-<pre data-show="$qs === 'linux'"><span class="c"># 1 — install MASS on your main machine: make the installer executable, then double-click it</span>
-<span class="c">#     in your file manager — or run it from a terminal</span>
-<span class="k">$</span> <span class="cmd">chmod +x mass-setup_linux_amd64.AppImage && ./mass-setup_linux_amd64.AppImage</span>
+<pre data-show="$qs === 'linux'"><span class="c"># 1 — install MASS on your main machine: one line fetches the installer and runs the wizard</span>
+<span class="c">#     (or grab the .AppImage from Downloads above and double-click it in your file manager)</span>
+<span class="k">$</span> <span class="cmd">curl -fsSL https://raw.githubusercontent.com/chinese-room-solutions/mass/main/install.sh | sh</span>
 
 <span class="c"># 2 — in a new terminal: confirm the hub is up — dashboard at :3455</span>
 <span class="k">$</span> <span class="cmd">mass status</span>
@@ -140,10 +145,9 @@
 <span class="c"># 7 — inference, OpenAI-style, through MASS</span>
 <span class="k">$</span> <span class="cmd">curl -X POST http://localhost:3455/mass.llama-cpp/v1/chat/completions -d '{"model":"cli/Qwen3.5-0.8B-Q4_0.gguf","messages":[{"role":"user","content":"hi"}]}'</span></pre>
 
-<pre data-show="$qs === 'darwin'"><span class="c"># 1 — install MASS on your main machine: unzip, then double-click "MASS Setup" in Finder —</span>
-<span class="c">#     right-click → Open the first time, the app is signed but not notarized. Or from a terminal,</span>
-<span class="c">#     clearing the quarantine flag first:</span>
-<span class="k">$</span> <span class="cmd">unzip mass-setup_darwin_arm64.zip && xattr -dr com.apple.quarantine "MASS Setup.app" && open "MASS Setup.app"</span>
+<pre data-show="$qs === 'darwin'"><span class="c"># 1 — install MASS on your main machine: one line fetches the installer and runs the wizard.</span>
+<span class="c">#     A curl-fetched file carries no quarantine flag, so Gatekeeper stays out of the way</span>
+<span class="k">$</span> <span class="cmd">curl -fsSL https://raw.githubusercontent.com/chinese-room-solutions/mass/main/install.sh | sh</span>
 
 <span class="c"># 2 — in a new terminal: confirm the hub is up — dashboard at :3455</span>
 <span class="k">$</span> <span class="cmd">mass status</span>

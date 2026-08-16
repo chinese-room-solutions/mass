@@ -52,10 +52,23 @@ The dividing line: **versioned RPC for everything external; the dashboard's REST
 - **Fleet control** — enable/disable individual workers or devices, with new workers benchmarked automatically so the scheduler knows their throughput.
 - **Operator dashboard** — live view (Datastar + Shoelace + Tailwind) of runtimes, models, the scheduler, queues, and workers, with Prometheus metrics, bearer-token auth, and optional TLS for API and worker traffic.
 
+## Install
+
+On macOS and Linux, one line fetches the installer and runs the wizard:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/chinese-room-solutions/mass/main/install.sh | sh
+```
+
+A curl-fetched file carries no quarantine flag, so macOS skips the Gatekeeper
+"Open Anyway" dance described below.
+
+Or download the installer for your OS from the
+[releases page](https://github.com/chinese-room-solutions/mass/releases/latest)
+and run it — a short terminal wizard that stages the app and a launcher.
+
 ## Quick start
 
-Prebuilt binaries for Linux, macOS, and Windows ship on the
-[releases page](https://github.com/chinese-room-solutions/mass/releases/latest).
 To build from source instead:
 
 Building MASS needs **Go 1.26+** (plus `bun` or `npx` for the Tailwind CSS step). The desktop build also needs the system webview's dev packages on Linux (`gtk+-3.0`, `webkit2gtk-4.1`) and the Xcode command-line tools on macOS — Windows needs neither. Inference backend toolchains are needed only for the separate worker binaries, not for MASS.
