@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -354,36 +355,11 @@ func runServe(idleTimeout time.Duration) int {
 			logger.Error().Err(err).Msg("TLS misconfigured, falling back to plaintext")
 			useTLS = false
 		} else {
-			srv = &http.Server{
-				Addr:      addr,
-				Handler:   authedHandler,
-				TLSConfig: tlsCfg,
-				// No ReadTimeout/WriteTimeout: SSE and gRPC streams are
-				// long-lived by design. These two only bound slow-header
-				// clients and idle keep-alive connections.
-				ReadHeaderTimeout: 10 * time.Second,
-				IdleTimeout:       120 * time.Second,
-			}
+			srv = newTLSServer(addr, authedHandler, tlsCfg)
 		}
 	}
 	if !useTLS {
-		// Serve HTTP/1.1 (dashboard + SSE) and unencrypted HTTP/2 (plain
-		// gRPC from runtime gateways and workers) on the same port. The
-		// native Protocols field replaces the deprecated h2c handler wrapper
-		// and, unlike it, keeps http.Flusher available on HTTP/1.1 requests.
-		var protocols http.Protocols
-		protocols.SetHTTP1(true)
-		protocols.SetUnencryptedHTTP2(true)
-		srv = &http.Server{
-			Addr:      addr,
-			Handler:   authedHandler,
-			Protocols: &protocols,
-			// No ReadTimeout/WriteTimeout: SSE and gRPC streams are
-			// long-lived by design. These two only bound slow-header
-			// clients and idle keep-alive connections.
-			ReadHeaderTimeout: 10 * time.Second,
-			IdleTimeout:       120 * time.Second,
-		}
+		srv = newPlaintextServer(addr, authedHandler)
 	}
 
 	// Give every request a context derived from srvCtx. The SSE handlers
@@ -481,4 +457,46 @@ func runServe(idleTimeout time.Duration) int {
 
 	<-done
 	return 0
+}
+
+// serverIdleTimeout bounds idle keep-alive connections. Neither server sets
+// ReadTimeout or WriteTimeout: SSE and gRPC streams are long-lived by design.
+const serverIdleTimeout = 120 * time.Second
+
+// newTLSServer builds the HTTPS server. HTTP/2 arrives over ALPN, where
+// net/http clears the handshake read deadline before handing the connection
+// to the HTTP/2 server, so ReadHeaderTimeout safely bounds slow-header
+// clients here.
+func newTLSServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       serverIdleTimeout,
+	}
+}
+
+// newPlaintextServer serves HTTP/1.1 (dashboard + SSE) and unencrypted HTTP/2
+// (plain gRPC from runtime gateways and workers) on the same port. The native
+// Protocols field replaces the deprecated h2c handler wrapper and, unlike it,
+// keeps http.Flusher available on HTTP/1.1 requests.
+//
+// ReadHeaderTimeout must stay unset here. net/http arms it as a whole-
+// connection read deadline before it sniffs the h2c preface, and the HTTP/2
+// server only disarms an inherited deadline when ReadTimeout is also set. On
+// an h2c connection it therefore never gets cleared, and the TCP connection —
+// every stream on it — dies that long after Accept no matter how much traffic
+// is flowing. That killed worker control streams (and their in-flight
+// benchmarks) exactly 10s after connect.
+func newPlaintextServer(addr string, handler http.Handler) *http.Server {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return &http.Server{
+		Addr:        addr,
+		Handler:     handler,
+		Protocols:   &protocols,
+		IdleTimeout: serverIdleTimeout,
+	}
 }
