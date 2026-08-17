@@ -230,16 +230,28 @@ func TestIsNewerVersion(t *testing.T) {
 }
 
 func TestMassVersionForResolve(t *testing.T) {
-	h := newTestHandler(t)
-
-	h.version = "dev"
-	require.Equal(t, unresolvableMassVersion, h.massVersionForResolve())
-
-	h.version = ""
-	require.Equal(t, unresolvableMassVersion, h.massVersionForResolve())
-
-	h.version = "1.2.3"
-	require.Equal(t, "1.2.3", h.massVersionForResolve())
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{"dev placeholder", "dev", unresolvableMassVersion},
+		{"empty", "", unresolvableMassVersion},
+		{"release", "1.2.3", "1.2.3"},
+		{"release with v prefix", "v1.2.3", "v1.2.3"},
+		// git describe on any build past a tag: without the reduction these
+		// match no range at all, so a developer build installs nothing.
+		{"dirty tree", "v0.4.0-dirty", "0.4.0"},
+		{"commits past the tag", "v0.4.0-3-gabc1234", "0.4.0"},
+		{"release candidate", "1.0.0-rc1", "1.0.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHandler(t)
+			h.version = tt.version
+			require.Equal(t, tt.want, h.massVersionForResolve())
+		})
+	}
 }
 
 // newTwoVersionFixture serves one runtime package with two versions listed
@@ -305,6 +317,16 @@ func TestRegistryPackageViews_ShowsInstallableVersion(t *testing.T) {
 			newRange:        ">=0.2 <0.3",
 			wantVersion:     "0.2.0",
 			wantInstallable: false,
+		},
+		{
+			// A build between tags stamps a semver prerelease, which no plain
+			// range admits — it resolves what its base version resolves.
+			name:            "developer build resolves as its base version",
+			massVersion:     "v0.2.1-3-gabc1234",
+			oldRange:        ">=0.1 <0.2",
+			newRange:        ">=0.2",
+			wantVersion:     "0.2.0",
+			wantInstallable: true,
 		},
 	}
 	for _, tt := range tests {
