@@ -18,7 +18,10 @@ IS_MAC  := $(filter Darwin,$(UNAME_S))
 # -- Common variables ---------------------------------------------------------
 
 BIN_DIR := bin
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# `?=` so a caller can pin the stamp: the release workflow passes the tag, which
+# keeps it identical across the several make invocations one release runs.
+# Derived per-invocation otherwise, and `--dirty` then means what it says.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 # -- WebKitGTK discovery (Linux GUI) -----------------------------------------
 #
