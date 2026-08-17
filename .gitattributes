@@ -1,0 +1,8 @@
+# templ copies HTML comment text verbatim into the string literals it generates,
+# so a CRLF working tree (what core.autocrlf=true gives on Windows, the default
+# on GitHub's windows runners) makes `templ generate` emit \r\n *inside* those
+# literals. That is a real content change git's CRLF normalization cannot undo:
+# every Windows build left the tree dirty, and the second `make` invocation in
+# the release workflow stamped the binaries -dirty. Pin LF everywhere so
+# generation is reproducible across platforms.
+* text=auto eol=lf
