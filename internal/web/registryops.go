@@ -488,13 +488,28 @@ func isNewerVersion(candidate, installed string) bool {
 // permissive placeholder when the build version is a non-semver dev string
 // (e.g. "dev") — in which case min_mass is treated as satisfied. Logs the
 // substitution once at debug.
+//
+// A prerelease is reduced to its base version first. Every build between two
+// tags stamps one (git describe gives v0.4.0-3-gabc1234, or -dirty on an
+// uncommitted tree), and semver excludes prereleases from any range that does
+// not name one — so a developer build would match no registry range at all and
+// could install nothing. Reading it as its base version costs only this: a
+// genuine v1.0.0-rc1 resolves what v1.0.0 resolves, which is what an rc wants.
 func (h *Handler) massVersionForResolve() string {
-	if _, err := semver.NewVersion(h.version); err == nil {
+	v, err := semver.NewVersion(h.version)
+	if err != nil {
+		logDevVersionOnce.Do(func() {
+			h.logger.Debug().Str("version", h.version).
+				Msg("MASS version is not semver; treating registry min_mass as satisfied")
+		})
+		return unresolvableMassVersion
+	}
+	if v.Prerelease() == "" {
 		return h.version
 	}
-	logDevVersionOnce.Do(func() {
-		h.logger.Debug().Str("version", h.version).
-			Msg("MASS version is not semver; treating registry min_mass as satisfied")
-	})
-	return unresolvableMassVersion
+	base, err := v.SetPrerelease("")
+	if err != nil {
+		return unresolvableMassVersion
+	}
+	return base.String()
 }

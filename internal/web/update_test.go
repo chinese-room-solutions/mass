@@ -283,6 +283,13 @@ func TestHandleUpdateApply(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root can write anywhere, so the probe can't fail")
 		}
+		if runtime.GOOS == "windows" {
+			// Windows carries no mode bits on a directory: Mkdir(0o500) leaves
+			// it writable, so the probe succeeds and there is no refusal to
+			// assert. Denying the write needs an ACL, which is a bigger prop
+			// than the refusal is worth. The refusal itself is OS-neutral.
+			t.Skip("directory mode bits are not enforced on Windows")
+		}
 		dir := filepath.Join(t.TempDir(), "readonly")
 		require.NoError(t, os.Mkdir(dir, 0o500))
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })

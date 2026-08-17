@@ -121,21 +121,36 @@ func newStubServer(t *testing.T, stub *stubHandler) string {
 }
 
 // capture runs fn with stdout+stderr redirected, returning their contents.
+// The pipes are drained while fn runs: a write that fills the pipe buffer
+// blocks until someone reads, and Windows gives os.Pipe 4 KiB against Linux's
+// 64 KiB — reading only after fn returned deadlocked `mass skill show`, whose
+// SKILL.md is 8.8 KB, on Windows alone.
 func capture(t *testing.T, fn func()) (stdout, stderr string) {
 	t.Helper()
 	origOut, origErr := os.Stdout, os.Stderr
-	rOut, wOut, _ := os.Pipe()
-	rErr, wErr, _ := os.Pipe()
+	rOut, wOut, err := os.Pipe()
+	require.NoError(t, err)
+	rErr, wErr, err := os.Pipe()
+	require.NoError(t, err)
 	os.Stdout, os.Stderr = wOut, wErr
 	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
 
+	outC, errC := drain(rOut), drain(rErr)
 	fn()
 
 	_ = wOut.Close()
 	_ = wErr.Close()
-	outB, _ := io.ReadAll(rOut)
-	errB, _ := io.ReadAll(rErr)
-	return string(outB), string(errB)
+	return <-outC, <-errC
+}
+
+// drain reads r to EOF on its own goroutine, delivering the result once.
+func drain(r *os.File) <-chan string {
+	ch := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		ch <- string(b)
+	}()
+	return ch
 }
 
 func TestRunCLI_VerbRouting(t *testing.T) {

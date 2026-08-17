@@ -71,6 +71,17 @@ jobs:
         shell: bash
         working-directory: web
         run: npm ci
+      # One stamp for the whole job. A release runs make twice (Build, then
+      # Package installer), each re-deriving VERSION from `git describe`, so
+      # anything the first invocation writes into a tracked file would stamp the
+      # second one -dirty — the shipped binary, since `package` relinks it.
+      # Pinning the tag makes the two agree by construction. Left unset on a
+      # manual dispatch, where there is no tag and the Makefile's own derivation
+      # is the honest answer.
+      - name: Pin the version stamp to the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
       # make build/bundle-macos run build-web first: templ generate, stage the
       # sdk theme from the pinned Go module cache (no sibling checkout), and
       # build the CSS — failing if dist.css comes out empty.

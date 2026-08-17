@@ -1,6 +1,6 @@
 module github.com/chinese-room-solutions/mass
 
-go 1.26.5
+go 1.26.6
 
 require (
 	connectrpc.com/connect v1.20.0
