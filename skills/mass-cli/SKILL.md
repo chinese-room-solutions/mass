@@ -133,9 +133,11 @@ mass workers benchmark --workers <worker> --timeout 15m # re-measure throughput
 ## Updating MASS
 
 `mass update` reports whether a newer MASS release is available (`v0.5.0
-available …`, or `up to date`). The daemon checks once when it starts, so this
-reads a stored answer — it costs nothing and never blocks on the network. A
-build from source reports itself as `dev` and never has an update.
+available …`, or `up to date`). The daemon goes to the release repository when
+you run it, so the answer is always current — it costs one network round-trip.
+A repository it can't reach is an error (exit `1`) with the reason, never a
+quiet `up to date`. A build from source reports itself as `dev` and never has
+an update.
 
 It also reports the **fleet cost**: how many connected workers the registry
 index says the new build would strand. That matters because a version-skewed

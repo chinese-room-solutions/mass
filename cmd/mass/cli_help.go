@@ -158,8 +158,9 @@ overwritten: reinstalling after an upgrade is how the instructions stay in step
 with the verbs. Reaches no server, so it works on a fresh install.`},
 
 	{"update", "update [--apply] [--force]", "check for a newer MASS, or install it", false, `
-Report whether a newer MASS release is available. The daemon checks once at
-startup, so this reads that answer rather than going to the network. It also
+Report whether a newer MASS release is available. The daemon asks the release
+repository when you run this, so the answer is never stale; a repository it
+can't reach is an error (exit 1) rather than a quiet "up to date". It also
 reports how many connected workers the registry index says the new build would
 strand — a stranded worker is rejected at Register, exits, and stays down until
 it is upgraded.

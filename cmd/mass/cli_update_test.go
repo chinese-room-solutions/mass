@@ -8,9 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// `mass update` reads the daemon's stored answer and says what to do about it;
-// --apply asks the daemon to install, and the daemon's own 409 sentence is what
-// reaches the user. An explicit --addr keeps every case off the local daemon.
+// `mass update` asks the daemon for a live check and says what to do about the
+// answer; --apply asks the daemon to install, and the daemon's own 409 sentence
+// is what reaches the user. An explicit --addr keeps every case off the local
+// daemon.
 func TestRunCLIUpdate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -23,7 +24,7 @@ func TestRunCLIUpdate(t *testing.T) {
 		{
 			name: "up to date",
 			routes: map[string]http.HandlerFunc{
-				"GET /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
+				"POST /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte(`{"version":"v0.4.0","available":""}`))
 				},
 			},
@@ -34,7 +35,7 @@ func TestRunCLIUpdate(t *testing.T) {
 		{
 			name: "an update is available",
 			routes: map[string]http.HandlerFunc{
-				"GET /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
+				"POST /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte(`{"version":"v0.4.0","available":"v0.5.0"}`))
 				},
 			},
@@ -45,7 +46,7 @@ func TestRunCLIUpdate(t *testing.T) {
 		{
 			name: "an update that would strand workers warns",
 			routes: map[string]http.HandlerFunc{
-				"GET /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
+				"POST /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte(
 						`{"version":"v0.4.0","available":"v0.5.0","incompatible":2,"names":["llama-cpp 0.2.0"]}`))
 				},
@@ -92,6 +93,17 @@ func TestRunCLIUpdate(t *testing.T) {
 			args:     []string{"update", "--apply", "--force"},
 			wantCode: exitOK,
 			wantOut:  "installing mass v0.5.0",
+		},
+		{
+			name: "a check that couldn't reach the release host fails loudly",
+			routes: map[string]http.HandlerFunc{
+				"POST /api/update/check": func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`{"version":"v0.4.0","error":"dial tcp: no route to host"}`))
+				},
+			},
+			args:     []string{"update"},
+			wantCode: exitError,
+			wantErr:  "no route to host",
 		},
 		{
 			name:     "positional arguments are a usage error",
