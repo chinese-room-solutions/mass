@@ -324,16 +324,17 @@ func runServe(idleTimeout time.Duration) int {
 		LogsDir:   logsDir,
 		DataDir:   dataDir,
 		OnDemand:  idleTimeout > 0,
-		Updater:   web.SDKUpdater{},
 		UpdateURL: cfg.EffectiveUpdateURL(),
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("creating web handler")
 	}
 
-	// One release check per daemon start, off the startup path: being offline
-	// is the normal case, so it reports nothing and ends with cleanupCtx.
-	go handler.CheckForUpdate(cleanupCtx)
+	// Release checks, off the startup path: one now and one every few hours, so
+	// a daemon that outlives a release still notices it. Being offline is the
+	// normal case, so a failed check is reported through the check endpoint
+	// rather than logged loudly. Ends with cleanupCtx.
+	go handler.RunUpdateChecks(cleanupCtx)
 
 	// The hub mirrors the dashboard's auth state: with no operator token
 	// configured, workers may enroll without a join token.

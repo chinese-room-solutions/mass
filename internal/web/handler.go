@@ -17,8 +17,9 @@ import (
 	gatewaypb "github.com/chinese-room-solutions/mass-proto/gen/go/gateway"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/rpcconnect"
 	"github.com/chinese-room-solutions/mass-proto/gen/go/worker/workerconnect"
-	"github.com/chinese-room-solutions/mass-sdk/install"
+	"github.com/chinese-room-solutions/mass-sdk/selfupdate"
 	"github.com/chinese-room-solutions/mass-sdk/uikit"
+	"github.com/chinese-room-solutions/mass/internal/appspec"
 	"github.com/chinese-room-solutions/mass/internal/audit"
 	"github.com/chinese-room-solutions/mass/internal/config"
 	"github.com/chinese-room-solutions/mass/internal/downloads"
@@ -56,10 +57,7 @@ type HandlerOptions struct {
 	// reports it so a launcher knows this instance may be replaced on version
 	// skew (an operator-managed one may not).
 	OnDemand bool
-	// Updater drives the self-update surface; nil leaves it inert (nothing is
-	// ever available, and an apply reports as much). UpdateURL is the release
-	// repository it reads.
-	Updater   UpdaterInterface
+	// UpdateURL is the release repository the self-update surface reads.
 	UpdateURL string
 }
 
@@ -91,12 +89,11 @@ type Handler struct {
 	shutdownMu sync.Mutex
 	shutdownFn func()
 
-	// Self-update (see update.go): what the startup check found, and how to
-	// fetch it.
-	update    updateState
-	updater   UpdaterInterface
-	updateURL string
-	recordFn  func() (*install.Record, error) // nil = the real install record
+	// Self-update (see update.go): the checker that keeps the answer to "is
+	// there a newer MASS?", and the applier that installs one. Tests stand in
+	// for the applier's install record and download.
+	update  *selfupdate.Checker
+	applier selfupdate.Applier
 
 	workersBroker   *Broker[WorkersEvent]
 	schedulerBroker *Broker[changeEvent]
@@ -128,12 +125,20 @@ func NewHandler(opts HandlerOptions) (*Handler, error) {
 		dataDir:         opts.DataDir,
 		authHash:        opts.AuthHash,
 		onDemand:        opts.OnDemand,
-		updater:         opts.Updater,
-		updateURL:       opts.UpdateURL,
 		gui:             newGUIChannel(),
 		workersBroker:   NewBroker[WorkersEvent](opts.Logger, "workers-broker"),
 		schedulerBroker: NewBroker[changeEvent](opts.Logger, "scheduler-broker"),
 		queueBroker:     NewBroker[changeEvent](opts.Logger, "queue-broker"),
+	}
+	h.update = &selfupdate.Checker{
+		Version: opts.Version,
+		BaseURL: opts.UpdateURL,
+		Logger:  h.logger,
+	}
+	h.applier = selfupdate.Applier{
+		App:      appspec.Spec,
+		BaseURL:  opts.UpdateURL,
+		StageDir: opts.DataDir,
 	}
 	h.artifactCache = newArtifactCache(filepath.Join(h.registryCacheDir(), "artifacts"))
 	if h.orch != nil {
@@ -232,6 +237,7 @@ func (h *Handler) buildRoutes() *http.ServeMux {
 	// Self-update (see update.go). Operator-authed like the rest of /api/:
 	// applying one replaces the binary and restarts the daemon.
 	mux.HandleFunc("GET /api/update/check", h.handleUpdateCheck)
+	mux.HandleFunc("POST /api/update/check", h.handleUpdateCheckNow)
 	mux.HandleFunc("POST /api/update/apply", h.handleUpdateApply)
 
 	// Runtime gateway management.
@@ -369,7 +375,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TLSCertFile:      h.cfg.TLS.CertFile,
 		Runtimes:         h.runtimeViews(),
 	}
-	if data.UpdateAvailable = h.update.get(); data.UpdateAvailable != "" {
+	if data.UpdateAvailable = h.update.Available(); data.UpdateAvailable != "" {
 		data.UpdateIncompatibleWorkers = h.updateFleetGate(data.UpdateAvailable).Incompatible
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
