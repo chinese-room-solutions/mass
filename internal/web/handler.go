@@ -375,9 +375,6 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TLSCertFile:      h.cfg.TLS.CertFile,
 		Runtimes:         h.runtimeViews(),
 	}
-	if data.UpdateAvailable = h.update.Available(); data.UpdateAvailable != "" {
-		data.UpdateIncompatibleWorkers = h.updateFleetGate(data.UpdateAvailable).Incompatible
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Layout("MASS", templates.Shell(data), theme).Render(r.Context(), w); err != nil {
 		h.logger.Warn().Err(err).Msg("rendering dashboard")
