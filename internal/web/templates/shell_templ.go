@@ -2065,11 +2065,7 @@ func settingsPanel(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = aboutRow("Version", data.Version).Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = updateRow().Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = versionRow(data.Version).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2093,13 +2089,13 @@ func settingsPanel(data DashboardData) templ.Component {
 	})
 }
 
-// updateRow is the About section's self-update affordance. It is always
-// rendered and deliberately empty: scripts/update.js fills it in from
-// api/update/check on page load, and refills it when the operator presses
-// Check for updates. Nothing here depends on a check having finished before
-// the page rendered — that race is what used to hide the row for a whole
-// session.
-func updateRow() templ.Component {
+// versionRow is the About section's version line and, beside it, the whole
+// self-update affordance: Check asks the daemon to go to the network now,
+// Install is disabled until a check has found a release. scripts/update.js
+// binds both and writes their tooltips — nothing here depends on a check having
+// finished before the page rendered, which is what used to hide the affordance
+// for a whole session.
+func versionRow(version string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -2120,7 +2116,20 @@ func updateRow() templ.Component {
 			templ_7745c5c3_Var85 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Update</span><div class=\"flex items-center gap-2 min-w-0 flex-wrap\"><span id=\"mass-update-status\" class=\"text-xs font-mono min-w-0\" style=\"color:var(--mass-text-muted)\"></span> <sl-button id=\"mass-update-check-btn\" size=\"small\" variant=\"default\"><sl-icon slot=\"prefix\" name=\"arrow-clockwise\"></sl-icon> Check for updates</sl-button> <sl-button id=\"mass-update-btn\" size=\"small\" variant=\"primary\" style=\"display:none\"><sl-icon slot=\"prefix\" name=\"download\"></sl-icon> Install</sl-button></div></div><div id=\"mass-update-warning\" class=\"flex items-center gap-1\" style=\"margin-left:5.5rem;display:none\"><sl-icon name=\"exclamation-triangle\" style=\"color:var(--mass-warning);font-size:0.8rem\"></sl-icon> <span id=\"mass-update-warning-text\" class=\"text-xs\" style=\"color:var(--mass-warning)\"></span></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Version</span><div class=\"flex items-center gap-1 min-w-0\"><span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var86 string
+		templ_7745c5c3_Var86, templ_7745c5c3_Err = templ.JoinStringErrs(version)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1370, Col: 99}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var86))
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "</span> <sl-tooltip id=\"mass-update-check-tip\" content=\"Check for updates\"><sl-icon-button id=\"mass-update-check-btn\" name=\"arrow-clockwise\" label=\"Check for updates\" style=\"font-size:0.95rem\"></sl-icon-button></sl-tooltip><!-- The span is Shoelace's own workaround: a tooltip on a disabled\n\t\t\t     control never shows, and Install starts disabled. --><sl-tooltip id=\"mass-update-install-tip\" content=\"No update available\"><span class=\"inline-flex\"><sl-icon-button id=\"mass-update-btn\" name=\"download\" label=\"Install update\" disabled style=\"font-size:0.95rem\"></sl-icon-button></span></sl-tooltip></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2148,39 +2157,39 @@ func aboutRow(label, value string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var86 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var86 == nil {
-			templ_7745c5c3_Var86 = templ.NopComponent
+		templ_7745c5c3_Var87 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var87 == nil {
+			templ_7745c5c3_Var87 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		if value != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			var templ_7745c5c3_Var87 string
-			templ_7745c5c3_Var87, templ_7745c5c3_Err = templ.JoinStringErrs(label)
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1395, Col: 118}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var87))
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 166, "</span> <span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 166, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
 			var templ_7745c5c3_Var88 string
-			templ_7745c5c3_Var88, templ_7745c5c3_Err = templ.JoinStringErrs(value)
+			templ_7745c5c3_Var88, templ_7745c5c3_Err = templ.JoinStringErrs(label)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1396, Col: 97}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1392, Col: 118}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var88))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 167, "</span></div>")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 167, "</span> <span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			var templ_7745c5c3_Var89 string
+			templ_7745c5c3_Var89, templ_7745c5c3_Err = templ.JoinStringErrs(value)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1393, Col: 97}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var89))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 168, "</span></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2215,12 +2224,12 @@ func tabLoadingSpinner() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var89 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var89 == nil {
-			templ_7745c5c3_Var89 = templ.NopComponent
+		templ_7745c5c3_Var90 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var90 == nil {
+			templ_7745c5c3_Var90 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 168, "<div class=\"flex items-center justify-center py-12\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 169, "<div class=\"flex items-center justify-center py-12\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -1,10 +1,11 @@
 (function() {
-  // Self-update: the Settings > About Update row plus a one-per-load
-  // announcement. The row is always in the page and always starts empty — this
-  // script hydrates it from api/update/check, so an answer the daemon hadn't
-  // got yet when the page rendered no longer hides the whole affordance. The
+  // Self-update: the two icon buttons beside Settings > About > Version, plus a
+  // one-per-load announcement. Both buttons are always in the page — this script
+  // hydrates them from api/update/check, so an answer the daemon hadn't got yet
+  // when the page rendered no longer hides the affordance. Everything they have
+  // to say goes in their tooltips; the row carries no text of its own. The
   // announcement is a toast rather than a modal — nothing is broken — with the
-  // install offered right in it; the About row is what remains after it clears.
+  // install offered right in it; the buttons are what remain after it clears.
   //
   // The fleet gate is the MASS-specific part. When the daemon reports connected
   // workers the new build would strand, the toast says so and the install goes
@@ -26,12 +27,11 @@
     window.massToast('Updating MASS to ' + tag + ' — restarting…', {duration: Infinity});
   };
 
-  var statusEl = document.getElementById('mass-update-status');
-  if (!statusEl) return;
   var checkBtn = document.getElementById('mass-update-check-btn');
+  if (!checkBtn) return;
+  var checkTip = document.getElementById('mass-update-check-tip');
   var installBtn = document.getElementById('mass-update-btn');
-  var warnBox = document.getElementById('mass-update-warning');
-  var warnText = document.getElementById('mass-update-warning-text');
+  var installTip = document.getElementById('mass-update-install-tip');
 
   // What the last answer said, so a failed live check can be shown over it
   // rather than throwing the known tag away.
@@ -60,26 +60,37 @@
     last = st;
     tag = st.available || '';
     incompatible = st.incompatible || 0;
-    installBtn.style.display = tag ? '' : 'none';
-    warnBox.style.display = tag && incompatible > 0 ? '' : 'none';
-    if (incompatible > 0) {
-      warnText.textContent = workersPhrase(incompatible) + ' incompatible';
-    }
+    installBtn.disabled = !tag;
+
     if (st.error) {
-      // An unreachable release host must not read as "up to date": say so, and
-      // say what went wrong.
-      statusEl.style.color = 'var(--mass-danger)';
-      statusEl.textContent = "Couldn't check for updates — " + st.error;
+      // An unreachable release host must not read as "up to date". With no text
+      // in the row, the tint is what says so at a glance and the tooltip says
+      // why; a check the operator asked for also answers out loud (see check).
+      checkBtn.style.color = 'var(--mass-danger)';
+      checkTip.content = "Couldn't check for updates — " + st.error;
+      installTip.content = tag ? installLabel() : 'No update available';
       return;
     }
-    statusEl.style.color = 'var(--mass-text-muted)';
+    checkBtn.style.color = '';
+    var when = checkedLabel(st.checked_at);
     if (!tag) {
-      var when = checkedLabel(st.checked_at);
-      statusEl.textContent = when ? 'Up to date — ' + when : 'Up to date';
+      checkTip.content = when ? 'Up to date — ' + when : 'Check for updates';
+      installTip.content = 'No update available';
       return;
     }
-    statusEl.textContent = tag + ' available';
+    checkTip.content = when ? 'Check for updates — ' + when : 'Check for updates';
+    installTip.content = installLabel();
     announce();
+  }
+
+  // installLabel is the Install button's tooltip when there is something to
+  // install. The stranded-worker count rides along: it is the one thing the
+  // operator must know before pressing, and the confirm dialog behind the press
+  // says it again.
+  function installLabel() {
+    var msg = 'Install ' + tag;
+    if (incompatible > 0) msg += ' — ' + workersPhrase(incompatible) + ' would be stranded';
+    return msg;
   }
 
   function announce() {
@@ -99,17 +110,25 @@
   // check asks the daemon to go to the network now. The daemon answers 200 with
   // an error field when it couldn't reach the release host, so only a broken
   // request lands in the rejection path.
-  function check() {
-    checkBtn.loading = true;
+  function check(loud) {
     checkBtn.disabled = true;
     return fetch('api/update/check', {method: 'POST'}).then(function(r) {
       if (!r.ok) return Promise.reject(new Error('HTTP ' + r.status));
       return r.json();
-    }).then(render, function() {
-      last.error = "MASS isn't responding.";
-      render(last);
+    }, function() {
+      return {version: last.version, available: last.available, error: "MASS isn't responding."};
+    }).then(function(st) {
+      render(st);
+      // A check the operator pressed for gets an answer they can't miss. A
+      // hydration on page load doesn't — it would fire on every load.
+      if (!loud) return;
+      if (st.error) {
+        window.massAlert("Couldn't check for updates — " + st.error,
+          {title: 'Update Check Failed', variant: 'danger'});
+      } else if (!st.available) {
+        window.massToast('MASS ' + (st.version || '') + ' is up to date');
+      }
     }).then(function() {
-      checkBtn.loading = false;
       checkBtn.disabled = false;
     });
   }
@@ -123,12 +142,13 @@
       return r.json();
     }).then(function(st) {
       if (!(Date.parse(st.checked_at || '') > 0)) {
-        check();
+        check(false);
         return;
       }
       render(st);
     }, function() {
-      statusEl.textContent = '';
+      checkTip.content = "Couldn't reach MASS to ask about updates.";
+      checkBtn.style.color = 'var(--mass-danger)';
     });
   }
 
@@ -180,7 +200,7 @@
     dlg.show();
   }
 
-  checkBtn.addEventListener('click', function() { check(); });
+  checkBtn.addEventListener('click', function() { check(true); });
   installBtn.addEventListener('click', apply);
 
   var confirmDlg = document.getElementById('mass-confirm-update-dialog');

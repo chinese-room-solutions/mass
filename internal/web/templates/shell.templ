@@ -1348,8 +1348,7 @@ templ settingsPanel(data DashboardData) {
 		<div class="rounded-lg p-5 space-y-4" style="background:var(--mass-bg-panel);border:1px solid var(--mass-border)">
 			<h3 class="text-sm font-semibold uppercase tracking-wide" style="color:var(--mass-text)">About</h3>
 			<div class="space-y-2">
-				@aboutRow("Version", data.Version)
-				@updateRow()
+				@versionRow(data.Version)
 				@aboutRow("Data dir", data.EffectiveDataDir)
 				@aboutRow("Logs", data.LogsDir)
 				@aboutRow("Config", data.ConfigFile)
@@ -1358,30 +1357,28 @@ templ settingsPanel(data DashboardData) {
 	</div>
 }
 
-// updateRow is the About section's self-update affordance. It is always
-// rendered and deliberately empty: scripts/update.js fills it in from
-// api/update/check on page load, and refills it when the operator presses
-// Check for updates. Nothing here depends on a check having finished before
-// the page rendered — that race is what used to hide the row for a whole
-// session.
-templ updateRow() {
+// versionRow is the About section's version line and, beside it, the whole
+// self-update affordance: Check asks the daemon to go to the network now,
+// Install is disabled until a check has found a release. scripts/update.js
+// binds both and writes their tooltips — nothing here depends on a check having
+// finished before the page rendered, which is what used to hide the affordance
+// for a whole session.
+templ versionRow(version string) {
 	<div class="flex items-baseline gap-3">
-		<span class="text-xs flex-shrink-0 whitespace-nowrap" style="color:var(--mass-text-faint);min-width:5.5rem">Update</span>
-		<div class="flex items-center gap-2 min-w-0 flex-wrap">
-			<span id="mass-update-status" class="text-xs font-mono min-w-0" style="color:var(--mass-text-muted)"></span>
-			<sl-button id="mass-update-check-btn" size="small" variant="default">
-				<sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-				Check for updates
-			</sl-button>
-			<sl-button id="mass-update-btn" size="small" variant="primary" style="display:none">
-				<sl-icon slot="prefix" name="download"></sl-icon>
-				Install
-			</sl-button>
+		<span class="text-xs flex-shrink-0 whitespace-nowrap" style="color:var(--mass-text-faint);min-width:5.5rem">Version</span>
+		<div class="flex items-center gap-1 min-w-0">
+			<span class="text-xs font-mono break-all min-w-0" style="color:var(--mass-text-muted)">{ version }</span>
+			<sl-tooltip id="mass-update-check-tip" content="Check for updates">
+				<sl-icon-button id="mass-update-check-btn" name="arrow-clockwise" label="Check for updates" style="font-size:0.95rem"></sl-icon-button>
+			</sl-tooltip>
+			<!-- The span is Shoelace's own workaround: a tooltip on a disabled
+			     control never shows, and Install starts disabled. -->
+			<sl-tooltip id="mass-update-install-tip" content="No update available">
+				<span class="inline-flex">
+					<sl-icon-button id="mass-update-btn" name="download" label="Install update" disabled style="font-size:0.95rem"></sl-icon-button>
+				</span>
+			</sl-tooltip>
 		</div>
-	</div>
-	<div id="mass-update-warning" class="flex items-center gap-1" style="margin-left:5.5rem;display:none">
-		<sl-icon name="exclamation-triangle" style="color:var(--mass-warning);font-size:0.8rem"></sl-icon>
-		<span id="mass-update-warning-text" class="text-xs" style="color:var(--mass-warning)"></span>
 	</div>
 }
 
