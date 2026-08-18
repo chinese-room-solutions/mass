@@ -95,8 +95,11 @@ type DashboardData struct {
 	// DataDir is the raw configured value, bound to the Settings input — empty
 	// means "platform default". EffectiveDataDir is what MASS actually resolved
 	// it to at startup, shown in the About section.
+	// DefaultDataDir is where an empty DataDir resolves to on this platform,
+	// so the Settings panel can tell a pending change from a no-op.
 	DataDir          string
 	EffectiveDataDir string
+	DefaultDataDir   string
 	AuthTokenSet     bool
 	LogLevel         string // zerolog level name (e.g. "debug", "info")
 	Theme            string // "dark" or "light"

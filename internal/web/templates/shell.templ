@@ -1209,6 +1209,7 @@ templ settingsPanel(data DashboardData) {
 			<div>
 				<div class="flex items-end gap-2">
 					<sl-input
+						id="settings-data-dir"
 						class="flex-1"
 						label="Data Directory"
 						size="small"
@@ -1221,7 +1222,21 @@ templ settingsPanel(data DashboardData) {
 						Browse
 					</sl-button>
 				</div>
-				<div class="text-xs mt-1" style="color:var(--mass-text-muted)">Root directory for runtimes, models, and the database.</div>
+				<div class="text-xs mt-1" style="color:var(--mass-text-muted)">Root directory for runtimes, models, and the database. Restart required.</div>
+				<!-- MASS resolves the data directory once at startup, so a saved
+				     change has no effect until it restarts — and About keeps
+				     showing the directory actually in use. Without this the two
+				     panels disagree in silence, and emptying the configured
+				     folder does nothing visible. settings_autosave.js reveals it
+				     whenever the field resolves to something else. -->
+				<div
+					id="data-dir-restart"
+					class="text-xs mt-1 hidden"
+					style="color:var(--mass-warning)"
+					data-running={ data.EffectiveDataDir }
+					data-default={ data.DefaultDataDir }
+					data-configured={ data.DataDir }
+				></div>
 			</div>
 
 			<sl-input

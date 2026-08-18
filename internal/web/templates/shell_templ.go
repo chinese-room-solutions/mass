@@ -2061,7 +2061,46 @@ func settingsPanel(data DashboardData) templ.Component {
 			templ_7745c5c3_Var84 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 162, "<div class=\"max-w-lg space-y-6 p-6\"><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Server</h3><button id=\"settings-autosave-trigger\" style=\"display:none\" data-on:click=\"@post('/api/settings')\"></button> <sl-input label=\"Listen Address\" size=\"small\" data-bind=\"listenAddr\" placeholder=\":3455\" autocomplete=\"off\" help-text=\"HTTP listen address. Restart required.\"></sl-input><div><div class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Data Directory\" size=\"small\" data-bind=\"dataDir\" placeholder=\"Platform default\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('dataDir', {dirsOnly:true})\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div><div class=\"text-xs mt-1\" style=\"color:var(--mass-text-muted)\">Root directory for runtimes, models, and the database.</div></div><sl-input label=\"Result Cache TTL\" size=\"small\" data-bind=\"resultTTL\" placeholder=\"24h\" autocomplete=\"off\" help-text=\"How long completed job results are kept (e.g. 24h, 1h).\"></sl-input> <sl-input label=\"Idle Eviction TTL\" size=\"small\" data-bind=\"idleEvictionTTL\" placeholder=\"30s\" autocomplete=\"off\" help-text=\"How long a loaded model can sit idle before MASS unloads it (e.g. 30s, 5m).\"></sl-input> <sl-input label=\"Load Attempts\" size=\"small\" type=\"number\" min=\"1\" data-bind=\"loadAttempts\" placeholder=\"1\" autocomplete=\"off\" help-text=\"Total times to try placing a job before failing (1 = no retry). Raise this when the fleet sees transient load failures and you want MASS to try another worker before surfacing the error.\"></sl-input> <sl-input label=\"Registry URL\" size=\"small\" data-bind=\"registryURL\" placeholder=\"https://registry.example.com\" autocomplete=\"off\" help-text=\"Optional: package registry to discover runtimes from.\"></sl-input> <sl-select label=\"Log Level\" size=\"small\" hoist data-attr:value=\"$logLevel\" data-on:sl-change=\"$logLevel = evt.target.value\" help-text=\"MASS log verbosity. Applied immediately.\"><sl-option value=\"trace\">Trace</sl-option> <sl-option value=\"debug\">Debug</sl-option> <sl-option value=\"info\">Info</sl-option> <sl-option value=\"warn\">Warn</sl-option> <sl-option value=\"error\">Error</sl-option></sl-select> <sl-input id=\"auth-token-input\" label=\"Auth Token\" size=\"small\" data-bind=\"authToken\" type=\"password\" autocomplete=\"off\" data-on:focus=\"if (!$authTokenEdited) { $authTokenEdited = true; $authToken = '' }\" data-on:blur=\"if ($authTokenEdited && $authToken === '' && $authTokenSet) { $authTokenEdited = false; $authToken = '••••••••' }\" data-on:input=\"if ($authTokenEdited) $authTokenSet = $authToken.length > 0\" help-text=\"Leave empty for no auth (dev mode).\"><div slot=\"suffix\" style=\"display:flex;align-items:center;gap:6px;margin-right:var(--sl-input-spacing-small)\"><sl-icon-button data-show=\"$authTokenEdited && $authToken.length > 0\" name=\"eye\" id=\"auth-token-eye\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"var i=document.getElementById('auth-token-input');if(i.type==='password'){i.type='text';this.name='eye-slash'}else{i.type='password';this.name='eye'}\"></sl-icon-button></div></sl-input></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">TLS / SSL</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Enable TLS</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Encrypt worker and API communication. Restart required.</div></div><sl-switch size=\"small\" data-attr:checked=\"$tlsEnabled\" data-on:sl-change=\"$tlsEnabled = evt.target.checked\"></sl-switch></div><div data-show=\"$tlsEnabled\" class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Certificate PEM\" size=\"small\" data-bind=\"tlsCertFile\" placeholder=\"/path/to/server.pem\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('tlsCertFile','.pem')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Developer</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Developer Mode</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Show developer controls in the UI.</div></div><sl-switch size=\"small\" data-attr:checked=\"$devMode\" data-on:sl-change=\"$devMode = evt.target.checked\"></sl-switch></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">About</h3><div class=\"space-y-2\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 162, "<div class=\"max-w-lg space-y-6 p-6\"><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Server</h3><button id=\"settings-autosave-trigger\" style=\"display:none\" data-on:click=\"@post('/api/settings')\"></button> <sl-input label=\"Listen Address\" size=\"small\" data-bind=\"listenAddr\" placeholder=\":3455\" autocomplete=\"off\" help-text=\"HTTP listen address. Restart required.\"></sl-input><div><div class=\"flex items-end gap-2\"><sl-input id=\"settings-data-dir\" class=\"flex-1\" label=\"Data Directory\" size=\"small\" data-bind=\"dataDir\" placeholder=\"Platform default\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('dataDir', {dirsOnly:true})\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div><div class=\"text-xs mt-1\" style=\"color:var(--mass-text-muted)\">Root directory for runtimes, models, and the database. Restart required.</div><!-- MASS resolves the data directory once at startup, so a saved\n\t\t\t\t     change has no effect until it restarts — and About keeps\n\t\t\t\t     showing the directory actually in use. Without this the two\n\t\t\t\t     panels disagree in silence, and emptying the configured\n\t\t\t\t     folder does nothing visible. settings_autosave.js reveals it\n\t\t\t\t     whenever the field resolves to something else. --><div id=\"data-dir-restart\" class=\"text-xs mt-1 hidden\" style=\"color:var(--mass-warning)\" data-running=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var85 string
+		templ_7745c5c3_Var85, templ_7745c5c3_Err = templ.ResolveAttributeValue(data.EffectiveDataDir)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1236, Col: 41}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var85)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 163, "\" data-default=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var86 string
+		templ_7745c5c3_Var86, templ_7745c5c3_Err = templ.ResolveAttributeValue(data.DefaultDataDir)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1237, Col: 39}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var86)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "\" data-configured=\"")
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		var templ_7745c5c3_Var87 string
+		templ_7745c5c3_Var87, templ_7745c5c3_Err = templ.ResolveAttributeValue(data.DataDir)
+		if templ_7745c5c3_Err != nil {
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1238, Col: 35}
+		}
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var87)
+		if templ_7745c5c3_Err != nil {
+			return templ_7745c5c3_Err
+		}
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "\"></div></div><sl-input label=\"Result Cache TTL\" size=\"small\" data-bind=\"resultTTL\" placeholder=\"24h\" autocomplete=\"off\" help-text=\"How long completed job results are kept (e.g. 24h, 1h).\"></sl-input> <sl-input label=\"Idle Eviction TTL\" size=\"small\" data-bind=\"idleEvictionTTL\" placeholder=\"30s\" autocomplete=\"off\" help-text=\"How long a loaded model can sit idle before MASS unloads it (e.g. 30s, 5m).\"></sl-input> <sl-input label=\"Load Attempts\" size=\"small\" type=\"number\" min=\"1\" data-bind=\"loadAttempts\" placeholder=\"1\" autocomplete=\"off\" help-text=\"Total times to try placing a job before failing (1 = no retry). Raise this when the fleet sees transient load failures and you want MASS to try another worker before surfacing the error.\"></sl-input> <sl-input label=\"Registry URL\" size=\"small\" data-bind=\"registryURL\" placeholder=\"https://registry.example.com\" autocomplete=\"off\" help-text=\"Optional: package registry to discover runtimes from.\"></sl-input> <sl-select label=\"Log Level\" size=\"small\" hoist data-attr:value=\"$logLevel\" data-on:sl-change=\"$logLevel = evt.target.value\" help-text=\"MASS log verbosity. Applied immediately.\"><sl-option value=\"trace\">Trace</sl-option> <sl-option value=\"debug\">Debug</sl-option> <sl-option value=\"info\">Info</sl-option> <sl-option value=\"warn\">Warn</sl-option> <sl-option value=\"error\">Error</sl-option></sl-select> <sl-input id=\"auth-token-input\" label=\"Auth Token\" size=\"small\" data-bind=\"authToken\" type=\"password\" autocomplete=\"off\" data-on:focus=\"if (!$authTokenEdited) { $authTokenEdited = true; $authToken = '' }\" data-on:blur=\"if ($authTokenEdited && $authToken === '' && $authTokenSet) { $authTokenEdited = false; $authToken = '••••••••' }\" data-on:input=\"if ($authTokenEdited) $authTokenSet = $authToken.length > 0\" help-text=\"Leave empty for no auth (dev mode).\"><div slot=\"suffix\" style=\"display:flex;align-items:center;gap:6px;margin-right:var(--sl-input-spacing-small)\"><sl-icon-button data-show=\"$authTokenEdited && $authToken.length > 0\" name=\"eye\" id=\"auth-token-eye\" style=\"font-size:0.95rem;--sl-spacing-x-small:0.2rem\" data-on:click=\"var i=document.getElementById('auth-token-input');if(i.type==='password'){i.type='text';this.name='eye-slash'}else{i.type='password';this.name='eye'}\"></sl-icon-button></div></sl-input></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">TLS / SSL</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Enable TLS</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Encrypt worker and API communication. Restart required.</div></div><sl-switch size=\"small\" data-attr:checked=\"$tlsEnabled\" data-on:sl-change=\"$tlsEnabled = evt.target.checked\"></sl-switch></div><div data-show=\"$tlsEnabled\" class=\"flex items-end gap-2\"><sl-input class=\"flex-1\" label=\"Certificate PEM\" size=\"small\" data-bind=\"tlsCertFile\" placeholder=\"/path/to/server.pem\" autocomplete=\"off\"></sl-input> <sl-button size=\"small\" variant=\"default\" onclick=\"window.__massBrowse('tlsCertFile','.pem')\"><sl-icon slot=\"prefix\" name=\"folder2-open\"></sl-icon> Browse</sl-button></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\" data-mass-autosave><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">Developer</h3><div class=\"flex items-center justify-between\"><div><div class=\"text-sm font-medium\" style=\"color:var(--mass-text)\">Developer Mode</div><div class=\"text-xs\" style=\"color:var(--mass-text-muted)\">Show developer controls in the UI.</div></div><sl-switch size=\"small\" data-attr:checked=\"$devMode\" data-on:sl-change=\"$devMode = evt.target.checked\"></sl-switch></div></div><div class=\"rounded-lg p-5 space-y-4\" style=\"background:var(--mass-bg-panel);border:1px solid var(--mass-border)\"><h3 class=\"text-sm font-semibold uppercase tracking-wide\" style=\"color:var(--mass-text)\">About</h3><div class=\"space-y-2\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2081,7 +2120,7 @@ func settingsPanel(data DashboardData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 163, "</div></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 166, "</div></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2111,25 +2150,25 @@ func versionRow(version string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var85 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var85 == nil {
-			templ_7745c5c3_Var85 = templ.NopComponent
+		templ_7745c5c3_Var88 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var88 == nil {
+			templ_7745c5c3_Var88 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Version</span><div class=\"flex items-center gap-1.5 min-w-0\"><span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 167, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Version</span><div class=\"flex items-center gap-1.5 min-w-0\"><span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var86 string
-		templ_7745c5c3_Var86, templ_7745c5c3_Err = templ.JoinStringErrs(version)
+		var templ_7745c5c3_Var89 string
+		templ_7745c5c3_Var89, templ_7745c5c3_Err = templ.JoinStringErrs(version)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1370, Col: 99}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1385, Col: 99}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var86))
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var89))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "</span> <sl-tooltip id=\"mass-update-check-tip\" content=\"Check for updates\"><sl-icon-button id=\"mass-update-check-btn\" class=\"about-action\" name=\"arrow-clockwise\" label=\"Check for updates\" style=\"font-size:0.95rem\"></sl-icon-button></sl-tooltip><!-- The span is Shoelace's own workaround: a tooltip on a disabled\n\t\t\t     control never shows, and Install starts disabled. --><sl-tooltip id=\"mass-update-install-tip\" content=\"No update available\"><span class=\"inline-flex\"><sl-icon-button id=\"mass-update-btn\" class=\"about-action\" name=\"download\" label=\"Install update\" disabled style=\"font-size:0.95rem\"></sl-icon-button></span></sl-tooltip></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 168, "</span> <sl-tooltip id=\"mass-update-check-tip\" content=\"Check for updates\"><sl-icon-button id=\"mass-update-check-btn\" class=\"about-action\" name=\"arrow-clockwise\" label=\"Check for updates\" style=\"font-size:0.95rem\"></sl-icon-button></sl-tooltip><!-- The span is Shoelace's own workaround: a tooltip on a disabled\n\t\t\t     control never shows, and Install starts disabled. --><sl-tooltip id=\"mass-update-install-tip\" content=\"No update available\"><span class=\"inline-flex\"><sl-icon-button id=\"mass-update-btn\" class=\"about-action\" name=\"download\" label=\"Install update\" disabled style=\"font-size:0.95rem\"></sl-icon-button></span></sl-tooltip></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2157,39 +2196,39 @@ func aboutRow(label, value string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var87 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var87 == nil {
-			templ_7745c5c3_Var87 = templ.NopComponent
+		templ_7745c5c3_Var90 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var90 == nil {
+			templ_7745c5c3_Var90 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
 		if value != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 166, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">")
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 169, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var88 string
-			templ_7745c5c3_Var88, templ_7745c5c3_Err = templ.JoinStringErrs(label)
+			var templ_7745c5c3_Var91 string
+			templ_7745c5c3_Var91, templ_7745c5c3_Err = templ.JoinStringErrs(label)
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1392, Col: 118}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1407, Col: 118}
 			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var88))
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 167, "</span> <span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var91))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var89 string
-			templ_7745c5c3_Var89, templ_7745c5c3_Err = templ.JoinStringErrs(value)
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1393, Col: 97}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var89))
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 170, "</span> <span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 168, "</span></div>")
+			var templ_7745c5c3_Var92 string
+			templ_7745c5c3_Var92, templ_7745c5c3_Err = templ.JoinStringErrs(value)
+			if templ_7745c5c3_Err != nil {
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/web/templates/shell.templ`, Line: 1408, Col: 97}
+			}
+			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var92))
+			if templ_7745c5c3_Err != nil {
+				return templ_7745c5c3_Err
+			}
+			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 171, "</span></div>")
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -2224,12 +2263,12 @@ func tabLoadingSpinner() templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var90 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var90 == nil {
-			templ_7745c5c3_Var90 = templ.NopComponent
+		templ_7745c5c3_Var93 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var93 == nil {
+			templ_7745c5c3_Var93 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 169, "<div class=\"flex items-center justify-center py-12\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 172, "<div class=\"flex items-center justify-center py-12\"><sl-spinner style=\"font-size:1.5rem;--track-width:3px\"></sl-spinner></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

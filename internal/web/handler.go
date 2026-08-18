@@ -356,6 +356,9 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// count or worker fleet size. Runtimes is rendered inline because it's
 	// already cheap (just a manifest list, no RPCs).
 	theme := string(uikit.ParseTheme(h.cfg.Theme))
+	// Best-effort: an unresolvable default only costs the Settings panel its
+	// "restart to apply" notice for the empty (platform-default) case.
+	defaultDataDir, _ := config.DefaultDataDir()
 	data := templates.DashboardData{
 		Theme:            theme,
 		Version:          h.version,
@@ -363,6 +366,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		LogsDir:          h.logsDir,
 		DataDir:          h.cfg.DataDir,
 		EffectiveDataDir: h.dataDir,
+		DefaultDataDir:   defaultDataDir,
 		ListenAddr:       h.cfg.ListenAddr,
 		AuthTokenSet:     func() bool { h.authHashMu.RLock(); defer h.authHashMu.RUnlock(); return len(h.authHash) > 0 }(),
 		LogLevel:         logLevelString(h.cfg.Logger.Level),
