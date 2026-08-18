@@ -37,6 +37,11 @@ sl-details.queue-card::part(content)  { background: var(--mass-bg-base); }
    the priority chip below. */
 sl-icon-button.queue-row-action::part(base) { padding: 0; }
 
+/* ── About row action icons — same trick: with no internal padding the gap
+   between Check and Install is the row's own gap, matching the one after the
+   version string rather than doubling it. */
+sl-icon-button.about-action::part(base) { padding: 0; }
+
 /* ── App rows ────────────────────────────────────────────────────────────── */
 .mass-row-hover:hover { background: var(--mass-bg-hover)  !important; }
 .mass-row-active      { background: var(--mass-bg-active) !important; }

@@ -2116,7 +2116,7 @@ func versionRow(version string) templ.Component {
 			templ_7745c5c3_Var85 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Version</span><div class=\"flex items-center gap-1 min-w-0\"><span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 164, "<div class=\"flex items-baseline gap-3\"><span class=\"text-xs flex-shrink-0 whitespace-nowrap\" style=\"color:var(--mass-text-faint);min-width:5.5rem\">Version</span><div class=\"flex items-center gap-1.5 min-w-0\"><span class=\"text-xs font-mono break-all min-w-0\" style=\"color:var(--mass-text-muted)\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -2129,7 +2129,7 @@ func versionRow(version string) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "</span> <sl-tooltip id=\"mass-update-check-tip\" content=\"Check for updates\"><sl-icon-button id=\"mass-update-check-btn\" name=\"arrow-clockwise\" label=\"Check for updates\" style=\"font-size:0.95rem\"></sl-icon-button></sl-tooltip><!-- The span is Shoelace's own workaround: a tooltip on a disabled\n\t\t\t     control never shows, and Install starts disabled. --><sl-tooltip id=\"mass-update-install-tip\" content=\"No update available\"><span class=\"inline-flex\"><sl-icon-button id=\"mass-update-btn\" name=\"download\" label=\"Install update\" disabled style=\"font-size:0.95rem\"></sl-icon-button></span></sl-tooltip></div></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 165, "</span> <sl-tooltip id=\"mass-update-check-tip\" content=\"Check for updates\"><sl-icon-button id=\"mass-update-check-btn\" class=\"about-action\" name=\"arrow-clockwise\" label=\"Check for updates\" style=\"font-size:0.95rem\"></sl-icon-button></sl-tooltip><!-- The span is Shoelace's own workaround: a tooltip on a disabled\n\t\t\t     control never shows, and Install starts disabled. --><sl-tooltip id=\"mass-update-install-tip\" content=\"No update available\"><span class=\"inline-flex\"><sl-icon-button id=\"mass-update-btn\" class=\"about-action\" name=\"download\" label=\"Install update\" disabled style=\"font-size:0.95rem\"></sl-icon-button></span></sl-tooltip></div></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

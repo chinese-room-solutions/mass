@@ -1366,16 +1366,16 @@ templ settingsPanel(data DashboardData) {
 templ versionRow(version string) {
 	<div class="flex items-baseline gap-3">
 		<span class="text-xs flex-shrink-0 whitespace-nowrap" style="color:var(--mass-text-faint);min-width:5.5rem">Version</span>
-		<div class="flex items-center gap-1 min-w-0">
+		<div class="flex items-center gap-1.5 min-w-0">
 			<span class="text-xs font-mono break-all min-w-0" style="color:var(--mass-text-muted)">{ version }</span>
 			<sl-tooltip id="mass-update-check-tip" content="Check for updates">
-				<sl-icon-button id="mass-update-check-btn" name="arrow-clockwise" label="Check for updates" style="font-size:0.95rem"></sl-icon-button>
+				<sl-icon-button id="mass-update-check-btn" class="about-action" name="arrow-clockwise" label="Check for updates" style="font-size:0.95rem"></sl-icon-button>
 			</sl-tooltip>
 			<!-- The span is Shoelace's own workaround: a tooltip on a disabled
 			     control never shows, and Install starts disabled. -->
 			<sl-tooltip id="mass-update-install-tip" content="No update available">
 				<span class="inline-flex">
-					<sl-icon-button id="mass-update-btn" name="download" label="Install update" disabled style="font-size:0.95rem"></sl-icon-button>
+					<sl-icon-button id="mass-update-btn" class="about-action" name="download" label="Install update" disabled style="font-size:0.95rem"></sl-icon-button>
 				</span>
 			</sl-tooltip>
 		</div>
