@@ -35,7 +35,7 @@ Every request carries `X-Mass-Actor: cli` for audit attribution.
 
 When the address comes from the local config (no `--addr`, no `$MASS_ADDR`)
 and nothing answers there, the CLI starts a local daemon on demand — detached,
-retiring itself after 2 minutes without client traffic — so verbs work on a
+retiring itself after 10 seconds without client traffic — so verbs work on a
 machine where MASS isn't running yet. Expect the first such call to take a few
 seconds. An explicit `--addr` or `$MASS_ADDR` names a specific server and is
 never booted into existence.

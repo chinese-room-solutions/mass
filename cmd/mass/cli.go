@@ -100,7 +100,7 @@ Flags (every command that reaches the server):
   --timeout dur     request timeout (default 60s; benchmark 10m)
 
 A server command aimed at the local config's address starts the daemon on
-demand when none is running (detached, retiring after 2m idle). An explicit
+demand when none is running (detached, retiring after 10s idle). An explicit
 --addr or $MASS_ADDR never does. "serve" runs the daemon itself; "skill"
 reaches no server and takes only --json.
 `, commandList())

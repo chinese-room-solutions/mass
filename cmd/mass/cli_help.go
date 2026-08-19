@@ -26,8 +26,10 @@ Run the MASS daemon — API, dashboard, worker hub, runtime gateways — in the
 foreground, with no window. This is what a server or a container runs;
 Ctrl-C / SIGTERM stops it. With --idle-timeout the daemon retires itself
 after that long with no client traffic (worker connections don't count) —
-the GUI and the other verbs spawn it this way, detached with 2m, when no
-daemon answers on the configured address. 0 (the default) never retires.`},
+the GUI and the other verbs spawn it this way, detached with 10s, when no
+daemon answers on the configured address — short because a running daemon
+holds the executable open, and an update cannot replace it until it retires.
+0 (the flag default) never retires.`},
 
 	{"status", "status", "orchestrator health overview", false, `
 One-line summary of the orchestrator: version, listen address, how many

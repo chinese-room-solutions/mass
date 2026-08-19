@@ -79,7 +79,7 @@ cd mass
 make run          # build web assets + binary, then start bin/mass
 ```
 
-MASS starts as a desktop app: a native window over the dashboard, plus a tray icon (minimizing folds to the tray, Quit closes the window). The window is a thin client — the backend runs as a separate daemon the window attaches to, starting one on demand if none is running. A daemon started this way retires itself after 2 minutes without clients; on a server, run `mass serve` for a permanent one with no window — or `make build-headless` for a CGO-free static binary with no GUI at all — and open the dashboard in a browser instead.
+MASS starts as a desktop app: a native window over the dashboard, plus a tray icon (minimizing folds to the tray, Quit closes the window). The window is a thin client — the backend runs as a separate daemon the window attaches to, starting one on demand if none is running. A daemon started this way retires itself after 10 seconds without clients (a running daemon holds the executable open, so an update cannot replace it until it retires); on a server, run `mass serve` for a permanent one with no window — or `make build-headless` for a CGO-free static binary with no GUI at all — and open the dashboard in a browser instead.
 
 MASS loads its config from the user config dir (e.g. `~/.config/mass/config.yml`), writing defaults on first run. Then, in the dashboard at `http://localhost:3455`:
 
