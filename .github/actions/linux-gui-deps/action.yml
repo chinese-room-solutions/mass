@@ -17,9 +17,27 @@ runs:
         # which presents as a step that hangs for the entire job instead of
         # failing. Callers pair this with a step timeout-minutes (composite steps
         # cannot set their own).
-        sudo apt-get -o DPkg::Lock::Timeout=180 update
-        sudo apt-get -o DPkg::Lock::Timeout=180 install -y --no-install-recommends \
-          libgtk-3-dev libwebkit2gtk-4.1-dev
+        aptget() { sudo apt-get -o DPkg::Lock::Timeout=180 "$@"; }
+
+        # webkit2gtk pulls ~200 MB of hard dependencies, and the runner's default
+        # mirror (azure.archive.ubuntu.com) intermittently serves them at a few
+        # kB/s. That is not an apt error — it is a download that simply doesn't
+        # finish, so without a bound it burns the caller's whole timeout and the
+        # step is killed mid-transfer with nothing to retry. `timeout` turns it
+        # into a failure we can act on: fall back to the generic archive, which
+        # is a different CDN, and try once more inside the same budget.
+        install() {
+          timeout 120 aptget update || return 1
+          timeout 240 aptget install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
+        }
+        if ! install; then
+          echo "::warning::apt was too slow on the default mirror; retrying on archive.ubuntu.com"
+          sudo sed -i 's|https\?://[a-z0-9.-]*archive\.ubuntu\.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          install
+        fi
+
         # Assert the modules resolve here, where they are provisioned: Ubuntu's
         # pkg-config is pkgconf, which exits 1 with NO message on a missing
         # module, so a half-provisioned runner otherwise surfaces as an
