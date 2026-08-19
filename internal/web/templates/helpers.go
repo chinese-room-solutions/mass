@@ -83,6 +83,7 @@ var (
 	installScript          = "<script>" + installJS + "</script>"
 	updateScript           = "<script>" + updateJS + "</script>"
 	alertScript            = "<script>" + uikit.AlertJS + "</script>"
+	reloadScript           = "<script>" + uikit.ReloadJS + "</script>"
 )
 
 // DashboardData holds all data needed to render the main dashboard shell.
