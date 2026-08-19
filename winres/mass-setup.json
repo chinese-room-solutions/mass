@@ -6,16 +6,7 @@
   },
   "RT_MANIFEST": {
     "#1": {
-      "0409": {
-        "identity": {
-          "name": "MASS",
-          "version": "0.1.0.0"
-        },
-        "description": "MASS - Modular AI Scheduling Service",
-        "minimum-os": "win10",
-        "execution-level": "as invoker",
-        "dpi-awareness": "per monitor v2"
-      }
+      "0409": "../cmd/mass-setup/mass-setup.exe.manifest"
     }
   },
   "RT_VERSION": {
@@ -28,10 +19,10 @@
         "info": {
           "0409": {
             "CompanyName": "Chinese Room Solutions",
-            "FileDescription": "MASS - Modular AI Scheduling Service",
+            "FileDescription": "MASS Setup - installs MASS",
             "FileVersion": "0.1.0",
-            "InternalName": "mass",
-            "OriginalFilename": "mass.exe",
+            "InternalName": "mass-setup",
+            "OriginalFilename": "mass-setup.exe",
             "ProductName": "MASS",
             "ProductVersion": "0.1.0"
           }

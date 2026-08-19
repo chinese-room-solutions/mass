@@ -7,14 +7,15 @@
 // wizard; pass flags (--install / --uninstall + --install-dir/--data-dir/...)
 // to do the same non-interactively for scripted/fleet installs.
 //
-// Windows hosting note: rsrc_windows_amd64.syso embeds an asInvoker +
-// supportedOS(Win10/11) manifest (generated from mass-setup.exe.manifest via
-// windres). WITHOUT it, a double-clicked manifest-less console exe is treated as
-// legacy under the "Let Windows decide" default-terminal setting and hosted by
-// conhost, which draws a fixed, non-themeable gray scrollbar gutter. WITH the
-// manifest, Windows routes it to Windows Terminal, whose scrollbar auto-hides and
-// is theme-tinted — so the full-window indigo card reads clean. (It also stops
-// the "*setup*"-name installer-detection heuristic from auto-elevating.)
+// Windows hosting note: the committed rsrc_windows_*.syso embed an asInvoker +
+// supportedOS(Win10/11) manifest, built from mass-setup.exe.manifest by
+// `make winres`. WITHOUT it, a double-clicked manifest-less console exe is
+// treated as legacy under the "Let Windows decide" default-terminal setting and
+// hosted by conhost, which draws a fixed, non-themeable gray scrollbar gutter.
+// WITH the manifest, Windows routes it to Windows Terminal, whose scrollbar
+// auto-hides and is theme-tinted — so the full-window indigo card reads clean.
+// (It also stops the "*setup*"-name installer-detection heuristic from
+// auto-elevating.)
 package main
 
 import (

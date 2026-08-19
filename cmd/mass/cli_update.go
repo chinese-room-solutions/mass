@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,8 +20,7 @@ import (
 
 // cmdUpdate dispatches `mass update [--apply] [--force]`: report whether a
 // newer release is available — and what applying it would cost the fleet — and
-// with --apply install it. The check itself ran at daemon startup, so this
-// reads an answer rather than asking for one.
+// with --apply install it.
 func cmdUpdate(args []string) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	apply := fs.Bool("apply", false, "install the available update and restart MASS")
@@ -40,12 +40,20 @@ func cmdUpdate(args []string) int {
 	return updateCheck(ctx, c)
 }
 
-// updateCheck prints the stored answer: the running build, any newer tag, and
-// the fleet the candidate would strand.
+// updateCheck asks the daemon to check now and prints the answer: the running
+// build, any newer tag, and the fleet the candidate would strand. It pays for a
+// live check rather than reading the daemon's cached one — a report that is
+// stale, or that was never taken because the daemon started a second ago, is
+// worse than a slow one.
 func updateCheck(ctx context.Context, c *commonFlags) int {
 	var st web.UpdateCheckResponse
-	if err := updateRequest(ctx, c, http.MethodGet, "/api/update/check", nil, &st); err != nil {
+	if err := updateRequest(ctx, c, http.MethodPost, "/api/update/check", nil, &st); err != nil {
 		return fail(c, err)
+	}
+	// The check can fail without the request failing: the daemon is fine, the
+	// release host is not. Say which, and don't exit 0 on an answer nobody got.
+	if st.Err != "" {
+		return fail(c, errors.New(st.Err))
 	}
 	if c.json {
 		return printAnyJSON(st)

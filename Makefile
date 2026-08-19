@@ -456,3 +456,22 @@ help:
 	@echo ""
 
 endif
+
+# -- Windows resources -------------------------------------------------------
+#
+# The committed rsrc_windows_*.syso carry each exe's icon, version info, and
+# manifest (mass-setup's asInvoker + Win10/11 manifest is what keeps a
+# double-click out of legacy conhost -- see cmd/mass-setup/main.go). `go build`
+# links whatever .syso sits in the main package, so they are committed rather
+# than generated at build time: a release built anywhere else would otherwise
+# ship an iconless, manifest-less exe. Regenerate when internal/icon/icon.png or
+# a manifest changes.
+#
+# Each config must name the icon as a plain string, not a one-element list: the
+# list form embeds exactly the images given, and a lone 256px icon leaves the
+# shell to downscale it for every 16 and 32px slot. As a string, go-winres
+# resizes it into the size ladder Windows picks from.
+.PHONY: winres
+winres:
+	go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out cmd/mass/rsrc
+	go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/mass-setup.json --out cmd/mass-setup/rsrc

@@ -179,6 +179,15 @@ func startGateway(ctx context.Context, mf Manifest, binaryPath string, dataDir, 
 		return nil, ctxerr.With(fmt.Errorf("dialing gateway plugin: %w", err), map[string]any{"runtime_name": mf.RuntimeName, "binary": binaryPath})
 	}
 
+	// Bind the gateway's lifetime to ours where the OS can enforce it, so a
+	// MASS that dies without running Shutdown doesn't strand it. Advisory:
+	// a runtime that works is better than one refused over a missing guard.
+	if cmd.Process != nil {
+		if err := superviseChild(cmd.Process.Pid); err != nil {
+			gwLogger.Warn().Err(err).Msg("gateway not tied to MASS's lifetime; it can outlive an abnormal exit")
+		}
+	}
+
 	raw, err := rpcClient.Dispense(PluginName)
 	if err != nil {
 		pluginClient.Kill()

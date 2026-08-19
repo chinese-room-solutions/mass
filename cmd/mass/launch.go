@@ -27,11 +27,12 @@ import (
 
 const (
 	// spawnedIdleTimeout is how long a launcher-spawned daemon stays up after
-	// its last client traffic before retiring itself, so an on-demand
-	// instance doesn't linger. An attached GUI window holds its control
-	// channel open the whole time; an agent working the CLI keeps resetting
-	// it; the next call after expiry just respawns it.
-	spawnedIdleTimeout = 2 * time.Minute
+	// its last client traffic before retiring itself. Short because a running
+	// daemon holds the executable open, so an update can't replace it until
+	// this elapses. An attached GUI window holds its control channel open the
+	// whole time; an agent working the CLI keeps resetting it; the next call
+	// after expiry just respawns it.
+	spawnedIdleTimeout = 10 * time.Second
 
 	// launchTimeout bounds how long a caller waits for a freshly spawned
 	// daemon to answer its ping; opening the database and binding the

@@ -26,8 +26,10 @@ Run the MASS daemon — API, dashboard, worker hub, runtime gateways — in the
 foreground, with no window. This is what a server or a container runs;
 Ctrl-C / SIGTERM stops it. With --idle-timeout the daemon retires itself
 after that long with no client traffic (worker connections don't count) —
-the GUI and the other verbs spawn it this way, detached with 2m, when no
-daemon answers on the configured address. 0 (the default) never retires.`},
+the GUI and the other verbs spawn it this way, detached with 10s, when no
+daemon answers on the configured address — short because a running daemon
+holds the executable open, and an update cannot replace it until it retires.
+0 (the flag default) never retires.`},
 
 	{"status", "status", "orchestrator health overview", false, `
 One-line summary of the orchestrator: version, listen address, how many
@@ -158,8 +160,9 @@ overwritten: reinstalling after an upgrade is how the instructions stay in step
 with the verbs. Reaches no server, so it works on a fresh install.`},
 
 	{"update", "update [--apply] [--force]", "check for a newer MASS, or install it", false, `
-Report whether a newer MASS release is available. The daemon checks once at
-startup, so this reads that answer rather than going to the network. It also
+Report whether a newer MASS release is available. The daemon asks the release
+repository when you run this, so the answer is never stale; a repository it
+can't reach is an error (exit 1) rather than a quiet "up to date". It also
 reports how many connected workers the registry index says the new build would
 strand — a stranded worker is rejected at Register, exits, and stays down until
 it is upgraded.
