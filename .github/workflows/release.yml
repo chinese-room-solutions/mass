@@ -59,8 +59,9 @@ jobs:
       - name: Install Linux GUI deps
         if: runner.os == 'Linux'
         # Bounded, so a stuck apt fails the step in minutes instead of hanging
-        # the job. Covers the action's own 180s lock wait twice over.
-        timeout-minutes: 8
+        # the job. Room for the action's two bounded attempts (6 min each) plus
+        # its 180s lock wait.
+        timeout-minutes: 14
         uses: ./.github/actions/linux-gui-deps
       - uses: actions/setup-node@v7
         with:

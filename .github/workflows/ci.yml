@@ -34,8 +34,9 @@ jobs:
         run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
       - name: Install Linux GUI deps
         # Bounded, so a stuck apt fails the step in minutes instead of hanging
-        # the job. Covers the action's own 180s lock wait twice over.
-        timeout-minutes: 8
+        # the job. Room for the action's two bounded attempts (6 min each) plus
+        # its 180s lock wait.
+        timeout-minutes: 14
         uses: ./.github/actions/linux-gui-deps
       - uses: actions/setup-node@v7
         with:
@@ -63,8 +64,9 @@ jobs:
         run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
       - name: Install Linux GUI deps
         # Bounded, so a stuck apt fails the step in minutes instead of hanging
-        # the job. Covers the action's own 180s lock wait twice over.
-        timeout-minutes: 8
+        # the job. Room for the action's two bounded attempts (6 min each) plus
+        # its 180s lock wait.
+        timeout-minutes: 14
         uses: ./.github/actions/linux-gui-deps
       # make test needs no web assets: the embedded public/ dir compiles
       # without dist.css and the auth tests stub the file handler.
@@ -83,8 +85,9 @@ jobs:
         run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
       - name: Install Linux GUI deps
         # Bounded, so a stuck apt fails the step in minutes instead of hanging
-        # the job. Covers the action's own 180s lock wait twice over.
-        timeout-minutes: 8
+        # the job. Room for the action's two bounded attempts (6 min each) plus
+        # its 180s lock wait.
+        timeout-minutes: 14
         uses: ./.github/actions/linux-gui-deps
       # Build golangci-lint from source with this repo's Go (via `make lint`)
       # rather than golangci-lint-action's prebuilt binary — the prebuilt one is
@@ -104,8 +107,9 @@ jobs:
         run: git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
       - name: Install Linux GUI deps
         # Bounded, so a stuck apt fails the step in minutes instead of hanging
-        # the job. Covers the action's own 180s lock wait twice over.
-        timeout-minutes: 8
+        # the job. Room for the action's two bounded attempts (6 min each) plus
+        # its 180s lock wait.
+        timeout-minutes: 14
         uses: ./.github/actions/linux-gui-deps
       # Run govulncheck against the Go + module/build cache that setup-go already
       # warmed, instead of golang/govulncheck-action (which installs its own Go
