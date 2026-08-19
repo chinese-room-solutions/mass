@@ -18,18 +18,39 @@ runs:
         # with an error instead of consuming the caller's timeout-minutes; it is
         # a binary, so it wraps apt-get itself rather than a function around it,
         # and runs under sudo so it can signal what it started.
-        aptget() { local secs="$1"; shift; sudo timeout "$secs" apt-get -o DPkg::Lock::Timeout=180 "$@"; }
+        aptget() {
+          local secs="$1"; shift
+          sudo timeout "$secs" apt-get \
+            -o DPkg::Lock::Timeout=180 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@"
+        }
         deps="libgtk-3-dev libwebkit2gtk-4.1-dev"
+        install() { aptget 480 install -y --no-install-recommends $deps; }
 
-        # Install from the index the runner image ships with, and only refresh it
+        # Install from the index the runner image ships with, and refresh it only
         # if that index is too stale to resolve the packages. `apt-get update`
         # re-fetches every suite's metadata, which is the single slowest thing
         # here whenever the Ubuntu archive is degraded — and it is pure overhead
         # on a runner whose index is hours old.
-        if ! aptget 600 install -y --no-install-recommends $deps; then
+        #
+        # Which recovery to attempt turns on the exit code. 124 is timeout(1):
+        # apt resolved the packages fine and was fetching them, just too slowly
+        # to finish — webkit2gtk pulls ~200 MB and the image's default mirror
+        # (azure.archive.ubuntu.com) intermittently serves it at a few kB/s.
+        # Refreshing the index there only burns more of the budget on the mirror
+        # that is already the problem; dropping it from the runner's mirrorlist
+        # sends the retry to the generic archive instead. The sources entry is
+        # `mirror+file:/etc/apt/apt-mirrors.txt`, so the fetched index stays
+        # valid across the swap and the retry starts downloading immediately.
+        rc=0
+        install || rc=$?
+        if [ "$rc" -eq 124 ]; then
+          echo "::warning::apt was too slow on the runner's mirror; retrying on archive.ubuntu.com"
+          echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          install
+        elif [ "$rc" -ne 0 ]; then
           echo "::warning::preinstalled apt index did not resolve $deps; refreshing"
-          aptget 300 update
-          aptget 600 install -y --no-install-recommends $deps
+          aptget 240 update
+          install
         fi
 
         # Assert the modules resolve here, where they are provisioned: Ubuntu's
