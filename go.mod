@@ -48,7 +48,7 @@ require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chinese-room-solutions/mass-sdk v0.4.3-0.20260920194838-1ce3b9e1d8f8
+	github.com/chinese-room-solutions/mass-sdk v0.4.3
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.16.0 // indirect
